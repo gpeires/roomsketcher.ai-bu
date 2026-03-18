@@ -29,7 +29,7 @@ This spec adds a guidance layer that makes the happy path fast and beautiful, wh
 
 ### Overview
 
-Six MCP Prompts containing full FloorPlan JSON templates. The agent silently browses, picks the closest match, adapts to the user's request, and presents the finished result. The user never sees template names or knows one was used.
+Six floor plan templates the agent uses as starting points. The agent silently picks the closest match, adapts to the user's request, and presents the finished result. The user never sees template names or knows one was used.
 
 ### Templates
 
@@ -69,15 +69,20 @@ src/sketch/templates/
 
 ### MCP Registration
 
-Registered as MCP Prompts in `src/index.ts`. The agent can:
-- List available templates (prompt listing)
-- Get a specific template (prompt get with template ID argument)
+Two new MCP tools in `src/index.ts`:
+
+- **`list_templates`** — Returns the template catalog (ID, description, room count, approx size). No parameters. The agent calls this to find the closest match to the user's request.
+- **`get_template`** — Takes a `template_id` string, returns the full FloorPlan JSON. The agent uses this as a starting point, adapts it, then passes the modified JSON to `generate_floor_plan`.
+
+Additionally, `generate_floor_plan` gains an optional `template` parameter. When provided, the tool loads the template JSON, allowing the agent to skip the separate `get_template` call for simple cases.
+
+Why tools instead of MCP Prompts: Prompts are client-initiated (invoked from UI menus in Claude Desktop, Cursor, etc.), not agent-initiated. The agent cannot programmatically call `prompts/get` mid-conversation. Tools are the correct primitive for agent-browsable data.
 
 ### Agent Workflow
 
 The enriched `generate_floor_plan` description directs the agent:
 
-> "Always start from the nearest template. Browse templates, pick the closest match, then adapt dimensions, add/remove rooms, and adjust openings and furniture to match the user's request. Never generate coordinates from a blank canvas."
+> "Always start from the nearest template. Call list_templates, pick the closest match, then adapt dimensions, add/remove rooms, and adjust openings and furniture to match the user's request. Never generate coordinates from a blank canvas."
 
 The agent adapts by:
 1. Scaling dimensions to match requested size
@@ -159,7 +164,25 @@ Furniture renders as labeled rectangles in `floorPlanToSvg()`:
 - Light gray fill (#F5F5F5) with a subtle border (#BDBDBD)
 - Item label centered inside in small text
 - Rotation applied via SVG transform
-- Z-order: rooms (bottom) -> furniture -> walls (top) -> labels
+- Z-order (complete): rooms -> furniture -> walls -> openings -> dimensions -> watermark
+  - Openings must render above walls for white gap lines to work correctly
+
+### Furniture Change Types
+
+Three new change types added to the `ChangeSchema` discriminated union in `types.ts`:
+
+| Change | Fields |
+|--------|--------|
+| `add_furniture` | furniture item object (uses `FurnitureItemSchema`) |
+| `move_furniture` | furniture_id, position?, rotation? |
+| `remove_furniture` | furniture_id |
+
+These enable:
+- The `update_sketch` tool to add/move/remove furniture after initial generation
+- The WebSocket protocol to transmit furniture changes from the browser sketcher
+- Future drag-and-drop furniture in the browser UI
+
+`applyChanges()` in `changes.ts` is extended to handle these three new types.
 
 ### Extension Points
 
@@ -178,7 +201,7 @@ The description becomes a compact cheat sheet. It contains principles, not full 
 **Contents:**
 
 1. **Workflow directive:**
-   > "Always browse templates first via MCP prompts. Pick the closest match to the user's request, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas."
+   > "Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas."
 
 2. **Standard dimensions reference:**
    - Exterior walls: 20cm thick. Interior: 10cm. Divider: 5cm.
@@ -204,6 +227,8 @@ The description becomes a compact cheat sheet. It contains principles, not full 
    > "Place essential furniture in every room using the furniture catalog. Arrange furniture along walls with 60cm walking clearance between items."
 
 6. **One compact example** (trimmed studio) showing JSON shape only.
+
+**Description size consideration:** The enriched description will be ~4-5KB, sent on every `tools/list` call. This is acceptable for the current tool count. If it becomes a concern, the reference material (dimensions, palette) can be moved to an MCP Resource the agent reads on demand, with the description linking to it.
 
 ### `update_sketch` Description
 
@@ -234,20 +259,35 @@ Updated to reflect the new opinionated output format (Section 6).
 | `metadata.created_at` | Already auto-filled, make optional in schema |
 | `metadata.updated_at` | Already auto-filled, make optional in schema |
 
-### Implementation
+### Implementation: Two-Schema Approach
 
-1. Zod schema fields get `.optional().default(...)` where the default is static, or `.optional()` where it's computed.
-2. A `applyDefaults(plan: Partial<FloorPlan>): FloorPlan` function in a new file `src/sketch/defaults.ts` fills computed defaults (canvas from walls, color from room type, thickness from wall type).
-3. `handleGenerateFloorPlan` calls `applyDefaults()` before validation.
-4. All defaults defined in a `DEFAULTS` config object at the top of `defaults.ts` for easy modification.
+The existing `FloorPlanSchema`, `WallSchema`, `RoomSchema` etc. remain **unchanged** — they are the strict runtime/storage schema. All existing code (browser sketcher, changes.ts, svg.ts, persistence.ts) continues to work with fully-typed required fields.
+
+New **input schemas** are added alongside them:
+
+1. `WallInputSchema` — like `WallSchema` but `thickness`, `height` optional
+2. `RoomInputSchema` — like `RoomSchema` but `color` optional
+3. `OpeningInputSchema` — like `OpeningSchema` but `properties` fields all optional
+4. `FloorPlanInputSchema` — uses input sub-schemas, `canvas` and `metadata` optional
+
+These input schemas are used **only** in the `generate_floor_plan` tool's `inputSchema`.
+
+**Two-phase validation:**
+
+1. Validate agent input against `FloorPlanInputSchema` (catches structural errors on the relaxed schema)
+2. Run `applyDefaults(input): FloorPlan` — fills all optional fields using the defaults table above, producing a fully-populated `FloorPlan`
+3. The result conforms to the strict `FloorPlanSchema` and is safe for storage, SVG rendering, browser sketcher, and WebSocket broadcast
+
+`applyDefaults()` lives in `src/sketch/defaults.ts` with all defaults in a `DEFAULTS` config object at the top for easy modification.
 
 ### Impact
 
-- Wall: 7 required fields -> 4 (`id`, `start`, `end`, `type`)
-- Room: 6 required fields -> 4 (`id`, `label`, `type`, `polygon`)
-- Opening: properties object becomes fully optional
-- Canvas: fully optional (auto-computed)
-- Metadata: fully optional (auto-filled)
+- Wall input: 7 required fields -> 4 (`id`, `start`, `end`, `type`)
+- Room input: 6 required fields -> 4 (`id`, `label`, `type`, `polygon`)
+- Opening input: properties object becomes fully optional
+- Canvas input: fully optional (auto-computed from wall bounding box + 100cm padding)
+- Metadata input: fully optional (auto-filled)
+- **Runtime schema unchanged** — no type errors, no breaking changes anywhere in the codebase
 
 ---
 
@@ -309,7 +349,13 @@ interface SessionCTAState {
 
 ### A/B Testing
 
-The `variant` field in settings selects which CTA copy is active. Deploying a new variant = changing one string in `cta-config.ts`. Future: variant driven by query param, cookie, or external config service.
+The active variant is read from `env.CTA_VARIANT` (Cloudflare Workers environment variable), falling back to `settings.variant` in the config file. This means switching variants requires only a `wrangler secret` or dashboard change — no code redeploy.
+
+### Session State Lifetime
+
+`SessionCTAState` is tracked in the MCP DO's `SketchSession` state, which persists in DO SQLite. This means CTA counters persist across conversations with the same DO instance. This is intentional — we don't want to spam a returning user. Counters reset naturally when a new sketch is created (new DO instance).
+
+`toolCallCount` is incremented by a lightweight wrapper in each tool handler (or a shared `withCTA()` higher-order function that wraps tool handlers).
 
 ### UTM Structure
 
@@ -366,6 +412,10 @@ REVIEW THESE AREAS (use your architectural knowledge to evaluate):
 
 The agent reads this data, applies reasoning, and presents 2-4 specific suggestions to the user with proposed fixes.
 
+### Furniture-to-Room Assignment
+
+Furniture items have a `position` but no `room_id`. To report furniture per room, the tool uses point-in-polygon testing against room polygons. The `geometry.ts` module already has `shoelaceArea()` — a `pointInPolygon(point, polygon)` function is added alongside it. Furniture items that fall outside all room polygons are reported separately as "unassigned."
+
 ### CTA Integration
 
 After the analysis, `pickCTA("suggest_improvements", sessionState)` is called. If a CTA is returned, it's appended to the output as a contextual nudge.
@@ -392,10 +442,12 @@ After the analysis, `pickCTA("suggest_improvements", sessionState)` is called. I
 
 | File | Changes |
 |------|---------|
-| `src/sketch/types.ts` | Make fields optional with defaults per Section 4 |
+| `src/sketch/types.ts` | Add input schemas (FloorPlanInputSchema etc.), add furniture change types to ChangeSchema |
 | `src/sketch/tools.ts` | Enriched descriptions, default-filling, CTA integration, new suggest_improvements output |
-| `src/sketch/svg.ts` | Furniture rendering (labeled rectangles) |
-| `src/index.ts` | Register MCP Prompts for template catalog |
+| `src/sketch/svg.ts` | Furniture rendering (labeled rectangles), updated z-order |
+| `src/sketch/changes.ts` | Handle add_furniture, move_furniture, remove_furniture changes |
+| `src/sketch/geometry.ts` | Add pointInPolygon() for furniture-to-room assignment |
+| `src/index.ts` | Register list_templates and get_template tools, optional template param on generate_floor_plan |
 | `docs/arch/main/ARCH.md` | New sections: Template Catalog, Furniture Catalog (V1), CTA System, Smart Defaults |
 
 ### Unchanged
