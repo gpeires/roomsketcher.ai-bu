@@ -144,6 +144,37 @@ function renderWatermark(maxX: number, maxY: number): string {
 
 export function floorPlanToSvg(plan: FloorPlan): string {
   const bb = boundingBox(plan.walls);
+
+  // Expand bounding box to include door swing arcs
+  for (const wall of plan.walls) {
+    const angle = wallAngle(wall)
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    for (const opening of wall.openings) {
+      if (opening.type !== 'door') continue
+      const ox = wall.start.x + cos * opening.offset
+      const oy = wall.start.y + sin * opening.offset
+      const ex = ox + cos * opening.width
+      const ey = oy + sin * opening.width
+      const r = opening.width
+      const dir = opening.properties.swingDirection === 'right' ? 1 : -1
+      const perpX = -sin * dir * r
+      const perpY = cos * dir * r
+      const arcEnd = { x: ox + perpX, y: oy + perpY }
+      // Include door endpoints and arc endpoint
+      for (const p of [
+        { x: ox, y: oy },
+        { x: ex, y: ey },
+        arcEnd,
+      ]) {
+        if (p.x < bb.minX) bb.minX = p.x
+        if (p.y < bb.minY) bb.minY = p.y
+        if (p.x > bb.maxX) bb.maxX = p.x
+        if (p.y > bb.maxY) bb.maxY = p.y
+      }
+    }
+  }
+
   const pad = 50;
   const vbX = bb.minX - pad;
   const vbY = bb.minY - pad;
