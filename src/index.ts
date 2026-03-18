@@ -8,7 +8,7 @@ import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession } from './types';
-import { FloorPlanSchema, ChangeSchema } from './sketch/types';
+import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
 import type { ClientMessage, Change } from './sketch/types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
@@ -211,49 +211,46 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
     this.server.registerTool(
       'generate_floor_plan',
       {
-        description: `Generate a 2D floor plan from a JSON description. You (Claude) should construct the FloorPlan JSON based on the user's natural language description, then pass it to this tool for validation, storage, and rendering.
+        description: `Generate a complete floor plan from a description. Returns a furnished plan with SVG preview.
 
-COORDINATE SYSTEM:
-- Origin (0,0) is top-left. X increases right, Y increases down.
-- All values in centimeters. Snap to 10cm grid.
+WORKFLOW: Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas.
 
-WALL RULES:
-- Build exterior walls first, forming a closed clockwise perimeter.
-- Walls connect when endpoints share coordinates.
-- Typical thickness: exterior 20cm, interior 10cm.
+STANDARD DIMENSIONS (cm):
+- Exterior walls: 20 thick. Interior: 10. Divider: 5.
+- Ceiling height: 250
+- Min room sizes: bedroom 9sqm, bathroom 4sqm, kitchen 6sqm, living 15sqm
+- Hallway min width: 100
+- Doors: standard 80, bathroom 70, front 90
+- Windows: standard 120, kitchen 100, bathroom 60
 
-ROOM RULES:
-- Polygon vertices listed clockwise, edges align with wall centerlines.
-- Area is auto-calculated.
+COLOR PALETTE (hex by room type):
+living: #E8F5E9  bedroom: #E3F2FD  kitchen: #FFF3E0  bathroom: #E0F7FA
+hallway: #F5F5F5  office: #F3E5F5  dining: #FFF8E1  garage: #EFEBE9
+closet: #ECEFF1  laundry: #E8EAF6  balcony: #F1F8E9  terrace: #F1F8E9
+storage: #ECEFF1  utility: #ECEFF1  other: #FAFAFA
 
-EXAMPLE (studio apartment):
-${JSON.stringify({
-  version: 1, id: "auto-generated", name: "Studio Apartment", units: "metric",
-  canvas: { width: 1000, height: 800, gridSize: 10 },
-  walls: [
-    { id: "w1", start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: "exterior", openings: [] },
-    { id: "w2", start: { x: 600, y: 0 }, end: { x: 600, y: 500 }, thickness: 20, height: 250, type: "exterior", openings: [{ id: "win1", type: "window", offset: 100, width: 120, properties: { sillHeight: 90, windowType: "double" } }] },
-    { id: "w3", start: { x: 600, y: 500 }, end: { x: 0, y: 500 }, thickness: 20, height: 250, type: "exterior", openings: [{ id: "d1", type: "door", offset: 200, width: 90, properties: { swingDirection: "left" } }] },
-    { id: "w4", start: { x: 0, y: 500 }, end: { x: 0, y: 0 }, thickness: 20, height: 250, type: "exterior", openings: [] },
-    { id: "w5", start: { x: 400, y: 0 }, end: { x: 400, y: 250 }, thickness: 10, height: 250, type: "interior", openings: [{ id: "d2", type: "door", offset: 50, width: 80, properties: { swingDirection: "right" } }] },
-  ],
-  rooms: [
-    { id: "r1", label: "Living Area", type: "living", polygon: [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 500 }, { x: 0, y: 500 }], color: "#E8F5E9" },
-    { id: "r2", label: "Bathroom", type: "bathroom", polygon: [{ x: 400, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 250 }, { x: 400, y: 250 }], color: "#E3F2FD" },
-  ],
-  furniture: [], annotations: [],
-  metadata: { created_at: "auto", updated_at: "auto", source: "ai" },
-}, null, 0)}`,
+DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
+
+FURNITURE: Place essential furniture in every room using the furniture catalog items. Arrange along walls with 60cm walking clearance between items. Use catalog dimensions (width/depth in cm).
+
+COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10cm grid.
+
+Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.`,
         inputSchema: {
-          plan: FloorPlanSchema.describe('The complete FloorPlan JSON object'),
+          plan: FloorPlanInputSchema.describe('The complete FloorPlan JSON object'),
         },
       },
       async ({ plan }) => {
+        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+        ctaState.toolCallCount++;
         return handleGenerateFloorPlan(
           plan,
           this.env.DB,
-          (s) => this.setState(s),
+          (s) => this.setState({ ...s, cta: ctaState }),
           this.getWorkerUrl(),
+          this.env.CTA_VARIANT ?? 'default',
+          ctaState,
+          (cta) => this.setState({ ...this.state, cta }),
         );
       },
     );
@@ -287,21 +284,22 @@ ${JSON.stringify({
     this.server.registerTool(
       'update_sketch',
       {
-        description: 'Push modifications to an existing sketch. Use this to move walls, add rooms, add openings, etc. Changes are applied in order and broadcast to the browser sketcher in real-time.',
+        description: 'Push modifications to an existing sketch. Use this to move walls, add rooms, add openings, etc. Changes are applied in order and broadcast to the browser sketcher in real-time. After applying changes, consider using suggest_improvements to check the plan and offer the user a next step.',
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
           changes: z.array(ChangeSchema).describe('Array of changes to apply'),
         },
       },
       async ({ sketch_id, changes }) => {
+        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+        ctaState.toolCallCount++;
         return handleUpdateSketch(
           sketch_id,
           changes,
           this.env.DB,
           () => this.state,
-          (s) => this.setState(s),
+          (s) => this.setState({ ...s, cta: ctaState }),
           async (msg) => {
-            // Notify the SketchSync DO to broadcast to connected browsers
             const id = this.env.SKETCH_SYNC.idFromName(sketch_id);
             const obj = this.env.SKETCH_SYNC.get(id);
             await obj.fetch(new Request('http://internal/broadcast', {
@@ -309,6 +307,9 @@ ${JSON.stringify({
               body: msg,
             }));
           },
+          this.env.CTA_VARIANT ?? 'default',
+          ctaState,
+          (cta) => this.setState({ ...this.state, cta }),
         );
       },
     );
@@ -316,13 +317,22 @@ ${JSON.stringify({
     this.server.registerTool(
       'suggest_improvements',
       {
-        description: 'Analyze the current floor plan and get structured data with analysis prompts. Use this to provide feedback on room proportions, traffic flow, door placement, and missing features.',
+        description: 'Analyze the current floor plan and return structured spatial, opening, and furniture data with reasoning prompts. Use this to evaluate room proportions, traffic flow, door placement, furniture fit, and overall livability.',
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
         },
       },
       async ({ sketch_id }) => {
-        return handleSuggestImprovements(sketch_id, this.env.DB, this.state);
+        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+        ctaState.toolCallCount++;
+        return handleSuggestImprovements(
+          sketch_id,
+          this.env.DB,
+          this.state,
+          this.env.CTA_VARIANT ?? 'default',
+          ctaState,
+          (cta) => this.setState({ ...this.state, cta }),
+        );
       },
     );
 
@@ -336,7 +346,18 @@ ${JSON.stringify({
         },
       },
       async ({ sketch_id, format }) => {
-        return handleExportSketch(sketch_id, format, this.env.DB, this.state, this.getWorkerUrl());
+        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+        ctaState.toolCallCount++;
+        return handleExportSketch(
+          sketch_id,
+          format,
+          this.env.DB,
+          this.state,
+          this.getWorkerUrl(),
+          this.env.CTA_VARIANT ?? 'default',
+          ctaState,
+          (cta) => this.setState({ ...this.state, cta }),
+        );
       },
     );
   }
