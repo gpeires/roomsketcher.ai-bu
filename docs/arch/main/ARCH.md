@@ -15,7 +15,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
 │  │  MCP Tools   │   │  REST API    │   │  Browser Sketcher   │  │
-│  │  (12 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
+│  │  (14 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
 │  └──────┬───────┘   └──────┬───────┘   └────────┬────────────┘  │
 │         │                  │                     │               │
 │  ┌──────▼──────────────────▼─────────────────────▼───────────┐  │
@@ -23,7 +23,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │  │                                                           │  │
 │  │  RoomSketcherHelpMCP (McpAgent)                           │  │
 │  │   ├─ MCP protocol (/mcp)                                 │  │
-│  │   ├─ 12 registered tools (6 help + 6 sketch)             │  │
+│  │   ├─ 14 registered tools (6 help + 8 sketch)             │  │
 │  │   └─ Routes sketch ops to SketchSync DO                  │  │
 │  │                                                           │  │
 │  │  SketchSync (Agent)                                       │  │
@@ -53,11 +53,21 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
-│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox
+│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
 │   ├── svg.ts                  # floorPlanToSvg() — server-side renderer
-│   ├── tools.ts                # 6 MCP tool handlers for sketch ops
+│   ├── tools.ts                # 8 MCP tool handlers for sketch ops
+│   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
+│   ├── defaults.ts             # applyDefaults() + DEFAULTS config
+│   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
+│   ├── templates/
+│   │   ├── studio.json
+│   │   ├── 1br-apartment.json
+│   │   ├── 2br-apartment.json
+│   │   ├── 3br-house.json
+│   │   ├── open-plan-loft.json
+│   │   └── l-shaped-home.json
 │   └── *.test.ts               # Unit tests (vitest)
 ├── sketcher/
 │   └── html.ts                 # Browser SPA (single-file HTML+CSS+JS)
@@ -84,7 +94,7 @@ McpAgent framework owns specific routes (`/mcp`, `/sse`). WebSocket connections 
 ### RoomSketcherHelpMCP (McpAgent)
 
 - **Role:** MCP protocol handler + tool registry
-- **State:** `SketchSession { sketchId?, plan? }`
+- **State:** `SketchSession { sketchId?, plan?, ctaState? }`
 - **Storage:** DO-internal SQLite (MCP session state only)
 - **Key behavior:** Captures `x-forwarded-host` / `host` header in `onRequest()` to construct correct URLs through the proxy
 
@@ -122,7 +132,10 @@ FloorPlan
 │   ├── polygon [{x,y}...] (clockwise)
 │   ├── color, area (auto-computed)
 │   └── floor_material (future)
-├── furniture[] (reserved for V2)
+├── furniture[] (V1 — labeled rectangles)
+│   ├── id, type (from furniture catalog)
+│   ├── position {x,y}, rotation
+│   └── width, depth
 ├── annotations[] (reserved for V2)
 └── metadata { created_at, updated_at, source }
 ```
@@ -142,6 +155,9 @@ FloorPlan
 | `add_room` | room object |
 | `rename_room` | room_id, label, room_type? |
 | `remove_room` | room_id |
+| `add_furniture` | furniture item object (uses FurnitureItemSchema) |
+| `move_furniture` | furniture_id, position?, rotation? |
+| `remove_furniture` | furniture_id |
 
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable).
 
@@ -159,7 +175,7 @@ Server → Client:
 
 ---
 
-## MCP Tools (12)
+## MCP Tools (14)
 
 ### Help Tools (6)
 
@@ -172,7 +188,7 @@ Server → Client:
 | `get_article` | Full article by ID |
 | `get_article_by_url` | Full article by Zendesk URL |
 
-### Sketch Tools (6)
+### Sketch Tools (8)
 
 | Tool | Purpose |
 |------|---------|
@@ -182,6 +198,121 @@ Server → Client:
 | `update_sketch` | Apply changes + broadcast to browsers |
 | `suggest_improvements` | AI analysis prompts for the plan |
 | `export_sketch` | SVG download link or text summary |
+| `list_templates` | List available floor plan templates for starting points |
+| `get_template` | Get a specific template's FloorPlan JSON by ID |
+
+---
+
+## Template Catalog
+
+Six floor plan templates agents use as starting points. The agent silently picks the closest match, adapts to the user's request, and presents the finished result. The user never sees template names or knows one was used.
+
+| Template ID | Rooms | Approx Size | Key Features |
+|-------------|-------|-------------|--------------|
+| `studio` | 1 + bathroom | 35–45 sqm | Open plan, single exterior wall loop |
+| `1br-apartment` | 3 (living, bed, bath) | 50–65 sqm | Hallway entry, interior walls |
+| `2br-apartment` | 5 (living, 2 bed, bath, kitchen) | 70–90 sqm | L-shaped hallway, open kitchen option |
+| `3br-house` | 7+ (living, 3 bed, 2 bath, kitchen) | 110–140 sqm | Rectangular footprint, corridor |
+| `open-plan-loft` | 2 (main space, bathroom) | 60–80 sqm | Minimal interior walls, large windows |
+| `l-shaped-home` | 5+ | 90–120 sqm | Two wings at 90°, non-rectangular |
+
+Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture.
+
+**Agent workflow:** `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan`. The `generate_floor_plan` tool description directs agents to always start from a template rather than generating coordinates from a blank canvas.
+
+**Storage:** Templates are static JSON files in `src/sketch/templates/`, validated against `FloorPlanSchema` at build time.
+
+---
+
+## Furniture Catalog (V1)
+
+~25 common furniture items with standard dimensions. Rendered as labeled rectangles in the SVG output. Templates ship fully furnished.
+
+| Room Type | Items |
+|-----------|-------|
+| Bedroom | bed (double), bed (single), nightstand x2, wardrobe, dresser |
+| Living | sofa (3-seat), coffee table, TV unit, armchair, bookshelf |
+| Kitchen | counter, sink, fridge, stove/oven, dining table, chairs |
+| Bathroom | toilet, sink/vanity, bathtub, shower |
+| Office | desk, office chair, bookshelf |
+| Dining | dining table, chairs x4-6, sideboard |
+| Hallway | shoe rack, coat hook |
+
+**SVG rendering:** Furniture renders as labeled rectangles — light gray fill (`#F5F5F5`), border (`#BDBDBD`), item label centered in small text. Rotation applied via SVG transform. Z-order: rooms → furniture → walls → openings → dimensions → watermark.
+
+**Furniture-to-room assignment:** `pointInPolygon(point, polygon)` in `geometry.ts` assigns furniture items to rooms for reporting in `suggest_improvements`. Items outside all room polygons are reported as "unassigned."
+
+**Change types:** `add_furniture`, `move_furniture`, `remove_furniture` are handled by `applyChanges()` in `changes.ts`, enabling the `update_sketch` tool to modify furniture after initial generation.
+
+**Extension points:** `svgIcon` field (future top-down icons), `catalogId` field (future link to RoomSketcher product catalog for upsell).
+
+---
+
+## Smart Defaults
+
+Two-schema approach keeps the strict runtime schema unchanged while making agent input significantly shorter.
+
+**FloorPlanInputSchema** (relaxed, agent-facing) → `applyDefaults()` → **FloorPlan** (strict, storage/runtime)
+
+`applyDefaults()` lives in `src/sketch/defaults.ts` with all defaults in a `DEFAULTS` config object at the top.
+
+| Field | Default |
+|-------|---------|
+| `wall.thickness` | `exterior: 20`, `interior: 10`, `divider: 5` (cm) |
+| `wall.height` | `250` (cm) |
+| `canvas` | Auto-computed from bounding box of all wall endpoints + 100cm padding; `gridSize: 10` |
+| `room.color` | Lookup from room type → color palette map |
+| `opening.properties.swingDirection` | `"left"` for exterior doors, `"right"` for interior |
+| `opening.properties.sillHeight` | `90` for windows |
+| `opening.properties.windowType` | `"double"` |
+| `furniture[].rotation` | `0` |
+| `metadata.source` | `"ai"` |
+| `metadata.created_at/updated_at` | Auto-filled |
+
+**Default color palette by room type:**
+
+```
+living: #E8F5E9    bedroom: #E3F2FD    kitchen: #FFF3E0
+bathroom: #E0F7FA  hallway: #F5F5F5    office: #F3E5F5
+dining: #FFF8E1    garage: #EFEBE9     closet: #ECEFF1
+laundry: #E8EAF6   balcony: #F1F8E9    storage: #ECEFF1
+```
+
+**Impact:** Wall input drops from 7 required fields to 4 (`id`, `start`, `end`, `type`). Room input drops from 6 to 4 (`id`, `label`, `type`, `polygon`). Canvas is fully optional. All existing code (browser sketcher, `changes.ts`, `svg.ts`, `persistence.ts`) continues to work with the strict schema — no breaking changes.
+
+---
+
+## CTA System
+
+File: `src/sketch/cta-config.ts`
+
+A configurable call-to-action system that surfaces upgrade prompts at natural moments without spamming users.
+
+**Trigger types:**
+
+| Category | Triggers |
+|----------|----------|
+| Milestone (once per session) | `first_generation`, `first_edit`, `export` |
+| Context (content-based) | `suggest_improvements`, `furniture_placed`, `room:kitchen`, `room:bedroom`, `room:bathroom`, etc. |
+
+**Session-aware throttling** via `pickCTA(trigger, sessionState)`:
+
+1. Check if `max_ctas_per_session` (default: 3) has been reached → return null
+2. Check if `cooldown_between_ctas` (default: 2 tool calls) has passed → return null
+3. Filter CTAs by active variant
+4. Return CTA text + URL, or null
+
+**Session state** (`SessionCTAState`) is tracked in the MCP DO's `SketchSession` (persists in DO SQLite across conversations with the same DO instance):
+
+```
+ctasShown: number
+lastCtaAt: number   // tool call counter
+toolCallCount: number
+```
+
+**A/B variant support:** Active variant read from `env.CTA_VARIANT` (Cloudflare Workers env var), falling back to `settings.variant` in config. Switching variants requires only a `wrangler secret` change — no code redeploy.
+
+**UTM structure:** All CTA URLs use `utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content={trigger-context}`.
 
 ---
 
@@ -190,10 +321,13 @@ Server → Client:
 `floorPlanToSvg(plan)` renders a complete SVG with:
 
 1. **Rooms** — colored polygons + label + area text at centroid
-2. **Walls** — lines with thickness by type (exterior 4px, interior 2px, divider 1px dashed)
-3. **Openings** — door swing arcs, window parallel lines, plain gaps
-4. **Dimensions** — wall length labels, perpendicular offset, angle-normalized (never upside-down)
-5. **Watermark** — "Powered by RoomSketcher"
+2. **Furniture** — labeled rectangles (fill `#F5F5F5`, stroke `#BDBDBD`), rotation via transform
+3. **Walls** — lines with thickness by type (exterior 4px, interior 2px, divider 1px dashed)
+4. **Openings** — door swing arcs, window parallel lines, plain gaps
+5. **Dimensions** — wall length labels, perpendicular offset, angle-normalized (never upside-down)
+6. **Watermark** — "Powered by RoomSketcher"
+
+**Z-order:** rooms → furniture → walls → openings → dimensions → watermark. Openings must render above walls so white gap lines work correctly.
 
 **ViewBox calculation:** Bounding box from wall endpoints + door arc endpoints + 50px padding. Arc endpoints use the same perpendicular math as rendering to ensure outward-swinging doors are never clipped.
 
@@ -275,6 +409,9 @@ Sketches auto-expire after 30 days. Cleanup runs via cron.
 | SVG caching in D1 | Avoid re-rendering on every retrieval |
 | Nanoid for sketch IDs | URL-friendly, short, collision-safe with TTL |
 | Single-file SPA (no build) | Zero frontend tooling; served as a template literal from Workers |
+| Two-schema approach (input + strict) | Smart defaults without breaking existing code or storage schema |
+| Tools not Prompts for templates | Prompts are client-initiated; agents cannot call `prompts/get` mid-conversation |
+| CTA via env var (CTA_VARIANT) | Variant switching with no code redeploy — wrangler secret change only |
 
 ---
 
@@ -293,13 +430,13 @@ Door positions on vertical walls produce scientific notation coordinates (e.g., 
 These are identified extensions from the original build plan, ready for implementation:
 
 ### V2 — Furniture & Annotations
-- **Furniture catalog** — drag-and-drop from a library of common items (beds, tables, appliances)
+- **Furniture V2** — top-down SVG icons replace labeled rectangles; link to RoomSketcher product catalog via `catalogId`; material/color variants per item; drag-and-drop placement in browser sketcher
 - **Annotations** — dimension lines, text labels, symbols, arrows
 - **Material finishes** — floor/wall/ceiling textures per room
 
 ### V2 — Export & Rendering
 - **PDF export** — high-fidelity PDF via a proper SVG→PDF pipeline (pdf-lib attempted and reverted due to missing path fidelity for door arcs; consider Puppeteer/wkhtmltopdf or client-side jsPDF)
-- **3D rendering** — Three.js or Babylon.js integration for walkthroughs
+- **3D rendering** — Three.js or Babylon.js integration for walkthroughs; furniture items rendered as 3D models
 - **Image export** — PNG/JPG rasterization
 
 ### V2 — Collaboration
@@ -312,6 +449,17 @@ These are identified extensions from the original build plan, ready for implemen
 - **Snap improvements** — wall-to-wall snapping, angle constraints (45/90)
 - **AI layout suggestions** — use room type + area to suggest furniture placement
 - **Building code validation** — minimum door widths, egress requirements
+
+### V2 — Template Growth
+- Community-submitted templates
+- Region-specific templates (US vs. European layouts)
+- Templates with material finishes
+
+### V2 — CTA Evolution
+- External A/B test service integration
+- Per-user variant assignment
+- Conversion tracking pipeline
+- Dynamic CTA copy from a CMS
 
 ### Infrastructure
 - **State sync fix** — SketchSync DO should check D1 version before applying in-memory changes
