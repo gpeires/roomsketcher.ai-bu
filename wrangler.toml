@@ -16,9 +16,14 @@ database_id = "8e3843be-f977-420a-87ef-10c03e4b78e1"
 
 [durable_objects]
 bindings = [
-  { name = "MCP_OBJECT", class_name = "RoomSketcherHelpMCP" }
+  { name = "MCP_OBJECT", class_name = "RoomSketcherHelpMCP" },
+  { name = "SKETCH_SYNC", class_name = "SketchSync" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomSketcherHelpMCP"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SketchSync"]

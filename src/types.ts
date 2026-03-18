@@ -98,6 +98,7 @@ export interface ArticleRow {
 export interface Env {
   DB: D1Database;
   MCP_OBJECT: DurableObjectNamespace;
+  SKETCH_SYNC: DurableObjectNamespace;
   WORKER_URL: string;
 }
 

@@ -1,4 +1,5 @@
 import { McpAgent } from 'agents/mcp';
+import { Agent } from 'agents';
 import type { Connection, WSMessage } from 'partyserver';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -297,7 +298,15 @@ ${JSON.stringify({
           this.env.DB,
           () => this.state,
           (s) => this.setState(s),
-          (msg) => this.broadcastToSketchClients(msg),
+          async (msg) => {
+            // Notify the SketchSync DO to broadcast to connected browsers
+            const id = this.env.SKETCH_SYNC.idFromName(sketch_id);
+            const obj = this.env.SKETCH_SYNC.get(id);
+            await obj.fetch(new Request('http://internal/broadcast', {
+              method: 'POST',
+              body: msg,
+            }));
+          },
         );
       },
     );
@@ -334,43 +343,63 @@ ${JSON.stringify({
     return this.env.WORKER_URL;
   }
 
-  // ─── WebSocket: sketch sync ──────────────────────────────────────────────
+}
 
+// ─── Sketch Sync Durable Object ──────────────────────────────────────────────
+// Separate DO for sketch WebSocket sync — McpAgent requires transport-prefixed
+// names (sse:xxx, streamable-http:xxx) so sketch connections can't share it.
+
+export class SketchSync extends Agent<Env, SketchSession> {
   private sketchWsClients = new Set<Connection>();
 
-  async onMessage(connection: Connection, message: WSMessage) {
-    if (typeof message === 'string') {
+  // Internal endpoint for MCP DO to trigger broadcasts
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === '/broadcast' && request.method === 'POST') {
+      const msg = await request.text();
+      // Also update our local state from the broadcast payload
       try {
-        const data = JSON.parse(message);
-        // MCP uses JSON-RPC format with "jsonrpc" field
-        // Sketch messages use our "type" field
-        if (data.type && !data.jsonrpc) {
-          await this.handleSketchMessage(connection, data as ClientMessage);
-          return;
+        const data = JSON.parse(msg);
+        if (data.type === 'state_update' && data.plan) {
+          const sketchId = this.state?.sketchId;
+          if (sketchId) this.setState({ sketchId, plan: data.plan });
         }
-      } catch {
-        // not JSON — fall through
+      } catch { /* ignore */ }
+      // Broadcast to ALL connected WebSocket clients via the Agent framework
+      for (const conn of this.getConnections()) {
+        try { conn.send(msg); } catch { /* ignore dead connections */ }
       }
+      return new Response('ok');
     }
-    // Fall through to McpAgent's MCP transport handler
-    await super.onMessage(connection, message);
+    return new Response('not found', { status: 404 });
   }
 
-  async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+  async onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== 'string') return;
+    try {
+      const data = JSON.parse(message);
+      if (data.type) {
+        await this.handleSketchMessage(connection, data as ClientMessage);
+      }
+    } catch {
+      // ignore non-JSON
+    }
+  }
+
+  async onClose(connection: Connection, _code: number, _reason: string, _wasClean: boolean) {
     this.sketchWsClients.delete(connection);
     // If last sketch client disconnected, flush to D1
-    if (this.sketchWsClients.size === 0 && this.state.plan && this.state.sketchId) {
+    if (this.sketchWsClients.size === 0 && this.state?.plan && this.state?.sketchId) {
       const svg = floorPlanToSvg(this.state.plan);
       await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
     }
-    await super.onClose(connection, code, reason, wasClean);
   }
 
   private async handleSketchMessage(sender: Connection, msg: ClientMessage) {
     this.sketchWsClients.add(sender);
 
     if (msg.type === 'load') {
-      let plan = this.state.plan;
+      let plan = this.state?.plan;
       if (!plan && msg.sketch_id) {
         const loaded = await loadSketch(this.env.DB, msg.sketch_id);
         if (loaded) {
@@ -385,7 +414,7 @@ ${JSON.stringify({
     }
 
     if (msg.type === 'save') {
-      if (this.state.plan && this.state.sketchId) {
+      if (this.state?.plan && this.state?.sketchId) {
         const svg = floorPlanToSvg(this.state.plan);
         await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
         this.broadcastToSketchClients(JSON.stringify({
@@ -396,15 +425,14 @@ ${JSON.stringify({
     }
 
     // It's a Change — apply it
-    if (!this.state.plan) {
-      // Lazy-load from D1 if not in memory
-      if (this.state.sketchId) {
+    if (!this.state?.plan) {
+      if (this.state?.sketchId) {
         const loaded = await loadSketch(this.env.DB, this.state.sketchId);
         if (loaded) this.setState({ sketchId: this.state.sketchId, plan: loaded.plan });
       }
     }
 
-    if (this.state.plan) {
+    if (this.state?.plan) {
       const updated = applyChanges(this.state.plan, [msg as Change]);
       this.setState({ ...this.state, plan: updated });
       this.broadcastToSketchClients(JSON.stringify({ type: 'state_update', plan: updated }));
@@ -453,10 +481,14 @@ export default {
     // WebSocket upgrade for real-time sketch sync
     const wsMatch = url.pathname.match(/^\/ws\/([A-Za-z0-9_-]+)$/);
     if (wsMatch && request.headers.get('Upgrade') === 'websocket') {
-      // Route to a DO named by sketch ID — separate from MCP session DOs
-      const id = env.MCP_OBJECT.idFromName('sketch-' + wsMatch[1]);
-      const obj = env.MCP_OBJECT.get(id);
-      return obj.fetch(request);
+      const sketchId = wsMatch[1];
+      const id = env.SKETCH_SYNC.idFromName(sketchId);
+      const obj = env.SKETCH_SYNC.get(id);
+      // PartyServer requires x-partykit-room header to identify the room
+      const headers = new Headers(request.headers);
+      headers.set('x-partykit-room', sketchId);
+      const proxied = new Request(request.url, { method: request.method, headers, body: request.body });
+      return obj.fetch(proxied);
     }
 
     // PDF/SVG export

@@ -6,10 +6,7 @@ import { shoelaceArea } from './geometry';
 import { loadSketch, saveSketch } from './persistence';
 import { applyChanges } from './changes';
 
-/** UTF-8-safe base64 encoding (btoa only handles Latin-1) */
-function toBase64(str: string): string {
-  return btoa(unescape(encodeURIComponent(str)));
-}
+type ToolResult = { content: Array<{ type: 'text'; text: string }> };
 
 // ─── generate_floor_plan ────────────────────────────────────────────────────
 
@@ -18,7 +15,7 @@ export async function handleGenerateFloorPlan(
   db: D1Database,
   setState: (s: { sketchId: string; plan: FloorPlan }) => void,
   workerUrl: string,
-): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+): Promise<ToolResult> {
   // Validate
   const parsed = FloorPlanSchema.safeParse(plan);
   if (!parsed.success) {
@@ -40,11 +37,8 @@ export async function handleGenerateFloorPlan(
     }
   }
 
-  // Render SVG
+  // Render SVG + persist
   const svg = floorPlanToSvg(floorPlan);
-  const svgBase64 = toBase64(svg);
-
-  // Persist
   await saveSketch(db, floorPlan.id, floorPlan, svg);
   setState({ sketchId: floorPlan.id, plan: floorPlan });
 
@@ -60,12 +54,7 @@ export async function handleGenerateFloorPlan(
     `_This is a 2D preview. For 3D walkthroughs and 7000+ furniture items, try [RoomSketcher](https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=generate)._`,
   ].join('\n');
 
-  return {
-    content: [
-      { type: 'text' as const, text: summary },
-      { type: 'image' as const, data: svgBase64, mimeType: 'image/svg+xml' },
-    ],
-  };
+  return { content: [{ type: 'text' as const, text: summary }] };
 }
 
 // ─── get_sketch ─────────────────────────────────────────────────────────────
@@ -74,10 +63,9 @@ export async function handleGetSketch(
   sketchId: string,
   db: D1Database,
   state: { sketchId?: string; plan?: FloorPlan },
-): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+): Promise<ToolResult> {
   // Try in-memory state first
   let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
-  let svg: string | undefined;
 
   if (!plan) {
     const loaded = await loadSketch(db, sketchId);
@@ -85,11 +73,6 @@ export async function handleGetSketch(
       return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
     }
     plan = loaded.plan;
-    svg = loaded.svg ?? undefined;
-  }
-
-  if (!svg) {
-    svg = floorPlanToSvg(plan);
   }
 
   const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
@@ -102,12 +85,7 @@ export async function handleGetSketch(
     `Updated: ${plan.metadata.updated_at}`,
   ].join('\n');
 
-  return {
-    content: [
-      { type: 'text' as const, text: summary },
-      { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
-    ],
-  };
+  return { content: [{ type: 'text' as const, text: summary }] };
 }
 
 // ─── open_sketcher ──────────────────────────────────────────────────────────
@@ -115,7 +93,7 @@ export async function handleGetSketch(
 export function handleOpenSketcher(
   sketchId: string,
   workerUrl: string,
-): { content: Array<{ type: 'text'; text: string }> } {
+): ToolResult {
   return {
     content: [{ type: 'text' as const, text: `Open the sketcher: ${workerUrl}/sketcher/${sketchId}` }],
   };
@@ -129,8 +107,8 @@ export async function handleUpdateSketch(
   db: D1Database,
   getState: () => { sketchId?: string; plan?: FloorPlan },
   setState: (s: { sketchId: string; plan: FloorPlan }) => void,
-  broadcast: (msg: string) => void,
-): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+  broadcast: (msg: string) => void | Promise<void>,
+): Promise<ToolResult> {
   // Validate changes
   const parsed: Change[] = [];
   for (const c of changes) {
@@ -159,7 +137,7 @@ export async function handleUpdateSketch(
   setState({ sketchId, plan });
 
   // Broadcast to browser
-  broadcast(JSON.stringify({ type: 'state_update', plan }));
+  await broadcast(JSON.stringify({ type: 'state_update', plan }));
 
   const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
   const summary = [
@@ -167,12 +145,7 @@ export async function handleUpdateSketch(
     `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m²`,
   ].join('\n');
 
-  return {
-    content: [
-      { type: 'text' as const, text: summary },
-      { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
-    ],
-  };
+  return { content: [{ type: 'text' as const, text: summary }] };
 }
 
 // ─── suggest_improvements ───────────────────────────────────────────────────
@@ -181,7 +154,7 @@ export async function handleSuggestImprovements(
   sketchId: string,
   db: D1Database,
   state: { sketchId?: string; plan?: FloorPlan },
-): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+): Promise<ToolResult> {
   let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
   if (!plan) {
     const loaded = await loadSketch(db, sketchId);
@@ -235,7 +208,7 @@ export async function handleExportSketch(
   db: D1Database,
   state: { sketchId?: string; plan?: FloorPlan },
   workerUrl: string,
-): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+): Promise<ToolResult> {
   let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
   if (!plan) {
     const loaded = await loadSketch(db, sketchId);
@@ -257,27 +230,19 @@ export async function handleExportSketch(
     return { content: [{ type: 'text' as const, text }] };
   }
 
-  const svg = floorPlanToSvg(plan);
-
   if (format === 'pdf') {
     const text = [
-      `Download your floor plan as PDF:`,
+      `Download your floor plan:`,
       `${workerUrl}/api/sketches/${sketchId}/export.pdf`,
       cta,
     ].join('\n');
-    return {
-      content: [
-        { type: 'text' as const, text },
-        { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
-      ],
-    };
+    return { content: [{ type: 'text' as const, text }] };
   }
 
-  // SVG format (default)
+  // SVG format (default) — provide download link
   return {
     content: [
-      { type: 'text' as const, text: `**${plan.name}** — ${totalArea.toFixed(1)} m²${cta}` },
-      { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
+      { type: 'text' as const, text: `**${plan.name}** — ${totalArea.toFixed(1)} m²\n\nView in sketcher: ${workerUrl}/sketcher/${sketchId}${cta}` },
     ],
   };
 }
