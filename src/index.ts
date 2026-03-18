@@ -17,6 +17,8 @@ import { floorPlanToSvg } from './sketch/svg';
 import { sketcherHtml } from './sketcher/html';
 
 export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
+  private _workerOrigin: string | null = null;
+
   server = new McpServer({
     name: 'roomsketcher-help',
     version: '1.0.0',
@@ -339,8 +341,19 @@ ${JSON.stringify({
     );
   }
 
+  async onRequest(request: Request): Promise<Response> {
+    const fwdProto = request.headers.get('x-forwarded-proto') ?? 'https';
+    const fwdHost = request.headers.get('x-forwarded-host') ?? request.headers.get('host');
+    if (fwdHost) {
+      this._workerOrigin = `${fwdProto}://${fwdHost}`;
+    } else {
+      this._workerOrigin = new URL(request.url).origin;
+    }
+    return super.onRequest(request);
+  }
+
   private getWorkerUrl(): string {
-    return this.env.WORKER_URL;
+    return this._workerOrigin ?? this.env.WORKER_URL;
   }
 
 }
@@ -500,9 +513,6 @@ export default {
 
       const { floorPlanToSvg } = await import('./sketch/svg');
       const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
-
-      // Simple fallback: serve SVG as downloadable file
-      // Full PDF generation with jspdf may need testing in Workers environment
       return new Response(svg, {
         headers: {
           'Content-Type': 'image/svg+xml',
@@ -515,7 +525,7 @@ export default {
     const sketcherMatch = url.pathname.match(/^\/sketcher\/([A-Za-z0-9_-]+)$/);
     if (sketcherMatch) {
       return new Response(
-        sketcherHtml(sketcherMatch[1], url.origin),
+        sketcherHtml(sketcherMatch[1]),
         { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
       );
     }

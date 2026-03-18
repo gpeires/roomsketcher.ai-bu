@@ -1,63 +1,99 @@
-export function sketcherHtml(sketchId: string, workerUrl: string): string {
+export function sketcherHtml(sketchId: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>RoomSketcher AI Sketcher</title>
+<link rel="icon" type="image/png" href="https://wpmedia.roomsketcher.com/content/uploads/2021/12/15075948/roomsketcher-logo-square.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Merriweather+Sans:wght@300;400;700&display=swap" rel="stylesheet">
 <style>
+  :root {
+    --rs-teal: #00B5CC;
+    --rs-teal-dark: #007B8C;
+    --rs-teal-light: #A1DDE5;
+    --rs-teal-bg: #F5F9FA;
+    --rs-gold: #FEC325;
+    --rs-gold-light: #FED87F;
+    --rs-dark: #17191A;
+    --rs-gray: #5C6566;
+    --rs-gray-light: #D5E4E5;
+    --rs-danger: #D84200;
+  }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+  body { font-family: 'Merriweather Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; height: 100vh; display: flex; flex-direction: column; color: var(--rs-dark); }
+
+  /* Header */
+  .header { display: flex; align-items: center; padding: 0 16px; height: 52px; background: var(--rs-dark); color: #fff; gap: 12px; flex-shrink: 0; }
+  .header img { height: 32px; width: 32px; border-radius: 6px; }
+  .header .brand { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+  .header .brand span { color: var(--rs-teal-light); font-weight: 300; }
+  .header .spacer { flex: 1; }
+  .header .status { font-size: 12px; color: var(--rs-teal-light); opacity: 0.8; }
 
   /* Toolbar */
-  .toolbar { display: flex; gap: 4px; padding: 8px 12px; background: #f5f5f5; border-bottom: 1px solid #ddd; align-items: center; }
-  .toolbar button { padding: 6px 14px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; font-size: 13px; }
-  .toolbar button:hover { background: #eee; }
-  .toolbar button.active { background: #1976D2; color: #fff; border-color: #1565C0; }
+  .toolbar { display: flex; gap: 4px; padding: 6px 12px; background: #fff; border-bottom: 1px solid var(--rs-gray-light); align-items: center; }
+  .toolbar button { padding: 6px 14px; border: 1px solid var(--rs-gray-light); border-radius: 6px; background: #fff; cursor: pointer; font-size: 13px; font-family: inherit; color: var(--rs-dark); transition: all 0.15s; }
+  .toolbar button:hover { background: var(--rs-teal-bg); border-color: var(--rs-teal-light); }
+  .toolbar button.active { background: var(--rs-teal); color: #fff; border-color: var(--rs-teal-dark); }
   .toolbar .spacer { flex: 1; }
-  .toolbar .status { font-size: 12px; color: #999; }
+  .toolbar .btn-save { background: var(--rs-dark); color: #fff; border-color: var(--rs-dark); }
+  .toolbar .btn-save:hover { background: var(--rs-gray); }
+  .toolbar .btn-download { background: var(--rs-gold); color: var(--rs-dark); border-color: var(--rs-gold); font-weight: 700; padding: 6px 18px; }
+  .toolbar .btn-download:hover { background: var(--rs-gold-light); }
+  .toolbar .btn-download svg { vertical-align: -3px; margin-right: 4px; }
 
   /* Main area */
   .main { display: flex; flex: 1; overflow: hidden; }
 
   /* Canvas */
-  .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: #fafafa; }
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; background: var(--rs-teal-bg); }
   .canvas-wrap svg { width: 100%; height: 100%; }
 
   /* Properties panel */
-  .props { width: 220px; border-left: 1px solid #ddd; padding: 12px; overflow-y: auto; background: #fff; }
-  .props h3 { font-size: 13px; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .props label { display: block; font-size: 12px; color: #888; margin-top: 8px; }
-  .props input, .props select { width: 100%; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; margin-top: 2px; font-size: 13px; }
-  .props .none { color: #ccc; font-size: 12px; font-style: italic; margin-top: 20px; }
+  .props { width: 220px; border-left: 1px solid var(--rs-gray-light); padding: 12px; overflow-y: auto; background: #fff; }
+  .props h3 { font-size: 12px; color: var(--rs-teal-dark); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; }
+  .props label { display: block; font-size: 12px; color: var(--rs-gray); margin-top: 8px; }
+  .props input, .props select { width: 100%; padding: 5px 8px; border: 1px solid var(--rs-gray-light); border-radius: 4px; margin-top: 2px; font-size: 13px; font-family: inherit; }
+  .props input:focus, .props select:focus { outline: none; border-color: var(--rs-teal); box-shadow: 0 0 0 2px rgba(0,181,204,0.15); }
+  .props .none { color: var(--rs-gray); font-size: 12px; font-style: italic; margin-top: 20px; }
 
   /* Footer CTA */
-  .footer { padding: 8px 16px; background: #f0f7ff; border-top: 1px solid #ddd; text-align: center; font-size: 13px; color: #666; }
-  .footer a { color: #1976D2; text-decoration: none; font-weight: 500; }
-  .footer a:hover { text-decoration: underline; }
+  .footer { padding: 8px 16px; background: linear-gradient(135deg, var(--rs-teal-bg) 0%, #fff 100%); border-top: 1px solid var(--rs-gray-light); text-align: center; font-size: 13px; color: var(--rs-gray); }
+  .footer a { color: var(--rs-teal-dark); text-decoration: none; font-weight: 700; }
+  .footer a:hover { text-decoration: underline; color: var(--rs-teal); }
 
   /* SVG interactive styles */
   svg line[data-id] { cursor: pointer; }
-  svg line[data-id]:hover { stroke: #1976D2 !important; }
-  svg line.selected { stroke: #F44336 !important; }
+  svg line[data-id]:hover { stroke: var(--rs-teal) !important; }
+  svg line.selected { stroke: var(--rs-danger) !important; }
   svg polygon[data-id] { cursor: pointer; }
   svg polygon[data-id]:hover { fill-opacity: 0.7; }
 
   /* Drawing guide line */
-  .guide-line { stroke: #1976D2; stroke-width: 2; stroke-dasharray: 6,4; pointer-events: none; }
-  .snap-point { fill: #F44336; r: 4; pointer-events: none; }
+  .guide-line { stroke: var(--rs-teal); stroke-width: 2; stroke-dasharray: 6,4; pointer-events: none; }
+  .snap-point { fill: var(--rs-danger); r: 4; pointer-events: none; }
 </style>
 </head>
 <body>
+<div class="header">
+  <img src="https://wpmedia.roomsketcher.com/content/uploads/2021/12/15075948/roomsketcher-logo-square.png" alt="RoomSketcher">
+  <div class="brand">RoomSketcher <span>AI Sketcher</span></div>
+  <div class="spacer"></div>
+  <span class="status" id="status">Loading...</span>
+</div>
+
 <div class="toolbar">
-  <button id="btn-select" class="active" title="Select &amp; move">Select</button>
-  <button id="btn-wall" title="Draw walls">Wall</button>
+  <button id="btn-select" class="active" title="Select &amp; move (S)">Select</button>
+  <button id="btn-wall" title="Draw walls (W)">Wall</button>
   <button id="btn-door" title="Add door to wall">Door</button>
   <button id="btn-window" title="Add window to wall">Window</button>
   <button id="btn-room" title="Label rooms">Room</button>
   <div class="spacer"></div>
-  <span class="status" id="status">Loading...</span>
-  <button id="btn-save" title="Save to server">Save</button>
+  <button id="btn-save" class="btn-save" title="Save to server (\u2318S)">Save</button>
+  <button id="btn-download" class="btn-download" title="Download as PDF"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>SVG</button>
 </div>
 
 <div class="main">
@@ -71,7 +107,7 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
 </div>
 
 <div class="footer">
-  Powered by <a href="https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=sketcher-banner" target="_blank">RoomSketcher</a> \u2014 Upgrade for 3D, furniture, and more
+  Powered by <a href="https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=sketcher-banner" target="_blank">RoomSketcher</a> \u2014 Upgrade for 3D walkthroughs, 7000+ furniture items, and HD renders
 </div>
 
 <script>
@@ -79,8 +115,9 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
   'use strict';
 
   const SKETCH_ID = '${sketchId}';
-  const API_URL = '${workerUrl}/api/sketches/' + SKETCH_ID;
-  const WS_URL = '${workerUrl.replace('https://', 'wss://').replace('http://', 'ws://')}/ws/' + SKETCH_ID;
+  const API_URL = '/api/sketches/' + SKETCH_ID;
+  const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const WS_URL = WS_PROTO + '//' + location.host + '/ws/' + SKETCH_ID;
 
   // \u2500\u2500\u2500 State \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   let plan = null;
@@ -102,6 +139,7 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
     document.getElementById(id).addEventListener('click', () => setTool(t));
   });
   document.getElementById('btn-save').addEventListener('click', save);
+  document.getElementById('btn-download').addEventListener('click', downloadPdf);
 
   function setTool(t) {
     tool = t;
@@ -145,6 +183,17 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
     } catch (e) {
       statusEl.textContent = 'Save failed';
     }
+  }
+
+  // \u2500\u2500\u2500 Download PDF \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function downloadPdf() {
+    const url = '/api/sketches/' + SKETCH_ID + '/export.pdf';
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (plan ? plan.name : 'floor-plan') + '.svg';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   // \u2500\u2500\u2500 WebSocket \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -371,7 +420,7 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
         '<label>Thickness (cm)</label><input id="prop-wall-thick" type="number" value="' + wall.thickness + '">' +
         '<label>Length</label><p style="font-size:13px;margin-top:2px">' + (len/100).toFixed(2) + 'm</p>' +
         '<label>Openings</label><p style="font-size:13px;margin-top:2px">' + wall.openings.length + '</p>' +
-        '<br><button id="prop-wall-delete" style="color:#F44336;border-color:#F44336;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer">Delete Wall</button>';
+        '<br><button id="prop-wall-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Wall</button>';
 
       document.getElementById('prop-wall-type').onchange = (e) => {
         sendChange({ type: 'update_wall', wall_id: wall.id, wall_type: e.target.value });
@@ -395,7 +444,7 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
           .map(t => '<option value="' + t + '"' + (room.type===t?' selected':'') + '>' + t.charAt(0).toUpperCase() + t.slice(1) + '</option>').join('') +
         '</select>' +
         '<label>Area</label><p style="font-size:13px;margin-top:2px">' + area.toFixed(1) + ' m\u00B2</p>' +
-        '<br><button id="prop-room-delete" style="color:#F44336;border-color:#F44336;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer">Delete Room</button>';
+        '<br><button id="prop-room-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Room</button>';
 
       document.getElementById('prop-room-label').onchange = (e) => {
         sendChange({ type: 'rename_room', room_id: room.id, label: e.target.value });

@@ -123,8 +123,11 @@ function renderDimensions(walls: Wall[], units: 'metric' | 'imperial'): string {
     const label = formatDimension(len, units);
     const mx = (w.start.x + w.end.x) / 2;
     const my = (w.start.y + w.end.y) / 2;
-    const angle = wallAngle(w) * (180 / Math.PI);
-    // Offset label perpendicular to wall
+    let angle = wallAngle(w) * (180 / Math.PI);
+    // Normalize so text is always readable (never upside down)
+    if (angle > 90) angle -= 180;
+    if (angle < -90) angle += 180;
+    // Offset label perpendicular to wall (always toward outside/top-left)
     const offsetPx = 14;
     const perpAngle = wallAngle(w) + Math.PI / 2;
     const lx = mx + Math.cos(perpAngle) * offsetPx;
