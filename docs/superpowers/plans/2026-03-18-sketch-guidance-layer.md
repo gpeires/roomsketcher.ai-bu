@@ -35,7 +35,7 @@
 
 | File | What Changes |
 |------|-------------|
-| `src/sketch/types.ts` | Add input schemas (`WallInputSchema`, `RoomInputSchema`, `OpeningInputSchema`, `FloorPlanInputSchema`, `FurnitureItemInputSchema`), add 3 furniture change types to `ChangeSchema` |
+| `src/sketch/types.ts` | Add input schemas (`WallInputSchema`, `RoomInputSchema`, `FloorPlanInputSchema`, `FurnitureItemInputSchema`), add 3 furniture change types to `ChangeSchema`. Note: `OpeningSchema` is reused as-is (its properties are already optional). |
 | `src/sketch/changes.ts` | Handle `add_furniture`, `move_furniture`, `remove_furniture` |
 | `src/sketch/geometry.ts` | Add `pointInPolygon()` |
 | `src/sketch/svg.ts` | Add `renderFurniture()`, insert between rooms and walls in z-order |
@@ -1231,16 +1231,35 @@ git commit -m "feat: two-phase validation with input schemas and applyDefaults()
 
 - [ ] **Step 1: Write the enriched generate_floor_plan description**
 
-Replace the description string in the `generate_floor_plan` tool registration. The new description contains (refer to spec Section 3 for full text):
+Replace the description string in the `generate_floor_plan` tool registration with the following template literal. This is ~4-5KB and acts as a compact cheat sheet for the agent:
 
-1. Workflow directive: "Always start from a template. Call list_templates to find the closest match..."
-2. Standard dimensions reference (wall thickness, ceiling height, min room sizes, door/window widths)
-3. Color palette by room type (full hex map)
-4. Door placement rules
-5. Furniture directive
-6. One compact example (trimmed studio JSON showing shape only)
+```typescript
+const generateFloorPlanDescription = `Generate a complete floor plan from a description. Returns a furnished plan with SVG preview.
 
-This description will be ~4-5KB. Compose it as a template literal string.
+WORKFLOW: Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas.
+
+STANDARD DIMENSIONS (cm):
+- Exterior walls: 20 thick. Interior: 10. Divider: 5.
+- Ceiling height: 250
+- Min room sizes: bedroom 9sqm, bathroom 4sqm, kitchen 6sqm, living 15sqm
+- Hallway min width: 100
+- Doors: standard 80, bathroom 70, front 90
+- Windows: standard 120, kitchen 100, bathroom 60
+
+COLOR PALETTE (hex by room type):
+living: #E8F5E9  bedroom: #E3F2FD  kitchen: #FFF3E0  bathroom: #E0F7FA
+hallway: #F5F5F5  office: #F3E5F5  dining: #FFF8E1  garage: #EFEBE9
+closet: #ECEFF1  laundry: #E8EAF6  balcony: #F1F8E9  terrace: #F1F8E9
+storage: #ECEFF1  utility: #ECEFF1  other: #FAFAFA
+
+DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
+
+FURNITURE: Place essential furniture in every room using the furniture catalog items. Arrange along walls with 60cm walking clearance between items. Use catalog dimensions (width/depth in cm).
+
+COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10cm grid.
+
+Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.`
+```
 
 - [ ] **Step 2: Update update_sketch description**
 
