@@ -62,3 +62,15 @@ CREATE TABLE IF NOT EXISTS sync_meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Sketch persistence
+CREATE TABLE IF NOT EXISTS sketches (
+  id TEXT PRIMARY KEY,
+  plan_json TEXT NOT NULL,
+  svg_cache TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sketches_expires ON sketches(expires_at);
