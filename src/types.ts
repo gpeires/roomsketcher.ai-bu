@@ -100,11 +100,19 @@ export interface Env {
   MCP_OBJECT: DurableObjectNamespace;
   SKETCH_SYNC: DurableObjectNamespace;
   WORKER_URL: string;
+  CTA_VARIANT?: string;
 }
 
 import type { FloorPlan } from './sketch/types';
 
+export interface SessionCTAState {
+  ctasShown: number
+  lastCtaAt: number
+  toolCallCount: number
+}
+
 export interface SketchSession {
   sketchId?: string;
   plan?: FloorPlan;
+  cta?: SessionCTAState;
 }
