@@ -130,6 +130,64 @@ export const ChangeSchema = z.discriminatedUnion('type', [
 ]);
 export type Change = z.infer<typeof ChangeSchema>;
 
+// ─── Input schemas (relaxed, for generate_floor_plan tool) ──────────────
+// Note: OpeningSchema is reused as-is — its property fields are already optional.
+
+export const WallInputSchema = z.object({
+  id: z.string(),
+  start: PointSchema,
+  end: PointSchema,
+  thickness: z.number().optional(),
+  height: z.number().optional(),
+  type: z.enum(['exterior', 'interior', 'divider']),
+  openings: z.array(OpeningSchema),
+});
+
+export const RoomInputSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  type: RoomTypeSchema,
+  polygon: z.array(PointSchema).min(3),
+  wall_ids: z.array(z.string()).optional(),
+  color: z.string().optional(),
+  area: z.number().optional(),
+  floor_material: z.string().optional(),
+});
+
+export const FurnitureItemInputSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  catalog_id: z.string().optional(),
+  position: PointSchema,
+  rotation: z.number().optional(),
+  width: z.number(),
+  depth: z.number(),
+  label: z.string().optional(),
+  material: z.string().optional(),
+});
+
+export const FloorPlanInputSchema = z.object({
+  version: z.literal(1),
+  id: z.string(),
+  name: z.string(),
+  units: z.enum(['metric', 'imperial']),
+  canvas: z.object({
+    width: z.number(),
+    height: z.number(),
+    gridSize: z.number(),
+  }).optional(),
+  walls: z.array(WallInputSchema),
+  rooms: z.array(RoomInputSchema),
+  furniture: z.array(FurnitureItemInputSchema),
+  annotations: z.array(AnnotationSchema),
+  metadata: z.object({
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+    source: z.enum(['ai', 'sketcher', 'mixed']).optional(),
+  }).optional(),
+});
+export type FloorPlanInput = z.infer<typeof FloorPlanInputSchema>;
+
 // ─── WebSocket protocol ────────────────────────────────────────────────────
 
 export type ClientMessage =
