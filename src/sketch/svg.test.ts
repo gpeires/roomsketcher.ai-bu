@@ -106,4 +106,49 @@ describe('floorPlanToSvg', () => {
     // viewBox="50 50 500 400"
     expect(svg).toContain('viewBox="50 50 500 400"');
   });
+
+  it('renders furniture as labeled rectangles', () => {
+    const plan = makePlan({
+      walls: [
+        { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
+      ],
+    });
+    plan.furniture = [
+      { id: 'f1', type: 'bed-double', position: { x: 100, y: 100 }, rotation: 0, width: 160, depth: 200, label: 'Bed' },
+    ];
+    const svg = floorPlanToSvg(plan);
+    expect(svg).toContain('id="furniture"');
+    expect(svg).toContain('Bed');
+    expect(svg).toContain('data-id="f1"');
+  });
+
+  it('renders furniture between rooms and walls in z-order', () => {
+    const plan = makePlan({
+      walls: [
+        { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
+      ],
+    });
+    plan.furniture = [
+      { id: 'f1', type: 'sofa', position: { x: 100, y: 100 }, rotation: 0, width: 220, depth: 90, label: 'Sofa' },
+    ];
+    const svg = floorPlanToSvg(plan);
+    const roomsIdx = svg.indexOf('id="rooms"');
+    const furnitureIdx = svg.indexOf('id="furniture"');
+    const wallsIdx = svg.indexOf('id="walls"');
+    expect(furnitureIdx).toBeGreaterThan(roomsIdx);
+    expect(furnitureIdx).toBeLessThan(wallsIdx);
+  });
+
+  it('applies rotation transform to furniture', () => {
+    const plan = makePlan({
+      walls: [
+        { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
+      ],
+    });
+    plan.furniture = [
+      { id: 'f1', type: 'desk', position: { x: 100, y: 100 }, rotation: 90, width: 140, depth: 70, label: 'Desk' },
+    ];
+    const svg = floorPlanToSvg(plan);
+    expect(svg).toContain('rotate(90');
+  });
 });

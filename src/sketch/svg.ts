@@ -138,6 +138,20 @@ function renderDimensions(walls: Wall[], units: 'metric' | 'imperial'): string {
   }).filter(Boolean).join('\n    ');
 }
 
+function renderFurniture(furniture: FloorPlan['furniture']): string {
+  return furniture.map(item => {
+    const cx = item.position.x + item.width / 2;
+    const cy = item.position.y + item.depth / 2;
+    const transform = item.rotation
+      ? ` transform="rotate(${item.rotation}, ${cx}, ${cy})"`
+      : '';
+    const rect = `<rect x="${item.position.x}" y="${item.position.y}" width="${item.width}" height="${item.depth}" ` +
+      `fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"${transform} data-id="${item.id}"/>`;
+    const label = `<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#757575"${transform ? ` transform="rotate(${item.rotation}, ${cx}, ${cy})"` : ''}>${item.label ?? item.type}</text>`;
+    return rect + '\n    ' + label;
+  }).join('\n    ');
+}
+
 function renderWatermark(maxX: number, maxY: number): string {
   return `<text x="${maxX}" y="${maxY + 30}" text-anchor="end" font-size="10" font-family="sans-serif" fill="#ccc">Powered by RoomSketcher</text>`;
 }
@@ -190,6 +204,9 @@ export function floorPlanToSvg(plan: FloorPlan): string {
   return `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" style="background:#fff">
   <g id="rooms">
     ${renderRooms(plan.rooms, plan.units)}
+  </g>
+  <g id="furniture">
+    ${renderFurniture(plan.furniture)}
   </g>
   <g id="walls">
     ${renderWalls(plan.walls)}
