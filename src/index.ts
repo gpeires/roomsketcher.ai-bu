@@ -6,8 +6,12 @@ import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env } from './types';
+import { FloorPlanSchema } from './sketch/types';
+import type { SketchSession } from './types';
+import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher } from './sketch/tools';
+import { cleanupExpiredSketches } from './sketch/persistence';
 
-export class RoomSketcherHelpMCP extends McpAgent<Env, {}, {}> {
+export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
   server = new McpServer({
     name: 'roomsketcher-help',
     version: '1.0.0',
@@ -194,6 +198,88 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, {}, {}> {
         };
       },
     );
+
+    // ─── Sketch tools ─────────────────────────────────────────────────────
+
+    this.server.registerTool(
+      'generate_floor_plan',
+      {
+        description: `Generate a 2D floor plan from a JSON description. You (Claude) should construct the FloorPlan JSON based on the user's natural language description, then pass it to this tool for validation, storage, and rendering.
+
+COORDINATE SYSTEM:
+- Origin (0,0) is top-left. X increases right, Y increases down.
+- All values in centimeters. Snap to 10cm grid.
+
+WALL RULES:
+- Build exterior walls first, forming a closed clockwise perimeter.
+- Walls connect when endpoints share coordinates.
+- Typical thickness: exterior 20cm, interior 10cm.
+
+ROOM RULES:
+- Polygon vertices listed clockwise, edges align with wall centerlines.
+- Area is auto-calculated.
+
+EXAMPLE (studio apartment):
+${JSON.stringify({
+  version: 1, id: "auto-generated", name: "Studio Apartment", units: "metric",
+  canvas: { width: 1000, height: 800, gridSize: 10 },
+  walls: [
+    { id: "w1", start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: "exterior", openings: [] },
+    { id: "w2", start: { x: 600, y: 0 }, end: { x: 600, y: 500 }, thickness: 20, height: 250, type: "exterior", openings: [{ id: "win1", type: "window", offset: 100, width: 120, properties: { sillHeight: 90, windowType: "double" } }] },
+    { id: "w3", start: { x: 600, y: 500 }, end: { x: 0, y: 500 }, thickness: 20, height: 250, type: "exterior", openings: [{ id: "d1", type: "door", offset: 200, width: 90, properties: { swingDirection: "left" } }] },
+    { id: "w4", start: { x: 0, y: 500 }, end: { x: 0, y: 0 }, thickness: 20, height: 250, type: "exterior", openings: [] },
+    { id: "w5", start: { x: 400, y: 0 }, end: { x: 400, y: 250 }, thickness: 10, height: 250, type: "interior", openings: [{ id: "d2", type: "door", offset: 50, width: 80, properties: { swingDirection: "right" } }] },
+  ],
+  rooms: [
+    { id: "r1", label: "Living Area", type: "living", polygon: [{ x: 0, y: 0 }, { x: 400, y: 0 }, { x: 400, y: 500 }, { x: 0, y: 500 }], color: "#E8F5E9" },
+    { id: "r2", label: "Bathroom", type: "bathroom", polygon: [{ x: 400, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 250 }, { x: 400, y: 250 }], color: "#E3F2FD" },
+  ],
+  furniture: [], annotations: [],
+  metadata: { created_at: "auto", updated_at: "auto", source: "ai" },
+}, null, 0)}`,
+        inputSchema: {
+          plan: FloorPlanSchema.describe('The complete FloorPlan JSON object'),
+        },
+      },
+      async ({ plan }) => {
+        return handleGenerateFloorPlan(
+          plan,
+          this.env.DB,
+          (s) => this.setState(s),
+          this.getWorkerUrl(),
+        );
+      },
+    );
+
+    this.server.registerTool(
+      'get_sketch',
+      {
+        description: 'Get the current state of a sketch (floor plan JSON + SVG render). Use this after the user has edited in the browser sketcher to see their changes.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+        },
+      },
+      async ({ sketch_id }) => {
+        return handleGetSketch(sketch_id, this.env.DB, this.state);
+      },
+    );
+
+    this.server.registerTool(
+      'open_sketcher',
+      {
+        description: 'Get the URL for the browser-based sketcher to manually edit a floor plan.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+        },
+      },
+      async ({ sketch_id }) => {
+        return handleOpenSketcher(sketch_id, this.getWorkerUrl());
+      },
+    );
+  }
+
+  private getWorkerUrl(): string {
+    return this.env.WORKER_URL;
   }
 }
 
@@ -234,5 +320,6 @@ export default {
 
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(syncFromZendesk(env.DB));
+    ctx.waitUntil(cleanupExpiredSketches(env.DB));
   },
 };

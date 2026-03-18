@@ -98,4 +98,12 @@ export interface ArticleRow {
 export interface Env {
   DB: D1Database;
   MCP_OBJECT: DurableObjectNamespace;
+  WORKER_URL: string;
+}
+
+import type { FloorPlan } from './sketch/types';
+
+export interface SketchSession {
+  sketchId?: string;
+  plan?: FloorPlan;
 }

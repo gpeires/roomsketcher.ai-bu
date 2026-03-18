@@ -3,6 +3,9 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 compatibility_flags = ["nodejs_compat"]
 
+[vars]
+WORKER_URL = "https://roomsketcher-help-mcp.10ecb923-workers.workers.dev"
+
 [triggers]
 crons = ["0 */6 * * *"]
 
