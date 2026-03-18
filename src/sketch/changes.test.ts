@@ -124,4 +124,57 @@ describe('applyChanges', () => {
     expect(result.walls).toHaveLength(1);
     expect(result.walls[0].end.x).toBe(600); // unchanged
   });
+
+  it('adds furniture', () => {
+    const plan = makePlan();
+    const changes: Change[] = [
+      {
+        type: 'add_furniture',
+        furniture: {
+          id: 'f1',
+          type: 'bed-double',
+          position: { x: 100, y: 100 },
+          rotation: 0,
+          width: 160,
+          depth: 200,
+          label: 'Bed',
+        },
+      },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.furniture).toHaveLength(1);
+    expect(result.furniture[0].id).toBe('f1');
+  });
+
+  it('moves furniture', () => {
+    const plan = makePlan();
+    plan.furniture = [
+      { id: 'f1', type: 'bed-double', position: { x: 100, y: 100 }, rotation: 0, width: 160, depth: 200, label: 'Bed' },
+    ];
+    const changes: Change[] = [
+      { type: 'move_furniture', furniture_id: 'f1', position: { x: 200, y: 200 }, rotation: 90 },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.furniture[0].position).toEqual({ x: 200, y: 200 });
+    expect(result.furniture[0].rotation).toBe(90);
+  });
+
+  it('removes furniture', () => {
+    const plan = makePlan();
+    plan.furniture = [
+      { id: 'f1', type: 'bed-double', position: { x: 100, y: 100 }, rotation: 0, width: 160, depth: 200, label: 'Bed' },
+    ];
+    const changes: Change[] = [{ type: 'remove_furniture', furniture_id: 'f1' }];
+    const result = applyChanges(plan, changes);
+    expect(result.furniture).toHaveLength(0);
+  });
+
+  it('ignores move_furniture for nonexistent ID', () => {
+    const plan = makePlan();
+    const changes: Change[] = [
+      { type: 'move_furniture', furniture_id: 'nonexistent', position: { x: 999, y: 999 } },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.furniture).toHaveLength(0);
+  });
 });

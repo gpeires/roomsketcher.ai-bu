@@ -11,6 +11,7 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
     ...plan,
     walls: plan.walls.map(w => ({ ...w, openings: [...w.openings] })),
     rooms: [...plan.rooms],
+    furniture: [...plan.furniture],
     metadata: { ...plan.metadata, updated_at: new Date().toISOString(), source: 'mixed' },
   };
 
@@ -71,6 +72,22 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
 
       case 'remove_room':
         result.rooms = result.rooms.filter(r => r.id !== change.room_id);
+        break;
+
+      case 'add_furniture':
+        result.furniture.push({ ...change.furniture });
+        break;
+
+      case 'move_furniture': {
+        const item = result.furniture.find(f => f.id === change.furniture_id);
+        if (!item) break;
+        if (change.position) item.position = change.position;
+        if (change.rotation !== undefined) item.rotation = change.rotation;
+        break;
+      }
+
+      case 'remove_furniture':
+        result.furniture = result.furniture.filter(f => f.id !== change.furniture_id);
         break;
     }
   }
