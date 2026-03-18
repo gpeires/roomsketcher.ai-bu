@@ -459,6 +459,26 @@ export default {
       return obj.fetch(request);
     }
 
+    // PDF/SVG export
+    const pdfMatch = url.pathname.match(/^\/api\/sketches\/([A-Za-z0-9_-]+)\/export\.pdf$/);
+    if (pdfMatch && request.method === 'GET') {
+      const sketchId = pdfMatch[1];
+      const loaded = await loadSketch(env.DB, sketchId);
+      if (!loaded) return Response.json({ error: 'Not found' }, { status: 404 });
+
+      const { floorPlanToSvg } = await import('./sketch/svg');
+      const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
+
+      // Simple fallback: serve SVG as downloadable file
+      // Full PDF generation with jspdf may need testing in Workers environment
+      return new Response(svg, {
+        headers: {
+          'Content-Type': 'image/svg+xml',
+          'Content-Disposition': `attachment; filename="${loaded.plan.name || 'floor-plan'}.svg"`,
+        },
+      });
+    }
+
     // Sketcher SPA
     const sketcherMatch = url.pathname.match(/^\/sketcher\/([A-Za-z0-9_-]+)$/);
     if (sketcherMatch) {
