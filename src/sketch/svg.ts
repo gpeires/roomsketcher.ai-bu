@@ -1,0 +1,174 @@
+import type { FloorPlan, Wall, Opening, Room, Point } from './types';
+import { shoelaceArea, centroid, boundingBox } from './geometry';
+
+function wallLength(wall: Wall): number {
+  const dx = wall.end.x - wall.start.x;
+  const dy = wall.end.y - wall.start.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function wallAngle(wall: Wall): number {
+  return Math.atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x);
+}
+
+function formatDimension(cm: number, units: 'metric' | 'imperial'): string {
+  if (units === 'imperial') {
+    const inches = cm / 2.54;
+    const feet = Math.floor(inches / 12);
+    const rem = Math.round(inches % 12);
+    return `${feet}'${rem}"`;
+  }
+  return `${(cm / 100).toFixed(2)}m`;
+}
+
+function strokeWidth(type: Wall['type']): number {
+  switch (type) {
+    case 'exterior': return 4;
+    case 'interior': return 2;
+    case 'divider': return 1;
+  }
+}
+
+function strokeDasharray(type: Wall['type']): string {
+  return type === 'divider' ? '6,4' : 'none';
+}
+
+function renderWalls(walls: Wall[]): string {
+  return walls.map(w => {
+    const sw = strokeWidth(w.type);
+    const dash = strokeDasharray(w.type);
+    return `<line x1="${w.start.x}" y1="${w.start.y}" x2="${w.end.x}" y2="${w.end.y}" ` +
+      `stroke="#333" stroke-width="${sw}" stroke-linecap="round"` +
+      (dash !== 'none' ? ` stroke-dasharray="${dash}"` : '') +
+      ` data-id="${w.id}"/>`;
+  }).join('\n    ');
+}
+
+function renderOpening(wall: Wall, opening: Opening): string {
+  const angle = wallAngle(wall);
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  // Position along wall
+  const ox = wall.start.x + cos * opening.offset;
+  const oy = wall.start.y + sin * opening.offset;
+
+  if (opening.type === 'door') {
+    // Draw gap (white line over wall) + swing arc
+    const ex = ox + cos * opening.width;
+    const ey = oy + sin * opening.width;
+    const gap = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="6"/>`;
+
+    // Arc for door swing
+    const r = opening.width;
+    const dir = opening.properties.swingDirection === 'right' ? 1 : -1;
+    const perpX = -sin * dir * r;
+    const perpY = cos * dir * r;
+    const arcEnd = { x: ox + perpX, y: oy + perpY };
+    const sweep = dir === 1 ? 1 : 0;
+    const arc = `<path d="M${ox},${oy} L${ex},${ey} A${r},${r} 0 0,${sweep} ${arcEnd.x},${arcEnd.y} Z" ` +
+      `fill="none" stroke="#666" stroke-width="1" data-id="${opening.id}"/>`;
+    return gap + '\n    ' + arc;
+  }
+
+  if (opening.type === 'window') {
+    // Draw gap + parallel lines
+    const ex = ox + cos * opening.width;
+    const ey = oy + sin * opening.width;
+    const offset = 4;
+    const nx = -sin * offset;
+    const ny = cos * offset;
+    const gap = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="6"/>`;
+    const line1 = `<line x1="${ox + nx}" y1="${oy + ny}" x2="${ex + nx}" y2="${ey + ny}" stroke="#4FC3F7" stroke-width="2"/>`;
+    const line2 = `<line x1="${ox - nx}" y1="${oy - ny}" x2="${ex - nx}" y2="${ey - ny}" stroke="#4FC3F7" stroke-width="2"/>`;
+    return [gap, line1, line2].join('\n    ');
+  }
+
+  // Plain opening: just a gap
+  const ex = ox + cos * opening.width;
+  const ey = oy + sin * opening.width;
+  return `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="6"/>`;
+}
+
+function renderOpenings(walls: Wall[]): string {
+  const parts: string[] = [];
+  for (const wall of walls) {
+    for (const opening of wall.openings) {
+      parts.push(renderOpening(wall, opening));
+    }
+  }
+  return parts.join('\n    ');
+}
+
+function renderRooms(rooms: Room[], units: 'metric' | 'imperial'): string {
+  return rooms.map(room => {
+    const points = room.polygon.map(p => `${p.x},${p.y}`).join(' ');
+    const area = room.area ?? shoelaceArea(room.polygon);
+    const areaLabel = units === 'imperial'
+      ? `${(area * 10.7639).toFixed(1)} ft²`
+      : `${area.toFixed(1)} m²`;
+    const c = centroid(room.polygon);
+
+    const poly = `<polygon points="${points}" fill="${room.color}" fill-opacity="0.5" stroke="none" data-id="${room.id}"/>`;
+    const label = `<text x="${c.x}" y="${c.y - 8}" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">${room.label}</text>`;
+    const areaText = `<text x="${c.x}" y="${c.y + 10}" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">${areaLabel}</text>`;
+    return [poly, label, areaText].join('\n    ');
+  }).join('\n    ');
+}
+
+function renderDimensions(walls: Wall[], units: 'metric' | 'imperial'): string {
+  return walls.map(w => {
+    const len = wallLength(w);
+    if (len < 1) return '';
+    const label = formatDimension(len, units);
+    const mx = (w.start.x + w.end.x) / 2;
+    const my = (w.start.y + w.end.y) / 2;
+    const angle = wallAngle(w) * (180 / Math.PI);
+    // Offset label perpendicular to wall
+    const offsetPx = 14;
+    const perpAngle = wallAngle(w) + Math.PI / 2;
+    const lx = mx + Math.cos(perpAngle) * offsetPx;
+    const ly = my + Math.sin(perpAngle) * offsetPx;
+
+    return `<text x="${lx}" y="${ly}" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#999" ` +
+      `transform="rotate(${angle}, ${lx}, ${ly})">${label}</text>`;
+  }).filter(Boolean).join('\n    ');
+}
+
+function renderWatermark(maxX: number, maxY: number): string {
+  return `<text x="${maxX}" y="${maxY + 30}" text-anchor="end" font-size="10" font-family="sans-serif" fill="#ccc">Powered by RoomSketcher</text>`;
+}
+
+export function floorPlanToSvg(plan: FloorPlan): string {
+  const bb = boundingBox(plan.walls);
+  const pad = 50;
+  const vbX = bb.minX - pad;
+  const vbY = bb.minY - pad;
+  const vbW = (bb.maxX - bb.minX) + pad * 2;
+  const vbH = (bb.maxY - bb.minY) + pad * 2;
+
+  // For empty plans, use canvas dimensions
+  const hasWalls = plan.walls.length > 0;
+  const viewBox = hasWalls
+    ? `${vbX} ${vbY} ${vbW} ${vbH}`
+    : `0 0 ${plan.canvas.width} ${plan.canvas.height}`;
+
+  return `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" style="background:#fff">
+  <g id="rooms">
+    ${renderRooms(plan.rooms, plan.units)}
+  </g>
+  <g id="walls">
+    ${renderWalls(plan.walls)}
+  </g>
+  <g id="openings">
+    ${renderOpenings(plan.walls)}
+  </g>
+  <g id="dimensions">
+    ${renderDimensions(plan.walls, plan.units)}
+  </g>
+  <g id="labels"></g>
+  <g id="watermark">
+    ${hasWalls ? renderWatermark(bb.maxX, bb.maxY) : `<text x="${plan.canvas.width - 10}" y="${plan.canvas.height - 10}" text-anchor="end" font-size="10" font-family="sans-serif" fill="#ccc">Powered by RoomSketcher</text>`}
+  </g>
+</svg>`;
+}
