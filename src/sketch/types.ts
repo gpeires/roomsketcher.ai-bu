@@ -124,6 +124,9 @@ export const ChangeSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('add_room'), room: RoomSchema }),
   z.object({ type: z.literal('rename_room'), room_id: z.string(), label: z.string(), room_type: RoomTypeSchema.optional() }),
   z.object({ type: z.literal('remove_room'), room_id: z.string() }),
+  z.object({ type: z.literal('add_furniture'), furniture: FurnitureItemSchema }),
+  z.object({ type: z.literal('move_furniture'), furniture_id: z.string(), position: PointSchema.optional(), rotation: z.number().optional() }),
+  z.object({ type: z.literal('remove_furniture'), furniture_id: z.string() }),
 ]);
 export type Change = z.infer<typeof ChangeSchema>;
 

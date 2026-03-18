@@ -190,6 +190,42 @@ describe('ChangeSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('validates add_furniture change', () => {
+    const change = {
+      type: 'add_furniture',
+      furniture: {
+        id: 'f1',
+        type: 'bed-double',
+        position: { x: 100, y: 100 },
+        rotation: 0,
+        width: 160,
+        depth: 200,
+        label: 'Bed',
+      },
+    }
+    const result = ChangeSchema.safeParse(change)
+    expect(result.success).toBe(true)
+  })
+
+  it('validates move_furniture change', () => {
+    const change = {
+      type: 'move_furniture',
+      furniture_id: 'f1',
+      position: { x: 200, y: 200 },
+    }
+    const result = ChangeSchema.safeParse(change)
+    expect(result.success).toBe(true)
+  })
+
+  it('validates remove_furniture change', () => {
+    const change = {
+      type: 'remove_furniture',
+      furniture_id: 'f1',
+    }
+    const result = ChangeSchema.safeParse(change)
+    expect(result.success).toBe(true)
+  })
+
   it('rejects unknown change type', () => {
     const change = { type: 'fly_away' };
     const result = ChangeSchema.safeParse(change);
