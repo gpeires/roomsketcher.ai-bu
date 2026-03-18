@@ -1,15 +1,18 @@
 import { McpAgent } from 'agents/mcp';
+import type { Connection, WSMessage } from 'partyserver';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { searchArticles } from './tools/search';
 import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { syncFromZendesk } from './sync/ingest';
-import type { Env } from './types';
+import type { Env, SketchSession } from './types';
 import { FloorPlanSchema } from './sketch/types';
-import type { SketchSession } from './types';
+import type { ClientMessage, Change } from './sketch/types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
+import { applyChanges } from './sketch/changes';
+import { floorPlanToSvg } from './sketch/svg';
 import { sketcherHtml } from './sketcher/html';
 
 export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
@@ -282,6 +285,89 @@ ${JSON.stringify({
   private getWorkerUrl(): string {
     return this.env.WORKER_URL;
   }
+
+  // ─── WebSocket: sketch sync ──────────────────────────────────────────────
+
+  private sketchWsClients = new Set<Connection>();
+
+  async onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message === 'string') {
+      try {
+        const data = JSON.parse(message);
+        // MCP uses JSON-RPC format with "jsonrpc" field
+        // Sketch messages use our "type" field
+        if (data.type && !data.jsonrpc) {
+          await this.handleSketchMessage(connection, data as ClientMessage);
+          return;
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+    // Fall through to McpAgent's MCP transport handler
+    await super.onMessage(connection, message);
+  }
+
+  async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+    this.sketchWsClients.delete(connection);
+    // If last sketch client disconnected, flush to D1
+    if (this.sketchWsClients.size === 0 && this.state.plan && this.state.sketchId) {
+      const svg = floorPlanToSvg(this.state.plan);
+      await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
+    }
+    await super.onClose(connection, code, reason, wasClean);
+  }
+
+  private async handleSketchMessage(sender: Connection, msg: ClientMessage) {
+    this.sketchWsClients.add(sender);
+
+    if (msg.type === 'load') {
+      let plan = this.state.plan;
+      if (!plan && msg.sketch_id) {
+        const loaded = await loadSketch(this.env.DB, msg.sketch_id);
+        if (loaded) {
+          plan = loaded.plan;
+          this.setState({ sketchId: msg.sketch_id, plan });
+        }
+      }
+      if (plan) {
+        sender.send(JSON.stringify({ type: 'state_update', plan }));
+      }
+      return;
+    }
+
+    if (msg.type === 'save') {
+      if (this.state.plan && this.state.sketchId) {
+        const svg = floorPlanToSvg(this.state.plan);
+        await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
+        this.broadcastToSketchClients(JSON.stringify({
+          type: 'saved', updated_at: new Date().toISOString(),
+        }));
+      }
+      return;
+    }
+
+    // It's a Change — apply it
+    if (!this.state.plan) {
+      // Lazy-load from D1 if not in memory
+      if (this.state.sketchId) {
+        const loaded = await loadSketch(this.env.DB, this.state.sketchId);
+        if (loaded) this.setState({ sketchId: this.state.sketchId, plan: loaded.plan });
+      }
+    }
+
+    if (this.state.plan) {
+      const updated = applyChanges(this.state.plan, [msg as Change]);
+      this.setState({ ...this.state, plan: updated });
+      this.broadcastToSketchClients(JSON.stringify({ type: 'state_update', plan: updated }));
+    }
+  }
+
+  broadcastToSketchClients(message: string) {
+    for (const ws of this.sketchWsClients) {
+      try { ws.send(message); } catch { this.sketchWsClients.delete(ws); }
+    }
+  }
 }
 
 // Default export: MCP route + admin sync + scheduled sync
@@ -314,6 +400,15 @@ export default {
         status: 'ok',
         last_sync: meta?.value || 'never',
       });
+    }
+
+    // WebSocket upgrade for real-time sketch sync
+    const wsMatch = url.pathname.match(/^\/ws\/([A-Za-z0-9_-]+)$/);
+    if (wsMatch && request.headers.get('Upgrade') === 'websocket') {
+      // Route to a DO named by sketch ID — separate from MCP session DOs
+      const id = env.MCP_OBJECT.idFromName('sketch-' + wsMatch[1]);
+      const obj = env.MCP_OBJECT.get(id);
+      return obj.fetch(request);
     }
 
     // Sketcher SPA

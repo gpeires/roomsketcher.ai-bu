@@ -132,7 +132,7 @@ export type Change = z.infer<typeof ChangeSchema>;
 export type ClientMessage =
   | Change
   | { type: 'save' }
-  | { type: 'load' };
+  | { type: 'load'; sketch_id: string };
 
 export type ServerMessage =
   | { type: 'state_update'; plan: FloorPlan }

@@ -151,7 +151,10 @@ export function sketcherHtml(sketchId: string, workerUrl: string): string {
   function connectWs() {
     try {
       ws = new WebSocket(WS_URL);
-      ws.onopen = () => { statusEl.textContent = 'Connected'; };
+      ws.onopen = () => {
+        statusEl.textContent = 'Connected';
+        ws.send(JSON.stringify({ type: 'load', sketch_id: SKETCH_ID }));
+      };
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
         if (msg.type === 'state_update') {
