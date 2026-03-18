@@ -10,6 +10,7 @@ import { FloorPlanSchema } from './sketch/types';
 import type { SketchSession } from './types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
+import { sketcherHtml } from './sketcher/html';
 
 export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
   server = new McpServer({
@@ -313,6 +314,15 @@ export default {
         status: 'ok',
         last_sync: meta?.value || 'never',
       });
+    }
+
+    // Sketcher SPA
+    const sketcherMatch = url.pathname.match(/^\/sketcher\/([A-Za-z0-9_-]+)$/);
+    if (sketcherMatch) {
+      return new Response(
+        sketcherHtml(sketcherMatch[1], url.origin),
+        { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+      );
     }
 
     // Sketch REST API
