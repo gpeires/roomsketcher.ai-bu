@@ -9,7 +9,7 @@ import type { Env } from './types';
 import { FloorPlanSchema } from './sketch/types';
 import type { SketchSession } from './types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher } from './sketch/tools';
-import { cleanupExpiredSketches } from './sketch/persistence';
+import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
 
 export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
   server = new McpServer({
@@ -313,6 +313,34 @@ export default {
         status: 'ok',
         last_sync: meta?.value || 'never',
       });
+    }
+
+    // Sketch REST API
+    const sketchMatch = url.pathname.match(/^\/api\/sketches\/([A-Za-z0-9_-]+)$/);
+    if (sketchMatch) {
+      const sketchId = sketchMatch[1];
+
+      if (request.method === 'GET') {
+        const loaded = await loadSketch(env.DB, sketchId);
+        if (!loaded) {
+          return Response.json({ error: 'Not found' }, { status: 404 });
+        }
+        return Response.json({ plan: loaded.plan, svg: loaded.svg });
+      }
+
+      if (request.method === 'PUT') {
+        let body: { plan: unknown };
+        try { body = await request.json() as { plan: unknown }; }
+        catch { return Response.json({ error: 'Invalid JSON' }, { status: 400 }); }
+        const parsed = FloorPlanSchema.safeParse(body.plan);
+        if (!parsed.success) {
+          return Response.json({ error: 'Invalid plan', issues: parsed.error.issues }, { status: 400 });
+        }
+        const { floorPlanToSvg } = await import('./sketch/svg');
+        const svg = floorPlanToSvg(parsed.data);
+        await saveSketch(env.DB, sketchId, parsed.data, svg);
+        return Response.json({ ok: true, updated_at: new Date().toISOString() });
+      }
     }
 
     return new Response('RoomSketcher Help MCP Server. Connect via /mcp', { status: 200 });
