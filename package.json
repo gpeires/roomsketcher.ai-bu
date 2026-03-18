@@ -1,0 +1,27 @@
+{
+  "name": "roomsketcher-help-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create roomsketcher-help",
+    "db:migrate": "wrangler d1 execute roomsketcher-help --local --file=src/db/schema.sql",
+    "db:migrate:remote": "wrangler d1 execute roomsketcher-help --remote --file=src/db/schema.sql"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "agents": "^0.7.6",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.75.0"
+  }
+}

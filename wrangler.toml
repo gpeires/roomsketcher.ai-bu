@@ -1,0 +1,21 @@
+name = "roomsketcher-help-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["0 */6 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "roomsketcher-help"
+database_id = "8e3843be-f977-420a-87ef-10c03e4b78e1"
+
+[durable_objects]
+bindings = [
+  { name = "MCP_OBJECT", class_name = "RoomSketcherHelpMCP" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomSketcherHelpMCP"]
