@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shoelaceArea, centroid, boundingBox } from './geometry';
+import { shoelaceArea, centroid, boundingBox, pointInPolygon } from './geometry';
 import type { Point, Wall } from './types';
 
 describe('shoelaceArea', () => {
@@ -73,3 +73,34 @@ describe('boundingBox', () => {
     expect(bb).toEqual({ minX: 0, minY: 0, maxX: 0, maxY: 0 });
   });
 });
+
+describe('pointInPolygon', () => {
+  const square: Point[] = [
+    { x: 0, y: 0 },
+    { x: 400, y: 0 },
+    { x: 400, y: 400 },
+    { x: 0, y: 400 },
+  ]
+
+  it('returns true for point inside polygon', () => {
+    expect(pointInPolygon({ x: 200, y: 200 }, square)).toBe(true)
+  })
+
+  it('returns false for point outside polygon', () => {
+    expect(pointInPolygon({ x: 500, y: 500 }, square)).toBe(false)
+  })
+
+  it('returns true for point just inside top edge', () => {
+    expect(pointInPolygon({ x: 200, y: 1 }, square)).toBe(true)
+  })
+
+  it('works with triangle', () => {
+    const tri: Point[] = [
+      { x: 0, y: 0 },
+      { x: 300, y: 0 },
+      { x: 150, y: 300 },
+    ]
+    expect(pointInPolygon({ x: 150, y: 100 }, tri)).toBe(true)
+    expect(pointInPolygon({ x: 0, y: 300 }, tri)).toBe(false)
+  })
+})

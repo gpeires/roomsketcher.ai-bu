@@ -50,3 +50,20 @@ export function boundingBox(walls: Wall[]): {
   }
   return { minX, minY, maxX, maxY };
 }
+
+/**
+ * Ray-casting point-in-polygon test.
+ * Returns true if point is inside the polygon (edge behavior is undefined).
+ */
+export function pointInPolygon(point: Point, polygon: Point[]): boolean {
+  if (polygon.length < 3) return false
+  let inside = false
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y
+    const xj = polygon[j].x, yj = polygon[j].y
+    const intersect = ((yi > point.y) !== (yj > point.y)) &&
+      (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi)
+    if (intersect) inside = !inside
+  }
+  return inside
+}
