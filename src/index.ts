@@ -7,9 +7,9 @@ import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession } from './types';
-import { FloorPlanSchema } from './sketch/types';
+import { FloorPlanSchema, ChangeSchema } from './sketch/types';
 import type { ClientMessage, Change } from './sketch/types';
-import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher } from './sketch/tools';
+import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
 import { applyChanges } from './sketch/changes';
 import { floorPlanToSvg } from './sketch/svg';
@@ -278,6 +278,54 @@ ${JSON.stringify({
       },
       async ({ sketch_id }) => {
         return handleOpenSketcher(sketch_id, this.getWorkerUrl());
+      },
+    );
+
+    this.server.registerTool(
+      'update_sketch',
+      {
+        description: 'Push modifications to an existing sketch. Use this to move walls, add rooms, add openings, etc. Changes are applied in order and broadcast to the browser sketcher in real-time.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+          changes: z.array(ChangeSchema).describe('Array of changes to apply'),
+        },
+      },
+      async ({ sketch_id, changes }) => {
+        return handleUpdateSketch(
+          sketch_id,
+          changes,
+          this.env.DB,
+          () => this.state,
+          (s) => this.setState(s),
+          (msg) => this.broadcastToSketchClients(msg),
+        );
+      },
+    );
+
+    this.server.registerTool(
+      'suggest_improvements',
+      {
+        description: 'Analyze the current floor plan and get structured data with analysis prompts. Use this to provide feedback on room proportions, traffic flow, door placement, and missing features.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+        },
+      },
+      async ({ sketch_id }) => {
+        return handleSuggestImprovements(sketch_id, this.env.DB, this.state);
+      },
+    );
+
+    this.server.registerTool(
+      'export_sketch',
+      {
+        description: 'Export a sketch in various formats (SVG image, PDF download link, or text summary). Includes links to upgrade to RoomSketcher for 3D and professional features.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+          format: z.enum(['svg', 'pdf', 'summary']).default('svg').describe('Export format'),
+        },
+      },
+      async ({ sketch_id, format }) => {
+        return handleExportSketch(sketch_id, format, this.env.DB, this.state, this.getWorkerUrl());
       },
     );
   }

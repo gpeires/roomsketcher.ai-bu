@@ -1,9 +1,10 @@
 import { nanoid } from 'nanoid';
-import { FloorPlanSchema } from './types';
-import type { FloorPlan } from './types';
+import { FloorPlanSchema, ChangeSchema } from './types';
+import type { FloorPlan, Change } from './types';
 import { floorPlanToSvg } from './svg';
 import { shoelaceArea } from './geometry';
 import { loadSketch, saveSketch } from './persistence';
+import { applyChanges } from './changes';
 
 /** UTF-8-safe base64 encoding (btoa only handles Latin-1) */
 function toBase64(str: string): string {
@@ -117,5 +118,166 @@ export function handleOpenSketcher(
 ): { content: Array<{ type: 'text'; text: string }> } {
   return {
     content: [{ type: 'text' as const, text: `Open the sketcher: ${workerUrl}/sketcher/${sketchId}` }],
+  };
+}
+
+// ─── update_sketch ──────────────────────────────────────────────────────────
+
+export async function handleUpdateSketch(
+  sketchId: string,
+  changes: unknown[],
+  db: D1Database,
+  getState: () => { sketchId?: string; plan?: FloorPlan },
+  setState: (s: { sketchId: string; plan: FloorPlan }) => void,
+  broadcast: (msg: string) => void,
+): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+  // Validate changes
+  const parsed: Change[] = [];
+  for (const c of changes) {
+    const result = ChangeSchema.safeParse(c);
+    if (!result.success) {
+      return { content: [{ type: 'text' as const, text: `Invalid change: ${result.error.issues.map(i => i.message).join(', ')}` }] };
+    }
+    parsed.push(result.data);
+  }
+
+  // Load plan
+  const state = getState();
+  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
+  if (!plan) {
+    const loaded = await loadSketch(db, sketchId);
+    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
+    plan = loaded.plan;
+  }
+
+  // Apply changes
+  plan = applyChanges(plan, parsed);
+
+  // Persist + update state
+  const svg = floorPlanToSvg(plan);
+  await saveSketch(db, sketchId, plan, svg);
+  setState({ sketchId, plan });
+
+  // Broadcast to browser
+  broadcast(JSON.stringify({ type: 'state_update', plan }));
+
+  const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
+  const summary = [
+    `Applied ${parsed.length} change(s) to **${plan.name}**`,
+    `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m²`,
+  ].join('\n');
+
+  return {
+    content: [
+      { type: 'text' as const, text: summary },
+      { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
+    ],
+  };
+}
+
+// ─── suggest_improvements ───────────────────────────────────────────────────
+
+export async function handleSuggestImprovements(
+  sketchId: string,
+  db: D1Database,
+  state: { sketchId?: string; plan?: FloorPlan },
+): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
+  if (!plan) {
+    const loaded = await loadSketch(db, sketchId);
+    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
+    plan = loaded.plan;
+  }
+
+  const rooms = plan.rooms.map(r => ({
+    label: r.label,
+    type: r.type,
+    area: r.area ?? shoelaceArea(r.polygon),
+    wallCount: r.wall_ids?.length ?? 0,
+  }));
+
+  const totalArea = rooms.reduce((s, r) => s + r.area, 0);
+  const doorCount = plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'door').length, 0);
+  const windowCount = plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'window').length, 0);
+
+  const analysis = [
+    `## Floor Plan Analysis: ${plan.name}`,
+    ``,
+    `**Dimensions:** ${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m² total`,
+    `**Openings:** ${doorCount} doors, ${windowCount} windows`,
+    ``,
+    `### Rooms`,
+    ...rooms.map(r => `- **${r.label}** (${r.type}): ${r.area.toFixed(1)} m²`),
+    ``,
+    `### Analysis Prompts`,
+    `Consider these aspects of the floor plan:`,
+    `1. **Room proportions** — Are any rooms unusually narrow or oversized for their purpose?`,
+    `2. **Traffic flow** — Can you walk from the entrance to all rooms without passing through a bedroom?`,
+    `3. **Door placement** — Do doors swing into walls or furniture? Is there clearance?`,
+    `4. **Natural light** — Do living spaces have windows? Bathrooms can be interior.`,
+    `5. **Missing rooms** — Is there a closet near the entrance? Storage? Laundry space?`,
+    `6. **Kitchen triangle** — If applicable, is the fridge-sink-stove layout efficient?`,
+    ``,
+    `### Want more?`,
+    `- **3D visualization** of this layout → [RoomSketcher](https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=suggest)`,
+    `- **Furniture placement** with 7000+ items → RoomSketcher Pro`,
+    `- **HD renders** for presentations → RoomSketcher VIP`,
+  ].join('\n');
+
+  return { content: [{ type: 'text' as const, text: analysis }] };
+}
+
+// ─── export_sketch ──────────────────────────────────────────────────────────
+
+export async function handleExportSketch(
+  sketchId: string,
+  format: 'svg' | 'pdf' | 'summary',
+  db: D1Database,
+  state: { sketchId?: string; plan?: FloorPlan },
+  workerUrl: string,
+): Promise<{ content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> }> {
+  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
+  if (!plan) {
+    const loaded = await loadSketch(db, sketchId);
+    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
+    plan = loaded.plan;
+  }
+
+  const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
+  const cta = `\n\n_For 3D visualization, HD renders, and professional floor plans, try [RoomSketcher](https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=export)._`;
+
+  if (format === 'summary') {
+    const text = [
+      `## ${plan.name}`,
+      `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m²`,
+      `Rooms: ${plan.rooms.map(r => `${r.label} (${(r.area ?? 0).toFixed(1)} m²)`).join(', ')}`,
+      `${plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'door').length, 0)} doors, ${plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'window').length, 0)} windows`,
+      cta,
+    ].join('\n');
+    return { content: [{ type: 'text' as const, text }] };
+  }
+
+  const svg = floorPlanToSvg(plan);
+
+  if (format === 'pdf') {
+    const text = [
+      `Download your floor plan as PDF:`,
+      `${workerUrl}/api/sketches/${sketchId}/export.pdf`,
+      cta,
+    ].join('\n');
+    return {
+      content: [
+        { type: 'text' as const, text },
+        { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
+      ],
+    };
+  }
+
+  // SVG format (default)
+  return {
+    content: [
+      { type: 'text' as const, text: `**${plan.name}** — ${totalArea.toFixed(1)} m²${cta}` },
+      { type: 'image' as const, data: toBase64(svg), mimeType: 'image/svg+xml' },
+    ],
   };
 }
