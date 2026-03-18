@@ -15,6 +15,12 @@ import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persist
 import { applyChanges } from './sketch/changes';
 import { floorPlanToSvg } from './sketch/svg';
 import { sketcherHtml } from './sketcher/html';
+import studioTpl from './sketch/templates/studio.json';
+import onebrTpl from './sketch/templates/1br-apartment.json';
+import twobrTpl from './sketch/templates/2br-apartment.json';
+import threebrTpl from './sketch/templates/3br-house.json';
+import loftTpl from './sketch/templates/open-plan-loft.json';
+import lshapedTpl from './sketch/templates/l-shaped-home.json';
 
 export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
   private _workerOrigin: string | null = null;
@@ -358,6 +364,55 @@ Provide a name and description. The system will fill in defaults for wall thickn
           ctaState,
           (cta) => this.setState({ ...this.state, cta }),
         );
+      },
+    );
+
+    // ─── Template tools ──────────────────────────────────────────────────
+
+    this.server.registerTool(
+      'list_templates',
+      {
+        description: 'List available floor plan templates. Use this to find a starting point before generating a floor plan. Always start from the nearest template rather than building coordinates from scratch.',
+        inputSchema: {},
+      },
+      async () => {
+        const templates = [
+          { id: 'studio', description: 'Studio apartment — open plan with bathroom', rooms: '1 + bathroom', size: '35-45 sqm' },
+          { id: '1br-apartment', description: '1-bedroom apartment — living, bedroom, bathroom, hallway', rooms: '3 + hallway', size: '50-65 sqm' },
+          { id: '2br-apartment', description: '2-bedroom apartment — living, kitchen, 2 bedrooms, bathroom', rooms: '5 + hallway', size: '70-90 sqm' },
+          { id: '3br-house', description: '3-bedroom house — living, kitchen, dining, 3 bedrooms, 2 bathrooms', rooms: '7+', size: '110-140 sqm' },
+          { id: 'open-plan-loft', description: 'Open plan loft — minimal walls, large windows, zones defined by furniture', rooms: '1 + bathroom', size: '60-80 sqm' },
+          { id: 'l-shaped-home', description: 'L-shaped home — two wings at 90 degrees, non-rectangular', rooms: '5+', size: '90-120 sqm' },
+        ];
+        const text = templates.map(t =>
+          `- **${t.id}**: ${t.description} (${t.rooms}, ${t.size})`
+        ).join('\n');
+        return { content: [{ type: 'text' as const, text }] };
+      },
+    );
+
+    this.server.registerTool(
+      'get_template',
+      {
+        description: 'Get a floor plan template by ID. Returns complete FloorPlan JSON you can adapt and pass to generate_floor_plan. Modify dimensions, add/remove rooms, reposition furniture to match the user\'s request.',
+        inputSchema: {
+          template_id: z.string().describe('Template ID from list_templates (e.g. "2br-apartment")'),
+        },
+      },
+      async ({ template_id }) => {
+        const templates: Record<string, unknown> = {
+          'studio': studioTpl,
+          '1br-apartment': onebrTpl,
+          '2br-apartment': twobrTpl,
+          '3br-house': threebrTpl,
+          'open-plan-loft': loftTpl,
+          'l-shaped-home': lshapedTpl,
+        };
+        const tpl = templates[template_id];
+        if (!tpl) {
+          return { content: [{ type: 'text' as const, text: `Unknown template: ${template_id}. Use list_templates to see available options.` }] };
+        }
+        return { content: [{ type: 'text' as const, text: JSON.stringify(tpl, null, 2) }] };
       },
     );
   }
