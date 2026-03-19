@@ -73,6 +73,8 @@ export function sketcherHtml(sketchId: string): string {
   svg line[data-id] { cursor: pointer; }
   svg line[data-id]:hover { stroke: var(--rs-teal) !important; }
   svg line.selected { stroke: var(--rs-danger) !important; }
+  .drag-handle { cursor: grab; }
+  .drag-handle:active { cursor: grabbing; }
   svg polygon[data-id] { cursor: pointer; }
   svg polygon[data-id]:hover { fill-opacity: 0.7; }
 
@@ -542,6 +544,14 @@ export function sketcherHtml(sketchId: string): string {
       case 'remove_room':
         plan.rooms = plan.rooms.filter(function(r) { return r.id !== change.room_id; });
         break;
+      case 'update_room': {
+        var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
+        if (r) {
+          if (change.polygon) { r.polygon = change.polygon; r.area = computeArea(change.polygon); }
+          if (change.area !== undefined) r.area = change.area;
+        }
+        break;
+      }
       case 'add_furniture':
         plan.furniture.push(change.furniture);
         break;
@@ -564,6 +574,7 @@ export function sketcherHtml(sketchId: string): string {
   // --- Render ---
   function render() {
     if (!plan) return;
+    if (isDragging) return;
 
     // Only recalculate viewBox if user hasn't panned/zoomed
     if (!userViewBox) {
@@ -704,6 +715,20 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
+    // Drag handles for selected wall
+    html += '<g id="drag-handles">';
+    if (selected && selected.type === 'wall') {
+      var selWall = plan.walls.find(function(w) { return w.id === selected.id; });
+      if (selWall) {
+        var hr = isMobile() ? 14 : 8;
+        html += '<circle class="drag-handle" cx="' + selWall.start.x + '" cy="' + selWall.start.y + '" r="' + hr + '" fill="rgba(0,181,204,0.3)" stroke="#00B5CC" stroke-width="2" data-wall-id="' + selWall.id + '" data-endpoint="start" style="cursor:grab"/>';
+        html += '<circle class="drag-handle" cx="' + selWall.end.x + '" cy="' + selWall.end.y + '" r="' + hr + '" fill="rgba(0,181,204,0.3)" stroke="#00B5CC" stroke-width="2" data-wall-id="' + selWall.id + '" data-endpoint="end" style="cursor:grab"/>';
+      }
+    }
+    html += '</g>';
+    // Snap guides overlay (populated during drag by renderSnapGuides)
+    html += '<g id="snap-guides"></g>';
+
     svg.innerHTML = html;
     attachInteraction();
   }
@@ -831,6 +856,16 @@ export function sketcherHtml(sketchId: string): string {
     return {
       x: Math.round((viewBox.x + (e.clientX - rect.left) * scaleX) / 10) * 10,
       y: Math.round((viewBox.y + (e.clientY - rect.top) * scaleY) / 10) * 10,
+    };
+  }
+
+  function svgPointRaw(e) {
+    var rect = svg.getBoundingClientRect();
+    var scaleX = viewBox.w / rect.width;
+    var scaleY = viewBox.h / rect.height;
+    return {
+      x: viewBox.x + (e.clientX - rect.left) * scaleX,
+      y: viewBox.y + (e.clientY - rect.top) * scaleY,
     };
   }
 
@@ -1041,15 +1076,162 @@ export function sketcherHtml(sketchId: string): string {
   });
 
   function beginEndpointDrag(wallId, endpoint) {
-    // Implemented in Task 4
+    var wall = plan.walls.find(function(w) { return w.id === wallId; });
+    if (!wall) return;
+    var startPoint = endpoint === 'start' ? wall.start : wall.end;
+    dragState = {
+      wallId: wallId,
+      endpoint: endpoint,
+      startPoint: { x: startPoint.x, y: startPoint.y },
+      connectedWalls: [],
+      originalPositions: {},
+      detached: false
+    };
+    dragState.originalPositions[wallId] = {
+      start: { x: wall.start.x, y: wall.start.y },
+      end: { x: wall.end.x, y: wall.end.y }
+    };
+    isDragging = true;
   }
 
   function updateEndpointDrag(e) {
-    // Implemented in Task 4
+    if (!dragState || !plan) return;
+    var rawPt = svgPointRaw(e);
+    // Grid snap (10cm) — full snap system replaces this in Task 7
+    var pt = { x: Math.round(rawPt.x / 10) * 10, y: Math.round(rawPt.y / 10) * 10 };
+
+    var wall = plan.walls.find(function(w) { return w.id === dragState.wallId; });
+    if (!wall) return;
+
+    // Update model
+    if (dragState.endpoint === 'start') wall.start = pt;
+    else wall.end = pt;
+
+    // Direct DOM update (no full render — performance)
+    var wallEl = svg.querySelector('line[data-id="' + dragState.wallId + '"]');
+    if (wallEl) {
+      wallEl.setAttribute('x1', wall.start.x);
+      wallEl.setAttribute('y1', wall.start.y);
+      wallEl.setAttribute('x2', wall.end.x);
+      wallEl.setAttribute('y2', wall.end.y);
+    }
+
+    // Update drag handle positions
+    svg.querySelectorAll('.drag-handle[data-wall-id="' + dragState.wallId + '"]').forEach(function(h) {
+      var ep = h.dataset.endpoint === 'start' ? wall.start : wall.end;
+      h.setAttribute('cx', ep.x);
+      h.setAttribute('cy', ep.y);
+    });
+  }
+
+  function pushUndo(changes, inverseChanges) {
+    undoStack.push({ changes: changes, inverseChanges: inverseChanges });
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+    redoStack = [];
+    updateUndoButtons();
+  }
+
+  function updateUndoButtons() {
+    var undoBtn = document.getElementById('btn-undo');
+    var redoBtn = document.getElementById('btn-redo');
+    if (undoBtn) undoBtn.disabled = undoStack.length === 0;
+    if (redoBtn) redoBtn.disabled = redoStack.length === 0;
+    var mUndo = document.getElementById('mobile-undo');
+    var mRedo = document.getElementById('mobile-redo');
+    if (mUndo) mUndo.disabled = undoStack.length === 0;
+    if (mRedo) mRedo.disabled = redoStack.length === 0;
   }
 
   function commitEndpointDrag() {
-    // Implemented in Task 4
+    if (!dragState || !plan) { isDragging = false; return; }
+    var wall = plan.walls.find(function(w) { return w.id === dragState.wallId; });
+    if (!wall) { isDragging = false; return; }
+
+    // Prevent degenerate walls (less than 5cm)
+    var wdx = wall.end.x - wall.start.x, wdy = wall.end.y - wall.start.y;
+    var wlen = Math.sqrt(wdx * wdx + wdy * wdy);
+    if (wlen < 5) {
+      // Revert to original positions
+      var revert = dragState.originalPositions[dragState.wallId];
+      wall.start = revert.start;
+      wall.end = revert.end;
+      if (dragState.connectedWalls) {
+        for (var ri = 0; ri < dragState.connectedWalls.length; ri++) {
+          var rc = dragState.connectedWalls[ri];
+          var rw = plan.walls.find(function(w) { return w.id === rc.wallId; });
+          var ro = dragState.originalPositions[rc.wallId];
+          if (rw && ro) { rw.start = ro.start; rw.end = ro.end; }
+        }
+      }
+      isDragging = false;
+      dragState = null;
+      render();
+      return;
+    }
+
+    var changes = [];
+    var inverseChanges = [];
+
+    // Main wall
+    var orig = dragState.originalPositions[dragState.wallId];
+    changes.push({ type: 'move_wall', wall_id: dragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
+    inverseChanges.push({ type: 'move_wall', wall_id: dragState.wallId, start: orig.start, end: orig.end });
+
+    // Connected walls (added in Task 6)
+    if (!dragState.detached && dragState.connectedWalls) {
+      for (var ci = 0; ci < dragState.connectedWalls.length; ci++) {
+        var conn = dragState.connectedWalls[ci];
+        var cw = plan.walls.find(function(w) { return w.id === conn.wallId; });
+        var corig = dragState.originalPositions[conn.wallId];
+        if (cw && corig) {
+          changes.push({ type: 'move_wall', wall_id: conn.wallId, start: { x: cw.start.x, y: cw.start.y }, end: { x: cw.end.x, y: cw.end.y } });
+          inverseChanges.push({ type: 'move_wall', wall_id: conn.wallId, start: corig.start, end: corig.end });
+        }
+      }
+    }
+
+    // Room polygon propagation (added in Task 8)
+    var origPt = dragState.startPoint;
+    var newPt = dragState.endpoint === 'start' ? wall.start : wall.end;
+    if (origPt.x !== newPt.x || origPt.y !== newPt.y) {
+      var roomThreshold = 2; // 2cm
+      for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+        var room = plan.rooms[rpi];
+        var roomChanged = false;
+        var newPolygon = room.polygon.map(function(v) {
+          if (Math.abs(v.x - origPt.x) <= roomThreshold && Math.abs(v.y - origPt.y) <= roomThreshold) {
+            roomChanged = true;
+            return { x: newPt.x, y: newPt.y };
+          }
+          return { x: v.x, y: v.y };
+        });
+        if (roomChanged) {
+          var oldPolygon = room.polygon.map(function(v) { return { x: v.x, y: v.y }; });
+          room.polygon = newPolygon;
+          room.area = computeArea(newPolygon);
+          changes.push({ type: 'update_room', room_id: room.id, polygon: newPolygon });
+          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: oldPolygon });
+        }
+      }
+    }
+
+    // Clear snap guides
+    var sgEl = svg.getElementById('snap-guides');
+    if (sgEl) sgEl.innerHTML = '';
+
+    if (changes.length > 0) {
+      pushUndo(changes, inverseChanges);
+      changes.forEach(function(c) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(c));
+        }
+      });
+    }
+
+    isDragging = false;
+    dragState = null;
+    render();
+    showProperties();
   }
 
   function updateFurnitureRotation(e) {
