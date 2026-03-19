@@ -1146,6 +1146,25 @@ export function sketcherHtml(sketchId: string): string {
     mouseDownPoint = null;
   });
 
+  function findConnectedEndpoints(wallId, endpoint) {
+    var wall = plan.walls.find(function(w) { return w.id === wallId; });
+    if (!wall) return [];
+    var pt = endpoint === 'start' ? wall.start : wall.end;
+    var threshold = 1; // 1cm
+    var connected = [];
+    for (var i = 0; i < plan.walls.length; i++) {
+      var w = plan.walls[i];
+      if (w.id === wallId) continue;
+      if (Math.abs(w.start.x - pt.x) <= threshold && Math.abs(w.start.y - pt.y) <= threshold) {
+        connected.push({ wallId: w.id, endpoint: 'start' });
+      }
+      if (Math.abs(w.end.x - pt.x) <= threshold && Math.abs(w.end.y - pt.y) <= threshold) {
+        connected.push({ wallId: w.id, endpoint: 'end' });
+      }
+    }
+    return connected;
+  }
+
   function beginEndpointDrag(wallId, endpoint) {
     var wall = plan.walls.find(function(w) { return w.id === wallId; });
     if (!wall) return;
@@ -1154,7 +1173,7 @@ export function sketcherHtml(sketchId: string): string {
       wallId: wallId,
       endpoint: endpoint,
       startPoint: { x: startPoint.x, y: startPoint.y },
-      connectedWalls: [],
+      connectedWalls: findConnectedEndpoints(wallId, endpoint),
       originalPositions: {},
       detached: false
     };
@@ -1162,6 +1181,16 @@ export function sketcherHtml(sketchId: string): string {
       start: { x: wall.start.x, y: wall.start.y },
       end: { x: wall.end.x, y: wall.end.y }
     };
+    var connected = dragState.connectedWalls;
+    for (var i = 0; i < connected.length; i++) {
+      var cw = plan.walls.find(function(w) { return w.id === connected[i].wallId; });
+      if (cw) {
+        dragState.originalPositions[connected[i].wallId] = {
+          start: { x: cw.start.x, y: cw.start.y },
+          end: { x: cw.end.x, y: cw.end.y }
+        };
+      }
+    }
     isDragging = true;
   }
 
@@ -1193,6 +1222,25 @@ export function sketcherHtml(sketchId: string): string {
       h.setAttribute('cx', ep.x);
       h.setAttribute('cy', ep.y);
     });
+
+    // Move connected walls (unless Alt/Option = detach mode)
+    if (!dragState.detached && dragState.connectedWalls) {
+      for (var i = 0; i < dragState.connectedWalls.length; i++) {
+        var conn = dragState.connectedWalls[i];
+        var cw = plan.walls.find(function(w) { return w.id === conn.wallId; });
+        if (!cw) continue;
+        if (conn.endpoint === 'start') cw.start = { x: pt.x, y: pt.y };
+        else cw.end = { x: pt.x, y: pt.y };
+
+        var cwEl = svg.querySelector('line[data-id="' + conn.wallId + '"]');
+        if (cwEl) {
+          cwEl.setAttribute('x1', cw.start.x);
+          cwEl.setAttribute('y1', cw.start.y);
+          cwEl.setAttribute('x2', cw.end.x);
+          cwEl.setAttribute('y2', cw.end.y);
+        }
+      }
+    }
   }
 
   function pushUndo(changes, inverseChanges) {
