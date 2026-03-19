@@ -1,4 +1,4 @@
-import type { Env, ZendeskArticle } from '../types';
+
 import { fetchCategories, fetchSections, fetchArticles } from './zendesk';
 import { htmlToText } from './html-to-text';
 import { chunkArticle } from './chunker';
@@ -72,13 +72,15 @@ export async function syncFromZendesk(db: D1Database): Promise<{
   await db.batch(sectionStmts);
   await db.batch(articleStmts);
 
-  // Chunk articles into design knowledge
-  const chunkStmts: ReturnType<D1Database['prepare']>[] = [];
+  // Chunk articles into design knowledge — batch inline to avoid accumulating all statements in memory
+  const D1_BATCH_LIMIT = 100;
+  let chunkBatch: ReturnType<D1Database['prepare']>[] = [];
+  let chunkCount = 0;
   for (const article of publishedArticles) {
     const chunks = chunkArticle(article.id, article.title, article.body || '');
     for (const chunk of chunks) {
       const tags = tagChunk(chunk.heading, chunk.content);
-      chunkStmts.push(
+      chunkBatch.push(
         db.prepare(
           `INSERT INTO design_knowledge (id, article_id, article_updated_at, article_title, article_url, heading, content, room_types, design_aspects)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -94,12 +96,15 @@ export async function syncFromZendesk(db: D1Database): Promise<{
           JSON.stringify(tags.designAspects),
         )
       );
+      chunkCount++;
+      if (chunkBatch.length >= D1_BATCH_LIMIT) {
+        await db.batch(chunkBatch);
+        chunkBatch = [];
+      }
     }
   }
-
-  // D1 batch limit is ~100 statements — insert in groups
-  for (let i = 0; i < chunkStmts.length; i += 100) {
-    await db.batch(chunkStmts.slice(i, i + 100));
+  if (chunkBatch.length > 0) {
+    await db.batch(chunkBatch);
   }
 
   // Flag stale agent insights (source articles changed since insight was created)
@@ -124,6 +129,6 @@ export async function syncFromZendesk(db: D1Database): Promise<{
     categories: categories.length,
     sections: sections.length,
     articles: publishedArticles.length,
-    chunks: chunkStmts.length,
+    chunks: chunkCount,
   };
 }

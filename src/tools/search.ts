@@ -1,4 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
+import { sanitizeFtsQuery } from './fts';
 
 interface SearchResult {
   id: number;
@@ -16,22 +17,8 @@ export async function searchArticles(
   query: string,
   limit: number = 10,
 ): Promise<SearchResult[]> {
-  // Sanitize the query for FTS5: remove special characters that could break the query
-  const sanitized = query
-    .replace(/["\*\(\)\-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!sanitized) {
-    return [];
-  }
-
-  // Add wildcard suffix for partial matching
-  const ftsQuery = sanitized
-    .split(' ')
-    .filter(Boolean)
-    .map((term) => `"${term}"*`)
-    .join(' ');
+  const ftsQuery = sanitizeFtsQuery(query);
+  if (!ftsQuery) return [];
 
   const results = await db
     .prepare(

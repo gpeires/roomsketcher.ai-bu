@@ -1,23 +1,5 @@
 import type { D1Database } from '@cloudflare/workers-types';
-
-// ─── Query Helpers ────────────────────────────────────────────────────────────
-
-/**
- * Sanitize user input for FTS5 MATCH syntax.
- * Removes special chars, wraps each term in quotes with wildcard suffix.
- */
-export function sanitizeFtsQuery(query: string): string {
-  const sanitized = query
-    .replace(/["\*\(\)\-\^:+]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!sanitized) return '';
-  return sanitized
-    .split(' ')
-    .filter(Boolean)
-    .map(term => `"${term}"*`)
-    .join(' ');
-}
+import { sanitizeFtsQuery } from './fts';
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -71,7 +53,7 @@ export async function searchDesignKnowledge(
   const designAspect = options.designAspect ?? null;
 
   // Search design_knowledge_fts with optional filters
-  const chunkResults = await db.prepare(`
+  const chunkQuery = db.prepare(`
     SELECT
       dk.id,
       dk.heading,
@@ -96,30 +78,33 @@ export async function searchDesignKnowledge(
   `).bind(ftsQuery, roomType, roomType, designAspect, designAspect, limit)
     .all<KnowledgeChunk>();
 
-  const chunks = chunkResults.results;
+  // Run both FTS queries in parallel
+  const insightQuery = options.includeInsights !== false
+    ? db.prepare(`
+        SELECT
+          ai.id,
+          ai.content,
+          ai.context,
+          ai.confidence,
+          ai.stale,
+          bm25(agent_insights_fts) AS rank
+        FROM agent_insights_fts
+        JOIN agent_insights ai ON ai.id = agent_insights_fts.rowid
+        WHERE agent_insights_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).bind(ftsQuery, limit).all<AgentInsightRow>()
+    : null;
 
-  // Optionally search agent insights
-  let insights: AgentInsightRow[] = [];
-  if (options.includeInsights !== false) {
-    const insightResults = await db.prepare(`
-      SELECT
-        ai.id,
-        ai.content,
-        ai.context,
-        ai.confidence,
-        ai.stale,
-        bm25(agent_insights_fts) AS rank
-      FROM agent_insights_fts
-      JOIN agent_insights ai ON ai.id = agent_insights_fts.rowid
-      WHERE agent_insights_fts MATCH ?
-      ORDER BY rank
-      LIMIT ?
-    `).bind(ftsQuery, limit)
-      .all<AgentInsightRow>();
-    insights = insightResults.results;
-  }
+  const [chunkResults, insightResults] = await Promise.all([
+    chunkQuery,
+    insightQuery,
+  ]);
 
-  return { chunks, insights };
+  return {
+    chunks: chunkResults.results,
+    insights: insightResults?.results ?? [],
+  };
 }
 
 // ─── Log Insight ──────────────────────────────────────────────────────────────
@@ -160,9 +145,9 @@ export async function logInsight(
     ).run();
 
     // D1 returns last_row_id on meta
-    const id = result.meta?.last_row_id;
-    return { id: id ?? undefined, message: 'Insight logged successfully.' };
-  } catch {
+    return { id: result.meta?.last_row_id, message: 'Insight logged successfully.' };
+  } catch (err) {
+    console.error('Failed to log insight:', err);
     return { error: 'Failed to save insight' };
   }
 }

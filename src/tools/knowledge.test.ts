@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { sanitizeFtsQuery, validateInsight } from './knowledge';
+import { sanitizeFtsQuery } from './fts';
+import { validateInsight } from './knowledge';
 
 describe('sanitizeFtsQuery', () => {
   it('strips FTS5 special characters and wraps terms with wildcard suffix', () => {
