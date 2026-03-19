@@ -358,7 +358,10 @@ COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10c
 
 Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.
 
-After generating, call preview_sketch to visually verify the result before proceeding.`,
+VISUAL FEEDBACK LOOP (required):
+After generating, call preview_sketch to see what you actually built. Inspect the image for overlapping walls, misplaced furniture, missing doors/windows, rooms that look wrong. If you see issues, fix them with update_sketch and preview again. Iterate until the plan looks correct — do NOT show the user a plan you haven't visually verified.
+
+How many iterations: If the user provided a reference image or detailed measurements, 1 preview check is usually enough. If building from a vague description ("make me a 2BR apartment"), expect 1-2 rounds of fixes. Keep it under 3 iterations total — the user shouldn't wait more than ~30 seconds for the feedback loop.`,
         inputSchema: {
           plan: FloorPlanInputSchema.describe('The complete FloorPlan JSON object'),
         },
@@ -397,7 +400,9 @@ After generating, call preview_sketch to visually verify the result before proce
     this.server.registerTool(
       'update_sketch',
       {
-        description: 'Push modifications to an existing sketch. PREFER THIS over generate_floor_plan when the user already has a sketch open — use get_sketch to read current state, then apply incremental changes. Supports: add/move/remove walls, add/remove openings, add/rename/remove rooms, add/move/remove furniture. Changes are applied in order and broadcast to the browser sketcher in real-time. After applying changes, call preview_sketch to visually verify the result, then use suggest_improvements to check the plan — it includes room-specific design knowledge from RoomSketcher guidelines.',
+        description: `Push modifications to an existing sketch. PREFER THIS over generate_floor_plan when the user already has a sketch open — use get_sketch to read current state, then apply incremental changes. Supports: add/move/remove walls, add/remove openings, add/rename/remove rooms, add/move/remove furniture. Changes are applied in order and broadcast to the browser sketcher in real-time.
+
+VISUAL FEEDBACK: After applying changes, call preview_sketch to verify the result visually. Look for regressions — moving a wall can break furniture placement or overlap with openings. If the change was cosmetic (renaming a room, adjusting a label), you can skip the preview. For structural changes (walls, openings, room boundaries), always preview. Use suggest_improvements for a deeper analysis when the user asks for feedback or when you spot issues you're unsure about.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
           changes: z.array(ChangeSchema).describe('Array of changes to apply'),
@@ -447,7 +452,9 @@ After generating, call preview_sketch to visually verify the result before proce
     this.server.registerTool(
       'preview_sketch',
       {
-        description: 'Get a visual PNG preview of a floor plan. Returns the rendered floor plan image showing rooms, walls, furniture, dimensions, and labels. Use this after generate_floor_plan or update_sketch to visually verify the quality of your changes.',
+        description: `Get a visual PNG preview of a floor plan. Returns the rendered floor plan as a PNG image showing rooms, walls, furniture, dimensions, and labels.
+
+PURPOSE: This is your eyes. Use it to verify what you built before presenting to the user. When reviewing the image, check for: (1) walls that overlap or leave gaps, (2) furniture placed outside rooms or overlapping each other, (3) doors/windows missing or in wrong positions, (4) rooms that are too small or oddly shaped, (5) labels that overlap or are unreadable. If you spot issues, fix them with update_sketch and preview again.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
         },

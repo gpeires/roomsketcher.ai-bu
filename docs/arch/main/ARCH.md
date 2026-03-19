@@ -16,7 +16,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
 │  │  MCP Tools   │   │  REST API    │   │  Browser Sketcher   │  │
-│  │  (16 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
+│  │  (17 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
 │  └──────┬───────┘   └──────┬───────┘   └────────┬────────────┘  │
 │         │                  │                     │               │
 │  ┌──────▼──────────────────▼─────────────────────▼───────────┐  │
@@ -24,7 +24,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │  │                                                           │  │
 │  │  RoomSketcherHelpMCP (McpAgent)                           │  │
 │  │   ├─ MCP protocol (/mcp)                                 │  │
-│  │   ├─ 16 registered tools (6 help + 8 sketch + 2 knowledge)│  │
+│  │   ├─ 17 registered tools (6 help + 9 sketch + 2 knowledge)│  │
 │  │   └─ Routes sketch ops to SketchSync DO                  │  │
 │  │                                                           │  │
 │  │  SketchSync (Agent)                                       │  │
@@ -322,11 +322,17 @@ Six floor plan templates agents use as starting points. The agent silently picks
 
 Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture with architectural symbols. Templates were regenerated to v3 quality using RoomSketcher design knowledge research.
 
-**Agent workflow for new sketches:** `search_design_knowledge` (per room type) → `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan` → `suggest_improvements` (returns spatial data + design knowledge). Tool descriptions guide agents to search design knowledge before generating and after modifying.
+**Agent workflow for new sketches:** `search_design_knowledge` (per room type) → `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan` → `preview_sketch` (visual verification) → fix issues via `update_sketch` → `preview_sketch` again if needed → `suggest_improvements` (returns spatial data + design knowledge). Tool descriptions guide agents to search design knowledge before generating and to visually verify before presenting results.
 
-**Agent workflow for modifications:** When a sketch already exists, the agent must use `update_sketch` (not `generate_floor_plan`). The tool descriptions enforce this: `generate_floor_plan` says "do NOT call this tool if a sketch already exists", and `update_sketch` says "PREFER THIS over generate_floor_plan". The workflow is: `get_sketch` → read current state → `update_sketch` with incremental changes → `preview_sketch` (visual verification) → `suggest_improvements` (includes design knowledge per room type).
+**Agent workflow for modifications:** When a sketch already exists, the agent must use `update_sketch` (not `generate_floor_plan`). The tool descriptions enforce this: `generate_floor_plan` says "do NOT call this tool if a sketch already exists", and `update_sketch` says "PREFER THIS over generate_floor_plan". The workflow is: `get_sketch` → read current state → `update_sketch` with incremental changes → `preview_sketch` (visual verification, required for structural changes, skippable for cosmetic changes like renames) → fix regressions if found → `suggest_improvements` (includes design knowledge per room type).
 
-**Visual feedback loop:** `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block. This gives agents pixel-level understanding of what they've built — the same feedback loop used during development with Playwright screenshots, but available as a tool. Tool descriptions on `generate_floor_plan` and `update_sketch` nudge agents to call `preview_sketch` after changes.
+**Visual feedback loop:** `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block. This gives agents pixel-level understanding of what they've built — the same feedback loop used during development with Playwright screenshots, but available as a tool.
+
+Tool descriptions enforce the loop with nuanced iteration guidance:
+- `generate_floor_plan` marks the loop as **required** — agents must not present a plan they haven't visually verified
+- `preview_sketch` describes itself as "your eyes" with a 5-point checklist (wall overlaps, furniture placement, missing openings, room sizing, label readability)
+- `update_sketch` requires preview after structural changes but allows skipping for cosmetic edits
+- **Iteration budget:** If the user provided a reference image or detailed measurements, 1 preview check suffices. For vague descriptions, expect 1–2 fix rounds. Max 3 iterations total to keep wait time under ~30 seconds.
 
 **Storage:** Templates are static JSON files in `src/sketch/templates/`, validated against `FloorPlanSchema` at build time.
 
