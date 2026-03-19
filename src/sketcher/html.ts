@@ -201,7 +201,7 @@ export function sketcherHtml(sketchId: string): string {
 </div>
 
 <div class="footer">
-  Powered by <a href="https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=sketcher-banner" target="_blank">RoomSketcher</a> \u2014 Upgrade for 3D walkthroughs, 7000+ furniture items, and HD renders
+  Powered by <a href="https://www.roomsketcher.com/get-started/?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=sketcher-banner" target="_blank">RoomSketcher</a> \u2014 Upgrade for 3D walkthroughs, 7000+ furniture items, and HD renders
 </div>
 
 <div class="bottom-sheet collapsed" id="bottom-sheet">
@@ -948,7 +948,7 @@ export function sketcherHtml(sketchId: string): string {
         var handleDist = Math.max(selFurn.width, selFurn.depth) / 2 + 20;
         var rot = (selFurn.rotation || 0) * Math.PI / 180;
         // Handle sits above the furniture center, rotated with the item
-        var hx = fcx - Math.sin(rot) * handleDist;
+        var hx = fcx + Math.sin(rot) * handleDist;
         var hy = fcy - Math.cos(rot) * handleDist;
         html += '<g id="rotation-handle">';
         html += '<line x1="' + fcx + '" y1="' + fcy + '" x2="' + hx + '" y2="' + hy + '" stroke="#00B5CC" stroke-width="1.5" pointer-events="none"/>';
