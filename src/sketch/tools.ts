@@ -7,10 +7,15 @@ import { loadSketch, saveSketch } from './persistence';
 import { applyChanges } from './changes';
 import { applyDefaults } from './defaults';
 import { pickCTA } from './cta-config';
+import { searchDesignKnowledge } from '../tools/knowledge';
+import { svgToPng } from './rasterize';
 import type { SessionCTAState, SketchSession } from '../types';
 import type { CTAMessage } from './cta-config';
 
-type ToolResult = { content: Array<{ type: 'text'; text: string }> };
+type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: 'image/png' };
+type ToolResult = { content: ContentBlock[] };
 
 export interface ToolContext {
   db: D1Database
@@ -263,6 +268,36 @@ export async function handleSuggestImprovements(
     '- Overall: Does this feel like a place someone would want to live in?',
   ];
 
+  // Search design knowledge per room type
+  const roomTypes = [...new Set(roomData.map(r => r.type).filter(Boolean))];
+  if (roomTypes.length > 0) {
+    const knowledgeByType = await Promise.all(
+      roomTypes.map(async (type) => {
+        const results = await searchDesignKnowledge(ctx.db, type, {
+          roomType: type,
+          limit: 3,
+          includeInsights: true,
+        });
+        return { type, chunks: results.chunks, insights: results.insights };
+      })
+    );
+
+    const hasKnowledge = knowledgeByType.some(k => k.chunks.length > 0 || k.insights.length > 0);
+    if (hasKnowledge) {
+      lines.push('', 'DESIGN GUIDANCE (from RoomSketcher professional standards):');
+      for (const { type, chunks, insights } of knowledgeByType) {
+        if (chunks.length === 0 && insights.length === 0) continue;
+        lines.push(`\n${type.toUpperCase()}:`);
+        for (const c of chunks) {
+          lines.push(`- ${c.heading}: ${c.content.slice(0, 500)}`);
+        }
+        for (const ins of insights) {
+          if (!ins.stale) lines.push(`- [insight] ${ins.content}`);
+        }
+      }
+    }
+  }
+
   // CTA
   const cta = fireCTA('suggest_improvements', ctx);
   if (cta) {
@@ -310,6 +345,34 @@ export async function handleExportSketch(
   return {
     content: [
       { type: 'text' as const, text: `**${plan.name}** — ${total.toFixed(1)} m\u00B2\n\nView in sketcher: ${ctx.workerUrl}/sketcher/${sketchId}${cta}` },
+    ],
+  };
+}
+
+// ─── preview_sketch ──────────────────────────────────────────────────────────
+
+export async function handlePreviewSketch(
+  sketchId: string,
+  ctx: ToolContext,
+): Promise<ToolResult> {
+  const result = await resolvePlan(sketchId, ctx);
+  if (isToolResult(result)) return result;
+  const plan = result;
+
+  const svg = floorPlanToSvg(plan);
+  const pngBytes = await svgToPng(svg, 1200);
+  const base64 = Buffer.from(pngBytes).toString('base64');
+
+  const text = [
+    `**${plan.name}** preview`,
+    `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${plan.furniture.length} furniture items`,
+    `Total area: ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
+  ].join('\n');
+
+  return {
+    content: [
+      { type: 'image' as const, data: base64, mimeType: 'image/png' as const },
+      { type: 'text' as const, text },
     ],
   };
 }

@@ -66,6 +66,7 @@ src/
 │   ├── tools.ts                # 6 MCP tool handlers for sketch ops
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
 │   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types)
+│   ├── rasterize.ts            # svgToPng() via @cf-wasm/resvg (WASM) for preview_sketch
 │   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map
 │   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
 │   ├── templates/
@@ -78,6 +79,9 @@ src/
 │   └── *.test.ts               # Unit tests (vitest)
 ├── sketcher/
 │   └── html.ts                 # Browser SPA (single-file HTML+CSS+JS)
+├── setup/
+│   ├── home.ts                 # Home/landing page HTML (feature overview, platform logos)
+│   └── html.ts                 # Setup/onboarding page HTML (per-platform MCP install guides)
 ├── tools/
 │   ├── search.ts               # FTS5 full-text search (articles)
 │   ├── browse.ts               # Category/section navigation
@@ -192,7 +196,7 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 
 ---
 
-## MCP Tools (16)
+## MCP Tools (17)
 
 ### Help Tools (6)
 
@@ -205,15 +209,16 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 | `get_article` | Full article by ID |
 | `get_article_by_url` | Full article by Zendesk URL |
 
-### Sketch Tools (8)
+### Sketch Tools (9)
 
 | Tool | Purpose |
 |------|---------|
-| `generate_floor_plan` | Validate + store + render a FloorPlan JSON |
+| `generate_floor_plan` | Validate + store + render a FloorPlan JSON (description enforces: don't use if sketch exists) |
 | `get_sketch` | Retrieve plan summary (walls, rooms, areas) |
 | `open_sketcher` | Return browser sketcher URL |
-| `update_sketch` | Apply changes + broadcast to browsers |
-| `suggest_improvements` | AI analysis prompts for the plan |
+| `update_sketch` | Apply changes + broadcast to browsers (description enforces: prefer over generate_floor_plan) |
+| `preview_sketch` | Rasterize SVG to PNG and return as MCP image — visual feedback loop for agents |
+| `suggest_improvements` | Spatial analysis + room-specific design knowledge from RoomSketcher guidelines |
 | `export_sketch` | SVG download link or text summary |
 | `list_templates` | List available floor plan templates for starting points |
 | `get_template` | Get a specific template's FloorPlan JSON by ID |
@@ -274,7 +279,9 @@ Some keywords require context (e.g., "sink" only tags as bathroom if bathroom-re
 1. `design_knowledge_fts` — filtered by `room_types` / `design_aspects` JSON arrays via `json_each()`
 2. `agent_insights_fts` — optionally included (default: true)
 
-Results ranked by BM25, limited to configurable count.
+Results ranked by BM25, limited to configurable count. Content returned with up to 600 chars per chunk (increased from 300 to preserve measurement details).
+
+`suggest_improvements` automatically calls `searchDesignKnowledge()` for each room type in the plan, appending a `DESIGN GUIDANCE` section with clearance rules, placement patterns, and workflow tips from RoomSketcher articles.
 
 ### Agent Insights
 
@@ -315,7 +322,11 @@ Six floor plan templates agents use as starting points. The agent silently picks
 
 Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture with architectural symbols. Templates were regenerated to v3 quality using RoomSketcher design knowledge research.
 
-**Agent workflow:** `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan`. The `generate_floor_plan` tool description directs agents to always start from a template rather than generating coordinates from a blank canvas.
+**Agent workflow for new sketches:** `search_design_knowledge` (per room type) → `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan` → `suggest_improvements` (returns spatial data + design knowledge). Tool descriptions guide agents to search design knowledge before generating and after modifying.
+
+**Agent workflow for modifications:** When a sketch already exists, the agent must use `update_sketch` (not `generate_floor_plan`). The tool descriptions enforce this: `generate_floor_plan` says "do NOT call this tool if a sketch already exists", and `update_sketch` says "PREFER THIS over generate_floor_plan". The workflow is: `get_sketch` → read current state → `update_sketch` with incremental changes → `preview_sketch` (visual verification) → `suggest_improvements` (includes design knowledge per room type).
+
+**Visual feedback loop:** `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block. This gives agents pixel-level understanding of what they've built — the same feedback loop used during development with Playwright screenshots, but available as a tool. Tool descriptions on `generate_floor_plan` and `update_sketch` nudge agents to call `preview_sketch` after changes.
 
 **Storage:** Templates are static JSON files in `src/sketch/templates/`, validated against `FloorPlanSchema` at build time.
 
@@ -458,6 +469,10 @@ perpY =  cos(wallAngle) * dir * doorWidth
 ```
 Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "left" always swings outward.
 
+### SVG Rasterizer (`src/sketch/rasterize.ts`)
+
+`svgToPng(svg, width?)` converts SVG strings to PNG using `@cf-wasm/resvg` (WASM, runs in-Worker). Default 1200px width, height auto-derived from viewBox. Used by `preview_sketch` MCP tool and `GET /api/sketches/:id/preview.png` HTTP endpoint.
+
 ---
 
 ## Browser Sketcher SPA
@@ -467,11 +482,62 @@ Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 **Tools:** Select, Wall, Door, Window, Room
 **Features:** Snap-to-grid (15px radius), pan/zoom, keyboard shortcuts (W/S/Delete/Cmd+S/Esc), real-time WebSocket sync, properties panel for selected elements, furniture rendered with architectural symbols
 **State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`
-**Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo, footer CTA
+**Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 
 **Client-side change handling:** The SPA implements all 12 change types in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
 
 **URL strategy:** All API calls use relative paths (`/api/sketches/...`, `/ws/...`) for proxy transparency. No hardcoded origins.
+
+### Mobile-Responsive Design
+
+The sketcher is fully responsive with a mobile-first approach at `max-width: 768px`.
+
+**Layout:**
+- Desktop: toolbar + canvas + properties sidebar (220px)
+- Mobile: full-width canvas + bottom sheet (hidden toolbar, hidden sidebar)
+
+**Bottom Sheet** (`position: fixed`, `max-height: 60vh` portrait / `50vh` landscape):
+- Three sections: actions (Save/SVG), tools (Select/Wall/Door/Window/Room), properties
+- Flexbox column layout with `sheet-props` using `flex: 1; min-height: 0` for scrollable overflow
+- Handle drag: swipe down 40px to collapse, up 40px to expand
+- Safe area support: `env(safe-area-inset-bottom)` padding for notched devices
+- Collapsed state peeks 48px (handle only)
+
+**ViewBox-Sheet Awareness:**
+The canvas viewBox adjusts based on the bottom sheet state to keep content visible:
+- When sheet is expanded on mobile, extra bottom padding is added to the viewBox proportional to the sheet's overlap with the SVG area
+- `preserveAspectRatio` switches to `xMidYMin meet` (top-aligned) when sheet is expanded, `xMidYMid meet` (centered) otherwise
+- Sheet expand/collapse triggers a refit (`userViewBox = false` → `render()`)
+- `sendChange()` always refits with sheet awareness (resets `userViewBox`)
+- WebSocket `state_update` only resets `userViewBox` on initial load, not on echoed local changes
+
+**Touch Gestures:**
+- Single-finger pan: translates viewBox, sets `userViewBox = true`
+- Two-finger pinch zoom: scales viewBox about midpoint, sets `userViewBox = true`
+- Tap detection: <10px movement + <300ms → select element or collapse sheet
+- `touch-action: none` on SVG prevents browser gesture interference
+
+### Setup & Onboarding Pages
+
+Two static pages for user acquisition, served from `src/setup/`.
+
+**Home page (`/`)** — `src/setup/home.ts`
+- Landing page with hero, feature grid (Generate, Edit, Design Knowledge, Export), platform logos (Claude, ChatGPT, Gemini, Perplexity), example prompts, and CTAs
+- Logo+brand in header is a home link (`<a href="/">`) — consistent across all pages (home, setup, sketcher)
+- All internal links are relative paths for proxy transparency
+
+**Setup page (`/setup`)** — `src/setup/html.ts`
+- MCP URL copy-to-clipboard box at top (uses absolute `env.WORKER_URL` for the MCP endpoint since users paste this into external apps)
+- Expandable accordion cards with per-platform step-by-step install instructions:
+  - **Claude** (recommended) — Settings > Integrations > Add Integration
+  - **ChatGPT** — Settings > Apps > Connect by URL
+  - **Gemini** — Gemini CLI MCP server config
+  - **Perplexity** — Settings > Custom Remote Connectors
+- Inline copy buttons on each URL reference
+- Prerequisites noted (paid plan requirements)
+- RoomSketcher Pro CTA at bottom
+
+**URL strategy:** Internal navigation uses relative paths (`/setup`, `/health`). The MCP URL shown to users is the only absolute URL, built from `env.WORKER_URL` to ensure it shows the custom domain (`roomsketcher.kworq.com/mcp`), not the raw workers.dev URL.
 
 ---
 
@@ -523,9 +589,12 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 
 | Route | Method | Handler |
 |-------|--------|---------|
+| `/` | GET | Home/landing page (feature overview, platform links) |
+| `/setup` | GET | MCP setup/onboarding page (per-platform install guides) |
 | `/mcp` | * | MCP protocol (McpAgent) |
 | `/health` | GET | Health check + last sync time |
 | `/admin/sync` | POST | Trigger Zendesk sync |
+| `/api/sketches/:id/preview.png` | GET | Rasterized PNG preview (1200px wide) |
 | `/api/sketches/:id` | GET | Load plan + SVG from D1 |
 | `/api/sketches/:id` | PUT | Save plan to D1 |
 | `/api/sketches/:id/export.pdf` | GET | Download SVG file |
@@ -552,6 +621,13 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 | Deterministic chunk IDs | Hash of `articleId:heading` stays stable across sync cycles, keeping agent_insights references valid |
 | Chunking in sync pipeline | Design knowledge extracted inline during Zendesk sync, not as a separate pass |
 | JSON arrays for tags | `room_types`/`design_aspects` stored as JSON, filtered via `json_each()` in FTS queries |
+| `env.WORKER_URL` for MCP URL | Setup page shows custom domain, not raw workers.dev — only place absolute URLs are needed |
+| Relative links in all pages | Home, setup, sketcher use relative paths for proxy transparency |
+| Tool descriptions enforce update-first | `generate_floor_plan` says "don't use if sketch exists"; `update_sketch` says "prefer this" |
+| `xMidYMin meet` when sheet expanded | Top-aligns content in SVG so floor plan stays visible above the bottom sheet |
+| Bottom sheet peek = 100px | Includes handle + Save/SVG buttons fully visible above mobile browser chrome |
+| `@cf-wasm/resvg` for rasterization | CF Workers-optimized wrapper handles WASM init pitfalls; adds ~1MB gzip to bundle (total ~1.4MB, under 3MB free tier) |
+| `preview_sketch` as separate tool | Agent chooses when to verify visually; doesn't bloat every generate/update response |
 
 ---
 
@@ -611,3 +687,27 @@ These are identified extensions from the original build plan, ready for implemen
 - **Prettier formatting** — codebase should be reformatted to match `.prettierrc` (4-space indent, no semicolons, trailing commas)
 - **E2E tests** — Playwright tests for the browser sketcher
 - **Rate limiting** — protect `/admin/sync` and sketch creation endpoints
+
+---
+
+## Deployment
+
+**Always deploy via `deploy.sh`** — never run `wrangler deploy` directly.
+
+The script handles the full deployment pipeline:
+
+1. Loads `.env` file (validates `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`)
+2. Ensures a `workers.dev` subdomain exists (creates one if needed)
+3. Ensures D1 database exists (creates if needed)
+4. Patches `wrangler.toml` with the real `database_id`
+5. Runs D1 schema migration (`src/db/schema.sql`)
+6. `npm ci` + `wrangler deploy`
+7. Triggers initial Zendesk sync
+8. Health check
+
+```bash
+bash deploy.sh        # uses .env
+bash deploy.sh .env.staging  # custom env file
+```
+
+**Custom domain:** The worker is proxied through `roomsketcher.kworq.com` via Cloudflare DNS. The `WORKER_URL` env var in `wrangler.toml` is set to the custom domain for URL generation.

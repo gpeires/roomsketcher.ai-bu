@@ -11,12 +11,14 @@ import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession, SessionCTAState } from './types';
 import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
 import type { ClientMessage, Change } from './sketch/types';
-import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch } from './sketch/tools';
+import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch, handlePreviewSketch } from './sketch/tools';
 import type { ToolContext } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
 import { applyChanges } from './sketch/changes';
 import { floorPlanToSvg } from './sketch/svg';
 import { sketcherHtml } from './sketcher/html';
+import { setupHtml } from './setup/html';
+import { homeHtml } from './setup/home';
 import studioTpl from './sketch/templates/studio.json';
 import onebrTpl from './sketch/templates/1br-apartment.json';
 import twobrTpl from './sketch/templates/2br-apartment.json';
@@ -240,7 +242,7 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
       'search_design_knowledge',
       {
         description:
-          'Search extracted design knowledge from RoomSketcher help articles. Returns focused chunks about room layouts, fixture placement, clearance rules, and design patterns — tagged by room type and design aspect. Also returns agent-contributed insights. Use this instead of search_articles when you need specific design guidance.',
+          'Search extracted design knowledge from RoomSketcher help articles. Returns focused chunks about room layouts, fixture placement, clearance rules, and design patterns — tagged by room type and design aspect. Also returns agent-contributed insights. Use this instead of search_articles when you need specific design guidance. Best used: before generating a floor plan (for room-specific standards) and when suggest_improvements reveals issues (for targeted solutions).',
         inputSchema: {
           query: z.string().describe('Natural language search query (e.g. "bathroom fixture placement", "kitchen work triangle")'),
           room_type: z.string().optional().describe('Filter by room type: bathroom, kitchen, bedroom, living, dining, hallway, office, outdoor'),
@@ -271,7 +273,7 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
             `${i + 1}. **${c.heading}**`,
             `   Room types: ${c.room_types}`,
             `   Design aspects: ${c.design_aspects}`,
-            `   ${c.content.slice(0, 300)}${c.content.length > 300 ? '...' : ''}`,
+            `   ${c.content.slice(0, 600)}${c.content.length > 600 ? '...' : ''}`,
             `   Source: [${c.source_article_title}](${c.source_article_url}) (ID: ${c.id})`,
           ].join('\n')));
         }
@@ -330,7 +332,9 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
       {
         description: `Generate a complete floor plan from a description. Returns a furnished plan with SVG preview.
 
-WORKFLOW: Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas.
+IMPORTANT: If a sketch already exists in this conversation (the user already has a sketch_id), do NOT call this tool. Use update_sketch instead to modify the existing plan. Only use generate_floor_plan when creating a brand-new floor plan from scratch.
+
+WORKFLOW: Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas. For best results, call search_design_knowledge with relevant room types first to apply professional clearance rules and layout patterns.
 
 STANDARD DIMENSIONS (cm):
 - Exterior walls: 20 thick. Interior: 10. Divider: 5.
@@ -352,7 +356,9 @@ FURNITURE: Place essential furniture in every room using the furniture catalog i
 
 COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10cm grid.
 
-Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.`,
+Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.
+
+After generating, call preview_sketch to visually verify the result before proceeding.`,
         inputSchema: {
           plan: FloorPlanInputSchema.describe('The complete FloorPlan JSON object'),
         },
@@ -391,7 +397,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
     this.server.registerTool(
       'update_sketch',
       {
-        description: 'Push modifications to an existing sketch. Use this to move walls, add rooms, add openings, etc. Changes are applied in order and broadcast to the browser sketcher in real-time. After applying changes, consider using suggest_improvements to check the plan and offer the user a next step.',
+        description: 'Push modifications to an existing sketch. PREFER THIS over generate_floor_plan when the user already has a sketch open — use get_sketch to read current state, then apply incremental changes. Supports: add/move/remove walls, add/remove openings, add/rename/remove rooms, add/move/remove furniture. Changes are applied in order and broadcast to the browser sketcher in real-time. After applying changes, call preview_sketch to visually verify the result, then use suggest_improvements to check the plan — it includes room-specific design knowledge from RoomSketcher guidelines.',
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
           changes: z.array(ChangeSchema).describe('Array of changes to apply'),
@@ -414,7 +420,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
     this.server.registerTool(
       'suggest_improvements',
       {
-        description: 'Analyze the current floor plan and return structured spatial, opening, and furniture data with reasoning prompts. Use this to evaluate room proportions, traffic flow, door placement, furniture fit, and overall livability.',
+        description: 'Analyze the current floor plan and return structured spatial data plus room-specific design knowledge from RoomSketcher professional guidelines. Includes clearance rules, placement patterns, and workflow tips per room type. Use this after generating or modifying a plan to evaluate proportions, traffic flow, furniture fit, and overall livability.',
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
         },
@@ -435,6 +441,19 @@ Provide a name and description. The system will fill in defaults for wall thickn
       },
       async ({ sketch_id, format }) => {
         return handleExportSketch(sketch_id, format, this.buildCtx());
+      },
+    );
+
+    this.server.registerTool(
+      'preview_sketch',
+      {
+        description: 'Get a visual PNG preview of a floor plan. Returns the rendered floor plan image showing rooms, walls, furniture, dimensions, and labels. Use this after generate_floor_plan or update_sketch to visually verify the quality of your changes.',
+        inputSchema: {
+          sketch_id: z.string().describe('The sketch ID'),
+        },
+      },
+      async ({ sketch_id }) => {
+        return handlePreviewSketch(sketch_id, this.buildCtx());
       },
     );
 
@@ -633,6 +652,17 @@ export default {
       }
     }
 
+    // Home page
+    if (url.pathname === '/') {
+      return new Response(homeHtml(), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // Setup / onboarding page
+    if (url.pathname === '/setup') {
+      const workerUrl = env.WORKER_URL || url.origin;
+      return new Response(setupHtml(`${workerUrl}/mcp`), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
     // Health check
     if (url.pathname === '/health') {
       const meta = await env.DB.prepare("SELECT value FROM sync_meta WHERE key = 'last_sync'").first<{ value: string }>();
@@ -653,6 +683,24 @@ export default {
       headers.set('x-partykit-room', sketchId);
       const proxied = new Request(request.url, { method: request.method, headers, body: request.body });
       return obj.fetch(proxied);
+    }
+
+    // PNG preview
+    const pngMatch = url.pathname.match(/^\/api\/sketches\/([A-Za-z0-9_-]+)\/preview\.png$/);
+    if (pngMatch && request.method === 'GET') {
+      const { svgToPng } = await import('./sketch/rasterize');
+      const sketchId = pngMatch[1];
+      const loaded = await loadSketch(env.DB, sketchId);
+      if (!loaded) return Response.json({ error: 'Not found' }, { status: 404 });
+
+      const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
+      const png = await svgToPng(svg, 1200);
+      return new Response(png, {
+        headers: {
+          'Content-Type': 'image/png',
+          'Cache-Control': 'public, max-age=60',
+        },
+      });
     }
 
     // PDF/SVG export
