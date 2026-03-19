@@ -10,6 +10,8 @@ import { searchDesignKnowledge, logInsight } from './tools/knowledge';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession, SessionCTAState } from './types';
 import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
+import type { FloorPlan } from './sketch/types';
+import { totalArea } from './sketch/geometry';
 import type { ClientMessage, Change } from './sketch/types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch, handlePreviewSketch } from './sketch/tools';
 import type { ToolContext } from './sketch/tools';
@@ -380,26 +382,48 @@ How many iterations: If the user provided a reference image or detailed measurem
         },
       },
       async ({ sketch_id }) => {
-        const result = await handleGetSketch(sketch_id, this.buildCtx());
-        // Append recent browser changes if any
+        // Try to get live state from the DO first (browser edits may not be in D1 yet)
+        let liveConnections = 0;
+        let liveChanges: { type: string; timestamp: string; summary: string }[] = [];
         try {
           const syncId = this.env.SKETCH_SYNC.idFromName(sketch_id);
           const syncObj = this.env.SKETCH_SYNC.get(syncId);
-          const changesRes = await syncObj.fetch(new Request('http://internal/changes'));
-          const { changes, connections } = await changesRes.json() as { changes: { type: string; timestamp: string; summary: string }[]; connections: number };
-          if (changes.length > 0 || connections > 0) {
-            const lines = [`\n---\n**Live status:** ${connections} browser(s) connected`];
-            if (changes.length > 0) {
-              lines.push(`**Recent browser edits** (${changes.length}):`);
-              for (const c of changes.slice(-10)) {
+
+          // Check for live in-memory state
+          const stateRes = await syncObj.fetch(new Request('http://internal/state'));
+          const stateData = await stateRes.json() as { plan: FloorPlan | null; connections?: number };
+          if (stateData.plan) {
+            // Use the live plan — it has all browser edits applied
+            const plan = stateData.plan;
+            liveConnections = stateData.connections ?? 0;
+            const summary = [
+              `**${plan.name}**`,
+              `${plan.walls.length} walls, ${plan.rooms.length} rooms`,
+              `Rooms: ${plan.rooms.map((r: any) => `${r.label} (${(r.area ?? 0).toFixed(1)} m\u00B2)`).join(', ')}`,
+              `Total area: ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
+              `Source: ${plan.metadata.source}`,
+              `Updated: ${plan.metadata.updated_at}`,
+            ].join('\n');
+
+            // Get change log
+            const changesRes = await syncObj.fetch(new Request('http://internal/changes'));
+            const changesData = await changesRes.json() as { changes: typeof liveChanges; connections: number };
+            liveChanges = changesData.changes;
+            liveConnections = changesData.connections;
+
+            const lines = [`\n---\n**Live status:** ${liveConnections} browser(s) connected`];
+            if (liveChanges.length > 0) {
+              lines.push(`**Recent browser edits** (${liveChanges.length}):`);
+              for (const c of liveChanges.slice(-10)) {
                 lines.push(`  ${c.timestamp.slice(11, 19)} ${c.summary}`);
               }
             }
-            if (result.content && result.content[0] && result.content[0].type === 'text') {
-              result.content[0].text += lines.join('\n');
-            }
+            return { content: [{ type: 'text' as const, text: summary + lines.join('\n') }] };
           }
-        } catch { /* SketchSync not available, skip */ }
+        } catch { /* SketchSync not available, fall through to D1 */ }
+
+        // No live state — read from D1
+        const result = await handleGetSketch(sketch_id, this.buildCtx());
         return result;
       },
     );
@@ -557,8 +581,10 @@ PURPOSE: This is your eyes. Use it to verify what you built before presenting to
 
 export class SketchSync extends Agent<Env, SketchSession> {
   private dirty = false;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
   private changeLog: { type: string; timestamp: string; summary: string }[] = [];
   private static MAX_CHANGE_LOG = 50;
+  private static SAVE_DEBOUNCE_MS = 2000;
 
   // Use our own WebSocket protocol, not the Agent framework's state sync
   shouldSendProtocolMessages() { return false; }
@@ -586,6 +612,18 @@ export class SketchSync extends Agent<Env, SketchSession> {
         changes = changes.filter(c => c.timestamp > since);
       }
       return new Response(JSON.stringify({ changes, connections: [...this.getConnections()].length }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // GET /state — return live in-memory plan if the DO has one (avoids stale D1 reads)
+    if (url.pathname === '/state' && request.method === 'GET') {
+      if (this.state?.plan) {
+        return new Response(JSON.stringify({ plan: this.state.plan, connections: [...this.getConnections()].length }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ plan: null }), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -673,7 +711,19 @@ export class SketchSync extends Agent<Env, SketchSession> {
       this.setState({ ...this.state, plan: updated });
       this.dirty = true;
       this.broadcastToClients(JSON.stringify({ type: 'state_update', plan: updated }));
+      this.debouncedSave();
     }
+  }
+
+  private debouncedSave() {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = setTimeout(async () => {
+      if (this.dirty && this.state?.plan && this.state?.sketchId) {
+        const svg = floorPlanToSvg(this.state.plan);
+        await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
+        this.dirty = false;
+      }
+    }, SketchSync.SAVE_DEBOUNCE_MS);
   }
 
   private broadcastToClients(message: string) {
