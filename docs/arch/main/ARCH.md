@@ -8,6 +8,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 
 1. **Help documentation MCP** — Zendesk articles synced to D1, searchable via MCP tools
 2. **AI floor plan sketcher** — Claude generates floor plans from natural language, users edit in a browser SPA, changes sync in real-time via WebSocket
+3. **Design knowledge system** — Articles chunked, tagged, and indexed for AI-driven design recommendations
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -15,7 +16,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
 │  │  MCP Tools   │   │  REST API    │   │  Browser Sketcher   │  │
-│  │  (14 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
+│  │  (16 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
 │  └──────┬───────┘   └──────┬───────┘   └────────┬────────────┘  │
 │         │                  │                     │               │
 │  ┌──────▼──────────────────▼─────────────────────▼───────────┐  │
@@ -23,22 +24,27 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │  │                                                           │  │
 │  │  RoomSketcherHelpMCP (McpAgent)                           │  │
 │  │   ├─ MCP protocol (/mcp)                                 │  │
-│  │   ├─ 14 registered tools (6 help + 8 sketch)             │  │
+│  │   ├─ 16 registered tools (6 help + 8 sketch + 2 knowledge)│  │
 │  │   └─ Routes sketch ops to SketchSync DO                  │  │
 │  │                                                           │  │
 │  │  SketchSync (Agent)                                       │  │
 │  │   ├─ WebSocket connections for live editing               │  │
 │  │   ├─ In-memory plan state during sessions                 │  │
-│  │   └─ Broadcasts changes to all connected browsers         │  │
+│  │   ├─ Broadcasts changes to all connected browsers         │  │
+│  │   └─ shouldSendProtocolMessages() → false (custom proto)  │  │
 │  └──────────────┬────────────────────────────────────────────┘  │
 │                 │                                               │
 │       ┌─────────▼──────────┬───────────┐                       │
 │       │   D1 Database      │  Cron     │                       │
 │       │   ├─ articles      │  (6h)     │                       │
 │       │   ├─ articles_fts  │  sync +   │                       │
-│       │   ├─ categories    │  cleanup  │                       │
-│       │   ├─ sections      │           │                       │
-│       │   └─ sketches      │           │                       │
+│       │   ├─ categories    │  chunk +  │                       │
+│       │   ├─ sections      │  tag +    │                       │
+│       │   ├─ sketches      │  cleanup  │                       │
+│       │   ├─ design_knowledge          │                       │
+│       │   ├─ design_knowledge_fts      │                       │
+│       │   ├─ agent_insights            │                       │
+│       │   └─ agent_insights_fts        │                       │
 │       └────────────────────┴───────────┘                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -56,13 +62,14 @@ src/
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
-│   ├── svg.ts                  # floorPlanToSvg() — server-side renderer
-│   ├── tools.ts                # 8 MCP tool handlers for sketch ops
+│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer
+│   ├── tools.ts                # 6 MCP tool handlers for sketch ops
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
-│   ├── defaults.ts             # applyDefaults() + DEFAULTS config
+│   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types)
+│   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map
 │   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
 │   ├── templates/
-│   │   ├── studio.json
+│   │   ├── studio.json         # v3 quality, fully furnished
 │   │   ├── 1br-apartment.json
 │   │   ├── 2br-apartment.json
 │   │   ├── 3br-house.json
@@ -72,15 +79,22 @@ src/
 ├── sketcher/
 │   └── html.ts                 # Browser SPA (single-file HTML+CSS+JS)
 ├── tools/
-│   ├── search.ts               # FTS5 full-text search
+│   ├── search.ts               # FTS5 full-text search (articles)
 │   ├── browse.ts               # Category/section navigation
-│   └── articles.ts             # Article retrieval by ID or URL
+│   ├── articles.ts             # Article retrieval by ID or URL
+│   ├── knowledge.ts            # searchDesignKnowledge + logInsight handlers
+│   ├── knowledge.test.ts       # Knowledge tool tests
+│   └── fts.ts                  # Shared sanitizeFtsQuery() utility
 ├── sync/
 │   ├── zendesk.ts              # Zendesk API client (paginated)
 │   ├── html-to-text.ts         # HTML → plain text converter
-│   └── ingest.ts               # Sync orchestrator (truncate + batch insert)
+│   ├── ingest.ts               # Sync orchestrator (chunk + tag + batch insert)
+│   ├── chunker.ts              # Split articles by H2/H3 headers, deterministic IDs
+│   ├── chunker.test.ts
+│   ├── tagger.ts               # Keyword-based room type + design aspect tagging
+│   └── tagger.test.ts
 └── db/
-    └── schema.sql              # D1 schema (articles, FTS, sketches)
+    └── schema.sql              # D1 schema (articles, FTS, sketches, knowledge, insights)
 ```
 
 ---
@@ -107,6 +121,7 @@ McpAgent framework owns specific routes (`/mcp`, `/sse`). WebSocket connections 
   - `onMessage` — applies changes, broadcasts to all clients, persists to D1
   - `onClose` — flushes state to D1
   - `/broadcast` endpoint — internal route for MCP DO to push changes to browsers
+  - `shouldSendProtocolMessages()` returns `false` — disables the Agent framework's automatic `CF_AGENT_STATE` broadcasts, using our own WebSocket protocol instead
 
 ---
 
@@ -132,7 +147,7 @@ FloorPlan
 │   ├── polygon [{x,y}...] (clockwise)
 │   ├── color, area (auto-computed)
 │   └── floor_material (future)
-├── furniture[] (V1 — labeled rectangles)
+├── furniture[]
 │   ├── id, type (from furniture catalog)
 │   ├── position {x,y}, rotation
 │   └── width, depth
@@ -153,13 +168,13 @@ FloorPlan
 | `add_opening` | wall_id, opening object |
 | `remove_opening` | wall_id, opening_id |
 | `add_room` | room object |
-| `rename_room` | room_id, label, room_type? |
+| `rename_room` | room_id, label, room_type? (updates color when type changes) |
 | `remove_room` | room_id |
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
 
-Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable).
+Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
 
 ### WebSocket Protocol
 
@@ -173,9 +188,11 @@ Server → Client:
   { type: 'error', message }
 ```
 
+The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_AGENT_STATE` broadcasts are disabled via `shouldSendProtocolMessages() → false`.
+
 ---
 
-## MCP Tools (14)
+## MCP Tools (16)
 
 ### Help Tools (6)
 
@@ -201,6 +218,86 @@ Server → Client:
 | `list_templates` | List available floor plan templates for starting points |
 | `get_template` | Get a specific template's FloorPlan JSON by ID |
 
+### Design Knowledge Tools (2)
+
+| Tool | Purpose |
+|------|---------|
+| `search_design_knowledge` | Search chunked articles + agent insights by query, room type, design aspect |
+| `log_insight` | Store agent-discovered design patterns with source chunk references + confidence |
+
+---
+
+## Design Knowledge System
+
+Articles from Zendesk are chunked, tagged, and indexed to power AI-driven design recommendations during floor plan creation.
+
+### Pipeline
+
+```
+Zendesk Sync (6h cron)
+  ↓
+Fetch categories/sections/articles
+  ↓
+Batch insert articles (FTS auto-indexed)
+  ↓
+For each article:
+  chunkArticle() → split by H2/H3 headers (deterministic IDs)
+    ↓
+  For each chunk:
+    tagChunk() → keyword matching → room_types[] + design_aspects[]
+      ↓
+    INSERT design_knowledge (heading, content, tags as JSON arrays)
+  ↓
+Flag stale agent_insights (article updated_at > insight created_at)
+```
+
+### Chunking (`src/sync/chunker.ts`)
+
+- Splits article HTML by `<h2>` and `<h3>` headers
+- Minimum 150 characters per chunk; small chunks merge with previous
+- Deterministic chunk IDs via hash of `articleId:heading` — stable across sync cycles so `agent_insights.source_chunk_ids` remain valid
+
+### Tagging (`src/sync/tagger.ts`)
+
+Keyword-based classification applied to each chunk during sync:
+
+| Tag Type | Values |
+|----------|--------|
+| **Room types** (9) | bathroom, kitchen, bedroom, living, dining, hallway, office, outdoor, closet |
+| **Design aspects** (8) | clearance, placement, workflow, dimensions, openings, fixtures, materials, color |
+
+Some keywords require context (e.g., "sink" only tags as bathroom if bathroom-related terms are present).
+
+### Search (`src/tools/knowledge.ts`)
+
+`searchDesignKnowledge(db, query, options)` runs parallel FTS5 queries:
+1. `design_knowledge_fts` — filtered by `room_types` / `design_aspects` JSON arrays via `json_each()`
+2. `agent_insights_fts` — optionally included (default: true)
+
+Results ranked by BM25, limited to configurable count.
+
+### Agent Insights
+
+`logInsight()` stores AI-discovered patterns:
+- Links to source chunks via `source_chunk_ids` (JSON array, validated against `design_knowledge`)
+- Confidence score [0, 1]
+- Auto-flagged as stale when source article is updated after insight creation
+
+---
+
+## FTS5 Search
+
+### Shared Sanitizer (`src/tools/fts.ts`)
+
+`sanitizeFtsQuery(query)` — used by both `search_articles` and `search_design_knowledge`:
+
+1. Strip FTS5 operators: `"*()-^:+`
+2. Collapse whitespace, trim
+3. Wrap each term: `"term"*` (phrase + prefix wildcard)
+4. Join with space
+
+Example: `bathroom fixture - clearance (min)` → `"bathroom"* "fixture"* "clearance"* "min"*`
+
 ---
 
 ## Template Catalog
@@ -216,7 +313,7 @@ Six floor plan templates agents use as starting points. The agent silently picks
 | `open-plan-loft` | 2 (main space, bathroom) | 60–80 sqm | Minimal interior walls, large windows |
 | `l-shaped-home` | 5+ | 90–120 sqm | Two wings at 90°, non-rectangular |
 
-Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture.
+Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture with architectural symbols. Templates were regenerated to v3 quality using RoomSketcher design knowledge research.
 
 **Agent workflow:** `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan`. The `generate_floor_plan` tool description directs agents to always start from a template rather than generating coordinates from a blank canvas.
 
@@ -224,9 +321,11 @@ Each template is a complete, valid FloorPlan JSON file including fully connected
 
 ---
 
-## Furniture Catalog (V1)
+## Furniture Catalog & Symbols
 
-~25 common furniture items with standard dimensions. Rendered as labeled rectangles in the SVG output. Templates ship fully furnished.
+### Catalog (`src/sketch/furniture-catalog.ts`)
+
+~25 common furniture items with standard dimensions:
 
 | Room Type | Items |
 |-----------|-------|
@@ -238,13 +337,31 @@ Each template is a complete, valid FloorPlan JSON file including fully connected
 | Dining | dining table, chairs x4-6, sideboard |
 | Hallway | shoe rack, coat hook |
 
-**SVG rendering:** Furniture renders as labeled rectangles — light gray fill (`#F5F5F5`), border (`#BDBDBD`), item label centered in small text. Rotation applied via SVG transform. Z-order: rooms → furniture → walls → openings → dimensions → watermark.
+### Architectural Symbols (`src/sketch/furniture-symbols.ts`)
+
+~40 proportional top-down SVG symbol generators, one per furniture type. Each function receives `(w, h)` and returns SVG path/shape elements normalized to the item's dimensions.
+
+| Category | Symbol Types |
+|----------|-------------|
+| Bedroom (5) | bed-double, bed-single, nightstand, wardrobe, dresser |
+| Living (6) | sofa-3seat, coffee-table, tv-unit, armchair, bookshelf, shoe-rack |
+| Kitchen (4) | kitchen-counter, kitchen-sink, fridge, stove |
+| Bathroom (4) | toilet, bath-sink, bathtub, shower |
+| Office (2) | desk, office-chair |
+| Dining (3) | dining-table, dining-chair, sideboard |
+| Hallway (1) | coat-hook |
+
+**Rendering:** `furnitureDefsBlock()` generates a `<defs>` block with `<symbol>` elements for each type. Items render via `<use>` with position/rotation transforms. Uses `vector-effect="non-scaling-stroke"` for DPI-independent rendering. Unknown types fall back to a labeled rectangle.
+
+**Z-order:** rooms → furniture → walls → openings → dimensions → watermark. Openings must render above walls so white gap lines work correctly.
+
+### Furniture in the Browser Sketcher
+
+The browser SPA (`html.ts`) also renders furniture symbols using the same `<defs>` / `<use>` pattern. Symbol definitions are embedded inline in the SPA HTML.
 
 **Furniture-to-room assignment:** `pointInPolygon(point, polygon)` in `geometry.ts` assigns furniture items to rooms for reporting in `suggest_improvements`. Items outside all room polygons are reported as "unassigned."
 
 **Change types:** `add_furniture`, `move_furniture`, `remove_furniture` are handled by `applyChanges()` in `changes.ts`, enabling the `update_sketch` tool to modify furniture after initial generation.
-
-**Extension points:** `svgIcon` field (future top-down icons), `catalogId` field (future link to RoomSketcher product catalog for upsell).
 
 ---
 
@@ -261,7 +378,7 @@ Two-schema approach keeps the strict runtime schema unchanged while making agent
 | `wall.thickness` | `exterior: 20`, `interior: 10`, `divider: 5` (cm) |
 | `wall.height` | `250` (cm) |
 | `canvas` | Auto-computed from bounding box of all wall endpoints + 100cm padding; `gridSize: 10` |
-| `room.color` | Lookup from room type → color palette map |
+| `room.color` | Lookup from room type → `ROOM_COLORS` palette map |
 | `opening.properties.swingDirection` | `"left"` for exterior doors, `"right"` for interior |
 | `opening.properties.sillHeight` | `90` for windows |
 | `opening.properties.windowType` | `"double"` |
@@ -269,14 +386,17 @@ Two-schema approach keeps the strict runtime schema unchanged while making agent
 | `metadata.source` | `"ai"` |
 | `metadata.created_at/updated_at` | Auto-filled |
 
-**Default color palette by room type:**
+**Default color palette by room type (`ROOM_COLORS`):**
 
 ```
 living: #E8F5E9    bedroom: #E3F2FD    kitchen: #FFF3E0
 bathroom: #E0F7FA  hallway: #F5F5F5    office: #F3E5F5
 dining: #FFF8E1    garage: #EFEBE9     closet: #ECEFF1
-laundry: #E8EAF6   balcony: #F1F8E9    storage: #ECEFF1
+laundry: #E8EAF6   balcony: #F1F8E9    terrace: #F1F8E9
+storage: #ECEFF1   utility: #ECEFF1    other: #FAFAFA
 ```
+
+`ROOM_COLORS` is also used by `rename_room` change handlers (both server and browser) to update room color when the room type changes.
 
 **Impact:** Wall input drops from 7 required fields to 4 (`id`, `start`, `end`, `type`). Room input drops from 6 to 4 (`id`, `label`, `type`, `polygon`). Canvas is fully optional. All existing code (browser sketcher, `changes.ts`, `svg.ts`, `persistence.ts`) continues to work with the strict schema — no breaking changes.
 
@@ -321,7 +441,7 @@ toolCallCount: number
 `floorPlanToSvg(plan)` renders a complete SVG with:
 
 1. **Rooms** — colored polygons + label + area text at centroid
-2. **Furniture** — labeled rectangles (fill `#F5F5F5`, stroke `#BDBDBD`), rotation via transform
+2. **Furniture** — architectural top-down symbols via `<defs>` / `<use>`, with position/rotation transforms; falls back to labeled rectangles for unknown types
 3. **Walls** — lines with thickness by type (exterior 4px, interior 2px, divider 1px dashed)
 4. **Openings** — door swing arcs, window parallel lines, plain gaps
 5. **Dimensions** — wall length labels, perpendicular offset, angle-normalized (never upside-down)
@@ -345,9 +465,11 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
 **Tools:** Select, Wall, Door, Window, Room
-**Features:** Snap-to-grid (15px radius), pan/zoom, keyboard shortcuts (W/S/Delete/Cmd+S/Esc), real-time WebSocket sync, properties panel for selected elements
+**Features:** Snap-to-grid (15px radius), pan/zoom, keyboard shortcuts (W/S/Delete/Cmd+S/Esc), real-time WebSocket sync, properties panel for selected elements, furniture rendered with architectural symbols
 **State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo, footer CTA
+
+**Client-side change handling:** The SPA implements all 12 change types in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
 
 **URL strategy:** All API calls use relative paths (`/api/sketches/...`, `/ws/...`) for proxy transparency. No hardcoded origins.
 
@@ -356,9 +478,13 @@ Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 ## Data Sync (Zendesk)
 
 - **Trigger:** Cron every 6 hours + manual `POST /admin/sync`
-- **Process:** Fetch all categories/sections/articles → truncate → batch insert → rebuild FTS
+- **Process:** Fetch all categories/sections/articles → truncate (FK order: design_knowledge → articles → sections → categories) → batch insert → chunk articles → tag chunks → insert design_knowledge → flag stale insights → rebuild FTS
 - **HTML conversion:** Custom regex-based converter (no DOM needed in Workers)
 - **Article storage:** Both `body_html` (original) and `body_text` (for MCP + FTS)
+- **Chunking:** Articles split by H2/H3 headers with deterministic IDs (hash of `articleId:heading`)
+- **Tagging:** Keyword-based classification into room types (9) and design aspects (8)
+- **Batching:** D1 batch limit of 100 statements per call; chunks flushed inline to avoid memory accumulation
+- **Output:** `{ categories, sections, articles, chunks }` counts
 
 ---
 
@@ -375,11 +501,21 @@ articles_fts(title, body_text)  -- FTS5 virtual table with auto-sync triggers
 -- Sketches
 sketches(id TEXT PK, plan_json, svg_cache, created_at, updated_at, expires_at)
 
+-- Design knowledge (chunked articles)
+design_knowledge(id, article_id FK, article_updated_at, heading, content,
+                 room_types JSON, design_aspects JSON)
+design_knowledge_fts(heading, content)  -- FTS5 with auto-sync triggers
+
+-- Agent insights (AI-discovered patterns)
+agent_insights(id, content, context, source_chunk_ids JSON, confidence,
+               stale INTEGER, created_at, updated_at)
+agent_insights_fts(content, context)  -- FTS5 with auto-sync triggers
+
 -- Metadata
 sync_meta(key PK, value)
 ```
 
-Sketches auto-expire after 30 days. Cleanup runs via cron.
+Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are auto-flagged as stale when their source article's `updated_at` exceeds the insight's `created_at`.
 
 ---
 
@@ -412,6 +548,10 @@ Sketches auto-expire after 30 days. Cleanup runs via cron.
 | Two-schema approach (input + strict) | Smart defaults without breaking existing code or storage schema |
 | Tools not Prompts for templates | Prompts are client-initiated; agents cannot call `prompts/get` mid-conversation |
 | CTA via env var (CTA_VARIANT) | Variant switching with no code redeploy — wrangler secret change only |
+| `shouldSendProtocolMessages() → false` | Prevents Agent framework's `CF_AGENT_STATE` noise on WebSocket; we use our own protocol |
+| Deterministic chunk IDs | Hash of `articleId:heading` stays stable across sync cycles, keeping agent_insights references valid |
+| Chunking in sync pipeline | Design knowledge extracted inline during Zendesk sync, not as a separate pass |
+| JSON arrays for tags | `room_types`/`design_aspects` stored as JSON, filtered via `json_each()` in FTS queries |
 
 ---
 
@@ -430,7 +570,7 @@ Door positions on vertical walls produce scientific notation coordinates (e.g., 
 These are identified extensions from the original build plan, ready for implementation:
 
 ### V2 — Furniture & Annotations
-- **Furniture V2** — top-down SVG icons replace labeled rectangles; link to RoomSketcher product catalog via `catalogId`; material/color variants per item; drag-and-drop placement in browser sketcher
+- **Furniture icons** — current symbols are proportional SVG shapes; future work could add photorealistic or isometric icons; link to RoomSketcher product catalog via `catalogId`; material/color variants per item; drag-and-drop placement in browser sketcher
 - **Annotations** — dimension lines, text labels, symbols, arrows
 - **Material finishes** — floor/wall/ceiling textures per room
 
@@ -449,6 +589,11 @@ These are identified extensions from the original build plan, ready for implemen
 - **Snap improvements** — wall-to-wall snapping, angle constraints (45/90)
 - **AI layout suggestions** — use room type + area to suggest furniture placement
 - **Building code validation** — minimum door widths, egress requirements
+
+### V2 — Design Knowledge Evolution
+- **Semantic embeddings** — replace keyword tagging with vector embeddings for better search relevance
+- **Insight validation** — human review workflow for agent-discovered patterns
+- **Cross-article reasoning** — link related chunks across different articles
 
 ### V2 — Template Growth
 - Community-submitted templates
