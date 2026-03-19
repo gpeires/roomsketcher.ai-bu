@@ -796,6 +796,26 @@ export function sketcherHtml(sketchId: string): string {
       }
     }
     html += '</g>';
+
+    // Rotation handle for selected furniture (lollipop style)
+    if (selected && selected.type === 'furniture') {
+      var selFurn = plan.furniture.find(function(f) { return f.id === selected.id; });
+      if (selFurn) {
+        var fcx = selFurn.position.x + selFurn.width / 2;
+        var fcy = selFurn.position.y + selFurn.depth / 2;
+        var handleR = isMobile() ? 12 : 6;
+        var handleDist = Math.max(selFurn.width, selFurn.depth) / 2 + 20;
+        var rot = (selFurn.rotation || 0) * Math.PI / 180;
+        // Handle sits above the furniture center, rotated with the item
+        var hx = fcx - Math.sin(rot) * handleDist;
+        var hy = fcy - Math.cos(rot) * handleDist;
+        html += '<g id="rotation-handle">';
+        html += '<line x1="' + fcx + '" y1="' + fcy + '" x2="' + hx + '" y2="' + hy + '" stroke="#00B5CC" stroke-width="1.5" pointer-events="none"/>';
+        html += '<circle cx="' + hx + '" cy="' + hy + '" r="' + handleR + '" fill="rgba(0,181,204,0.3)" stroke="#00B5CC" stroke-width="2" class="rotation-handle" data-furniture-id="' + selFurn.id + '" style="cursor:grab"/>';
+        html += '</g>';
+      }
+    }
+
     // Snap guides overlay (populated during drag by renderSnapGuides)
     html += '<g id="snap-guides"></g>';
 
@@ -1562,11 +1582,29 @@ export function sketcherHtml(sketchId: string): string {
   }
 
   function updateFurnitureRotation(e) {
-    // Implemented in Task 11
+    if (!mouseDownTarget || !plan) return;
+    var item = plan.furniture.find(function(f) { return f.id === mouseDownTarget.furnitureId; });
+    if (!item) return;
+    var pt = svgPointRaw(e);
+    var cx = item.position.x + item.width / 2;
+    var cy = item.position.y + item.depth / 2;
+    var angle = Math.atan2(pt.x - cx, -(pt.y - cy)) * 180 / Math.PI;
+    // Snap to 15-degree increments
+    angle = Math.round(angle / 15) * 15;
+    item.rotation = ((angle % 360) + 360) % 360;
+    render();
   }
 
   function commitFurnitureRotation() {
-    // Implemented in Task 11
+    if (!mouseDownTarget || !plan) return;
+    var item = plan.furniture.find(function(f) { return f.id === mouseDownTarget.furnitureId; });
+    if (!item) return;
+    var change = { type: 'move_furniture', furniture_id: item.id, rotation: item.rotation };
+    var inverse = { type: 'move_furniture', furniture_id: item.id, rotation: mouseDownTarget.originalRotation };
+    pushUndo([change], [inverse]);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(change));
+    render();
+    showProperties();
   }
 
   // --- Keyboard shortcuts ---
