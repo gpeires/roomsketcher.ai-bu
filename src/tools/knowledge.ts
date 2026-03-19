@@ -8,7 +8,7 @@ import type { D1Database } from '@cloudflare/workers-types';
  */
 export function sanitizeFtsQuery(query: string): string {
   const sanitized = query
-    .replace(/["\*\(\)\-]/g, ' ')
+    .replace(/["\*\(\)\-\^:+]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   if (!sanitized) return '';
