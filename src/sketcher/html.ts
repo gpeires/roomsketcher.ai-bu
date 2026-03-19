@@ -324,6 +324,7 @@ export function sketcherHtml(sketchId: string): string {
     var lastPinchDist = 0;
     var isTouchPanning = false;
     var tapStart = null;
+    var touchDragHandle = null;
 
     svg.addEventListener('touchstart', function(e) {
       if (e.touches.length === 1) {
@@ -332,26 +333,45 @@ export function sketcherHtml(sketchId: string): string {
         touchStartVB = { x: viewBox.x, y: viewBox.y };
         isTouchPanning = false;
         tapStart = { x: t.clientX, y: t.clientY, time: Date.now() };
+
+        // Check if touch hit a drag handle
+        var el = document.elementFromPoint(t.clientX, t.clientY);
+        if (el && el.classList && el.classList.contains('drag-handle')) {
+          touchDragHandle = { wallId: el.dataset.wallId, endpoint: el.dataset.endpoint };
+          beginEndpointDrag(el.dataset.wallId, el.dataset.endpoint);
+          if (isMobile()) setSheetState('collapsed');
+          e.preventDefault();
+          return;
+        }
+        touchDragHandle = null;
       } else if (e.touches.length === 2) {
         tapStart = null;
+        touchDragHandle = null;
         var dx = e.touches[0].clientX - e.touches[1].clientX;
         var dy = e.touches[0].clientY - e.touches[1].clientY;
         lastPinchDist = Math.sqrt(dx * dx + dy * dy);
       }
-    }, { passive: true });
+    }, { passive: false });
 
     svg.addEventListener('touchmove', function(e) {
       e.preventDefault();
       if (e.touches.length === 1 && touchStart) {
-        isTouchPanning = true;
-        var t = e.touches[0];
-        var rect = svg.getBoundingClientRect();
-        var dx = (t.clientX - touchStart.x) / rect.width * viewBox.w;
-        var dy = (t.clientY - touchStart.y) / rect.height * viewBox.h;
-        viewBox.x = touchStartVB.x - dx;
-        viewBox.y = touchStartVB.y - dy;
-        userViewBox = true;
-        svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
+        if (touchDragHandle && isDragging) {
+          // Endpoint drag via touch
+          var fakeEvent = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
+          updateEndpointDrag(fakeEvent);
+        } else {
+          // Pan
+          isTouchPanning = true;
+          var t = e.touches[0];
+          var rect = svg.getBoundingClientRect();
+          var dx = (t.clientX - touchStart.x) / rect.width * viewBox.w;
+          var dy = (t.clientY - touchStart.y) / rect.height * viewBox.h;
+          viewBox.x = touchStartVB.x - dx;
+          viewBox.y = touchStartVB.y - dy;
+          userViewBox = true;
+          svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
+        }
       } else if (e.touches.length === 2) {
         var dx2 = e.touches[0].clientX - e.touches[1].clientX;
         var dy2 = e.touches[0].clientY - e.touches[1].clientY;
@@ -376,6 +396,19 @@ export function sketcherHtml(sketchId: string): string {
 
     svg.addEventListener('touchend', function(e) {
       if (e.touches.length === 0) {
+        if (touchDragHandle && isDragging) {
+          commitEndpointDrag();
+          touchDragHandle = null;
+          if (isMobile() && selected) {
+            setTimeout(function() { setSheetState('expanded'); showProperties(); }, 100);
+          }
+          touchStart = null;
+          touchStartVB = null;
+          lastPinchDist = 0;
+          isTouchPanning = false;
+          tapStart = null;
+          return;
+        }
         // Detect tap: short duration, small movement
         if (tapStart && !isTouchPanning) {
           var ct = e.changedTouches[0];
