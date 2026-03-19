@@ -235,6 +235,18 @@ export function sketcherHtml(sketchId: string): string {
   var viewBox = { x: 0, y: 0, w: 1000, h: 800 };
   var userViewBox = false;
   var ws = null;
+  var lastWsSend = 0;
+  var WS_THROTTLE_MS = 100; // 10fps
+
+  function sendWsThrottled(msg) {
+    var now = Date.now();
+    if (now - lastWsSend >= WS_THROTTLE_MS) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+      lastWsSend = now;
+    }
+  }
 
   const svg = document.getElementById('canvas');
   const statusEl = document.getElementById('status');
@@ -942,17 +954,8 @@ export function sketcherHtml(sketchId: string): string {
 
   function snapToEndpoint(pt) {
     if (!plan) return pt;
-    var threshold = 15;
-    for (var i = 0; i < plan.walls.length; i++) {
-      var w = plan.walls[i];
-      var endpoints = [w.start, w.end];
-      for (var j = 0; j < endpoints.length; j++) {
-        var ep = endpoints[j];
-        var d = Math.sqrt(Math.pow(pt.x - ep.x, 2) + Math.pow(pt.y - ep.y, 2));
-        if (d < threshold) return { x: ep.x, y: ep.y };
-      }
-    }
-    return pt;
+    var snap = computeSnap(pt, []);
+    return snap.point;
   }
 
   svg.addEventListener('click', function(e) {
@@ -1194,11 +1197,125 @@ export function sketcherHtml(sketchId: string): string {
     isDragging = true;
   }
 
+  function computeSnap(rawPoint, excludeWallIds) {
+    if (!plan) return { point: rawPoint, guides: [] };
+    var svgRect = svg.getBoundingClientRect();
+    var pxPerCm = svgRect.width / viewBox.w;
+
+    // Collect all endpoints and midpoints (excluding dragged walls)
+    var endpoints = [];
+    var midpoints = [];
+    for (var i = 0; i < plan.walls.length; i++) {
+      var w = plan.walls[i];
+      if (excludeWallIds.indexOf(w.id) >= 0) continue;
+      endpoints.push(w.start);
+      endpoints.push(w.end);
+      midpoints.push({ x: (w.start.x + w.end.x) / 2, y: (w.start.y + w.end.y) / 2 });
+    }
+
+    // 1. Endpoint snap (15px threshold) — highest priority
+    var epThresh = 15 / pxPerCm;
+    for (var i = 0; i < endpoints.length; i++) {
+      var ep = endpoints[i];
+      var d = Math.sqrt(Math.pow(rawPoint.x - ep.x, 2) + Math.pow(rawPoint.y - ep.y, 2));
+      if (d < epThresh) {
+        return { point: { x: ep.x, y: ep.y }, guides: [{ type: 'endpoint', x: ep.x, y: ep.y }] };
+      }
+    }
+
+    // 2. Perpendicular snap (10px threshold) — check if creating 90 deg with connected wall
+    if (dragState && dragState.connectedWalls) {
+      for (var i = 0; i < dragState.connectedWalls.length; i++) {
+        var conn = dragState.connectedWalls[i];
+        var cw = plan.walls.find(function(w) { return w.id === conn.wallId; });
+        if (!cw) continue;
+        var fixedPt = conn.endpoint === 'start' ? cw.end : cw.start;
+        var dragWall = plan.walls.find(function(w) { return w.id === dragState.wallId; });
+        if (!dragWall) continue;
+        var otherPt = dragState.endpoint === 'start' ? dragWall.end : dragWall.start;
+        var cwDx = fixedPt.x - rawPoint.x, cwDy = fixedPt.y - rawPoint.y;
+        var dwDx = otherPt.x - rawPoint.x, dwDy = otherPt.y - rawPoint.y;
+        var dot = cwDx * dwDx + cwDy * dwDy;
+        var cwLen = Math.sqrt(cwDx * cwDx + cwDy * cwDy);
+        var dwLen = Math.sqrt(dwDx * dwDx + dwDy * dwDy);
+        if (cwLen > 0 && dwLen > 0) {
+          var cosAngle = dot / (cwLen * dwLen);
+          if (Math.abs(cosAngle) < 0.05) {
+            return { point: { x: Math.round(rawPoint.x), y: Math.round(rawPoint.y) }, guides: [{ type: 'perpendicular', x: rawPoint.x, y: rawPoint.y }] };
+          }
+        }
+      }
+    }
+
+    // 3. Alignment snap (10px threshold) — X or Y aligns with any endpoint
+    var alignThresh = 10 / pxPerCm;
+    var snapX = null, snapY = null;
+    var guides = [];
+    for (var i = 0; i < endpoints.length; i++) {
+      var ep = endpoints[i];
+      if (snapX === null && Math.abs(rawPoint.x - ep.x) < alignThresh) {
+        snapX = ep.x;
+        guides.push({ type: 'alignment', axis: 'vertical', x: ep.x });
+      }
+      if (snapY === null && Math.abs(rawPoint.y - ep.y) < alignThresh) {
+        snapY = ep.y;
+        guides.push({ type: 'alignment', axis: 'horizontal', y: ep.y });
+      }
+    }
+    if (snapX !== null || snapY !== null) {
+      return {
+        point: { x: snapX !== null ? snapX : Math.round(rawPoint.x / 10) * 10, y: snapY !== null ? snapY : Math.round(rawPoint.y / 10) * 10 },
+        guides: guides
+      };
+    }
+
+    // 4. Midpoint snap (10px threshold)
+    var midThresh = 10 / pxPerCm;
+    for (var i = 0; i < midpoints.length; i++) {
+      var mp = midpoints[i];
+      var d = Math.sqrt(Math.pow(rawPoint.x - mp.x, 2) + Math.pow(rawPoint.y - mp.y, 2));
+      if (d < midThresh) {
+        return { point: { x: mp.x, y: mp.y }, guides: [{ type: 'midpoint', x: mp.x, y: mp.y }] };
+      }
+    }
+
+    // 5. Grid snap (fallback — always active)
+    return { point: { x: Math.round(rawPoint.x / 10) * 10, y: Math.round(rawPoint.y / 10) * 10 }, guides: [] };
+  }
+
+  function renderSnapGuides(guides) {
+    var g = svg.getElementById('snap-guides');
+    if (!g) return;
+    var html = '';
+    for (var i = 0; i < guides.length; i++) {
+      var guide = guides[i];
+      if (guide.type === 'endpoint') {
+        html += '<circle cx="' + guide.x + '" cy="' + guide.y + '" r="6" fill="#D84200" stroke="white" stroke-width="1.5" pointer-events="none"/>';
+      } else if (guide.type === 'alignment') {
+        if (guide.axis === 'vertical') {
+          html += '<line x1="' + guide.x + '" y1="' + viewBox.y + '" x2="' + guide.x + '" y2="' + (viewBox.y + viewBox.h) + '" stroke="#00B5CC" stroke-width="1" stroke-dasharray="6,4" opacity="0.6" pointer-events="none"/>';
+        } else {
+          html += '<line x1="' + viewBox.x + '" y1="' + guide.y + '" x2="' + (viewBox.x + viewBox.w) + '" y2="' + guide.y + '" stroke="#00B5CC" stroke-width="1" stroke-dasharray="6,4" opacity="0.6" pointer-events="none"/>';
+        }
+      } else if (guide.type === 'midpoint') {
+        html += '<rect x="' + (guide.x - 4) + '" y="' + (guide.y - 4) + '" width="8" height="8" fill="#5C6566" transform="rotate(45,' + guide.x + ',' + guide.y + ')" pointer-events="none"/>';
+      } else if (guide.type === 'perpendicular') {
+        html += '<path d="M' + (guide.x - 6) + ',' + guide.y + ' L' + (guide.x - 6) + ',' + (guide.y - 6) + ' L' + guide.x + ',' + (guide.y - 6) + '" stroke="#007B8C" stroke-width="1.5" fill="none" pointer-events="none"/>';
+      }
+    }
+    g.innerHTML = html;
+  }
+
   function updateEndpointDrag(e) {
     if (!dragState || !plan) return;
     var rawPt = svgPointRaw(e);
-    // Grid snap (10cm) — full snap system replaces this in Task 7
-    var pt = { x: Math.round(rawPt.x / 10) * 10, y: Math.round(rawPt.y / 10) * 10 };
+    var excludeIds = [dragState.wallId];
+    if (dragState.connectedWalls) {
+      dragState.connectedWalls.forEach(function(c) { excludeIds.push(c.wallId); });
+    }
+    var snap = computeSnap(rawPt, excludeIds);
+    var pt = snap.point;
+    renderSnapGuides(snap.guides);
 
     var wall = plan.walls.find(function(w) { return w.id === dragState.wallId; });
     if (!wall) return;
@@ -1241,6 +1358,9 @@ export function sketcherHtml(sketchId: string): string {
         }
       }
     }
+
+    // Throttled WebSocket broadcast during drag (10fps)
+    sendWsThrottled({ type: 'move_wall', wall_id: dragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
   }
 
   function pushUndo(changes, inverseChanges) {
