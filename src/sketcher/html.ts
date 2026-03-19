@@ -314,6 +314,10 @@ export function sketcherHtml(sketchId: string): string {
     });
     var dlBtn = document.getElementById('mobile-download');
     if (dlBtn) dlBtn.addEventListener('click', function() { downloadPdf(); });
+    var mUndoBtn = document.getElementById('mobile-undo');
+    if (mUndoBtn) mUndoBtn.addEventListener('click', performUndo);
+    var mRedoBtn = document.getElementById('mobile-redo');
+    if (mRedoBtn) mRedoBtn.addEventListener('click', performRedo);
   }
   updateMobileTools();
 
@@ -584,7 +588,6 @@ export function sketcherHtml(sketchId: string): string {
     var inverse = computeInverse(change);
     applyChangeLocal(change);
     if (inverse) pushUndo([change], [inverse]);
-    userViewBox = false;
     render();
     showProperties();
     if (ws && ws.readyState === WebSocket.OPEN) {
