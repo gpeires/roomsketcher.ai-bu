@@ -219,15 +219,20 @@ export function sketcherHtml(sketchId: string): string {
   const WS_URL = WS_PROTO + '//' + location.host + '/ws/' + SKETCH_ID;
 
   // --- State ---
-  let plan = null;
-  let tool = 'select';
-  let selected = null;
-  let drawStart = null;
-  let isPanning = false;
-  let panStart = { x: 0, y: 0 };
-  let viewBox = { x: 0, y: 0, w: 1000, h: 800 };
-  let userViewBox = false;
-  let ws = null;
+  var plan = null;
+  var tool = 'select';          // active tool: select|wall|door|window|room|furniture
+  var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|drawing_wall|panning|placing_opening|rotating_furniture
+  var selected = null;           // { type, id }
+  var drawStart = null;          // wall drawing start point
+  var dragState = null;          // { wallId, endpoint, startPoint, connectedWalls, originalPositions, detached }
+  var snapResult = null;         // { point, guides[] }
+  var undoStack = [];            // [{ changes[], inverseChanges[] }]
+  var redoStack = [];
+  var MAX_UNDO = 50;
+  var isDragging = false;        // true during endpoint drag (skips full render)
+  var viewBox = { x: 0, y: 0, w: 1000, h: 800 };
+  var userViewBox = false;
+  var ws = null;
 
   const svg = document.getElementById('canvas');
   const statusEl = document.getElementById('status');
@@ -716,20 +721,7 @@ export function sketcherHtml(sketchId: string): string {
 
   // --- Interaction ---
   function attachInteraction() {
-    svg.querySelectorAll('[data-id]').forEach(function(el) {
-      el.addEventListener('click', function(e) {
-        e.stopPropagation();
-        if (tool === 'select') {
-          selected = { type: el.dataset.type, id: el.dataset.id };
-          render();
-          showProperties();
-        } else if (tool === 'door' || tool === 'window') {
-          if (el.dataset.type === 'wall') {
-            addOpeningToWall(el.dataset.id, tool, e);
-          }
-        }
-      });
-    });
+    // Interaction now handled by state machine mousedown/mousemove/mouseup on svg
   }
 
   // --- Properties rendering ---
@@ -873,21 +865,6 @@ export function sketcherHtml(sketchId: string): string {
     }
   });
 
-  svg.addEventListener('mousemove', function(e) {
-    if (tool === 'wall' && drawStart) {
-      removeGuide();
-      var pt = snapToEndpoint(svgPoint(e));
-      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', drawStart.x);
-      line.setAttribute('y1', drawStart.y);
-      line.setAttribute('x2', pt.x);
-      line.setAttribute('y2', pt.y);
-      line.classList.add('guide-line');
-      line.id = 'guide';
-      svg.appendChild(line);
-    }
-  });
-
   function removeGuide() {
     var g = document.getElementById('guide');
     if (g) g.remove();
@@ -929,25 +906,159 @@ export function sketcherHtml(sketchId: string): string {
     svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
   }, { passive: false });
 
+  // --- Desktop mouse interaction (state machine) ---
+  var panStart = { x: 0, y: 0 };
+  var mouseDownTarget = null;
+  var mouseDownPoint = null;
+
   svg.addEventListener('mousedown', function(e) {
-    if (tool === 'select' && e.target === svg) {
-      isPanning = true;
-      panStart = { x: e.clientX, y: e.clientY };
+    if (e.button !== 0) return;
+    mouseDownPoint = { x: e.clientX, y: e.clientY };
+
+    if (tool === 'wall') {
+      // Wall drawing is click-click, handled in the existing click event
+      return;
     }
+
+    // Check if we clicked on a drag handle (added in Task 4)
+    var el = e.target;
+    if (el.classList && el.classList.contains('drag-handle')) {
+      interactionMode = 'selecting';
+      mouseDownTarget = { type: 'handle', wallId: el.dataset.wallId, endpoint: el.dataset.endpoint };
+      return;
+    }
+
+    // Check for rotation handle (added in Task 11)
+    if (el.classList && el.classList.contains('rotation-handle')) {
+      interactionMode = 'rotating_furniture';
+      var furn = plan ? plan.furniture.find(function(f) { return f.id === el.dataset.furnitureId; }) : null;
+      mouseDownTarget = { type: 'rotation', furnitureId: el.dataset.furnitureId, originalRotation: furn ? (furn.rotation || 0) : 0 };
+      return;
+    }
+
+    // Check if we clicked on a data element (wall, room, furniture)
+    while (el && !el.dataset.id && el !== svg) el = el.parentElement;
+    if (el && el.dataset.id) {
+      mouseDownTarget = { type: el.dataset.type, id: el.dataset.id };
+      interactionMode = 'selecting';
+      return;
+    }
+
+    // Empty canvas — start panning (works in ALL tool modes)
+    interactionMode = 'panning';
+    panStart = { x: e.clientX, y: e.clientY };
   });
+
   svg.addEventListener('mousemove', function(e) {
-    if (isPanning) {
+    // Wall drawing guide line
+    if (tool === 'wall' && drawStart) {
+      removeGuide();
+      var pt = snapToEndpoint(svgPoint(e));
+      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', drawStart.x);
+      line.setAttribute('y1', drawStart.y);
+      line.setAttribute('x2', pt.x);
+      line.setAttribute('y2', pt.y);
+      line.classList.add('guide-line');
+      line.id = 'guide';
+      svg.appendChild(line);
+    }
+
+    // Click vs drag detection (3px threshold)
+    if (interactionMode === 'selecting' && mouseDownPoint) {
+      var dx = e.clientX - mouseDownPoint.x;
+      var dy = e.clientY - mouseDownPoint.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 3) {
+        if (mouseDownTarget && mouseDownTarget.type === 'handle') {
+          interactionMode = 'dragging_endpoint';
+          beginEndpointDrag(mouseDownTarget.wallId, mouseDownTarget.endpoint);
+          // Alt/Option key = detach mode (don't move connected walls)
+          if (e.altKey && dragState) dragState.detached = true;
+        } else {
+          // Not on a handle — fall through to panning
+          interactionMode = 'panning';
+          panStart = { x: e.clientX, y: e.clientY };
+        }
+      }
+    }
+
+    if (interactionMode === 'dragging_endpoint') {
+      updateEndpointDrag(e);
+    }
+
+    if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
+      updateFurnitureRotation(e);
+    }
+
+    if (interactionMode === 'panning') {
       var rect = svg.getBoundingClientRect();
-      var dx = (e.clientX - panStart.x) / rect.width * viewBox.w;
-      var dy = (e.clientY - panStart.y) / rect.height * viewBox.h;
-      viewBox.x -= dx;
-      viewBox.y -= dy;
+      var ddx = (e.clientX - panStart.x) / rect.width * viewBox.w;
+      var ddy = (e.clientY - panStart.y) / rect.height * viewBox.h;
+      viewBox.x -= ddx;
+      viewBox.y -= ddy;
       panStart = { x: e.clientX, y: e.clientY };
       userViewBox = true;
       svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
     }
   });
-  svg.addEventListener('mouseup', function() { isPanning = false; });
+
+  svg.addEventListener('mouseup', function(e) {
+    if (interactionMode === 'selecting') {
+      // Was a click (< 3px movement)
+      if (mouseDownTarget && mouseDownTarget.type !== 'handle') {
+        if (tool === 'select' || tool === 'furniture') {
+          selected = { type: mouseDownTarget.type, id: mouseDownTarget.id };
+          render();
+          showProperties();
+        } else if ((tool === 'door' || tool === 'window') && mouseDownTarget.type === 'wall') {
+          addOpeningToWall(mouseDownTarget.id, tool, e);
+        }
+      }
+    }
+
+    if (interactionMode === 'dragging_endpoint') {
+      commitEndpointDrag();
+    }
+
+    if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
+      commitFurnitureRotation();
+    }
+
+    // If we were panning but barely moved, treat as deselect click
+    if (interactionMode === 'panning' && mouseDownPoint) {
+      var pdx = e.clientX - mouseDownPoint.x;
+      var pdy = e.clientY - mouseDownPoint.y;
+      if (Math.sqrt(pdx * pdx + pdy * pdy) < 3) {
+        selected = null;
+        render();
+        showProperties();
+      }
+    }
+
+    interactionMode = 'idle';
+    mouseDownTarget = null;
+    mouseDownPoint = null;
+  });
+
+  function beginEndpointDrag(wallId, endpoint) {
+    // Implemented in Task 4
+  }
+
+  function updateEndpointDrag(e) {
+    // Implemented in Task 4
+  }
+
+  function commitEndpointDrag() {
+    // Implemented in Task 4
+  }
+
+  function updateFurnitureRotation(e) {
+    // Implemented in Task 11
+  }
+
+  function commitFurnitureRotation() {
+    // Implemented in Task 11
+  }
 
   // --- Keyboard shortcuts ---
   document.addEventListener('keydown', function(e) {
