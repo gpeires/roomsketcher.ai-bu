@@ -80,6 +80,17 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
         result.rooms = result.rooms.filter(r => r.id !== change.room_id);
         break;
 
+      case 'update_room': {
+        const room = result.rooms.find(r => r.id === change.room_id);
+        if (!room) break;
+        if (change.polygon) {
+          room.polygon = change.polygon;
+          room.area = shoelaceArea(change.polygon);
+        }
+        if (change.area !== undefined) room.area = change.area;
+        break;
+      }
+
       case 'add_furniture':
         result.furniture.push({ ...change.furniture });
         break;

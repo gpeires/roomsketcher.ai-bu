@@ -104,6 +104,36 @@ describe('applyChanges', () => {
     expect(result.rooms).toHaveLength(0);
   });
 
+  it('updates a room polygon', () => {
+    const plan = makePlan();
+    const newPolygon = [{ x: 0, y: 0 }, { x: 800, y: 0 }, { x: 800, y: 400 }, { x: 0, y: 400 }];
+    const changes: Change[] = [
+      { type: 'update_room', room_id: 'r1', polygon: newPolygon },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.rooms[0].polygon).toEqual(newPolygon);
+    expect(result.rooms[0].area).toBeCloseTo(32, 0); // 800*400 cm² / 10000 = 32 m²
+  });
+
+  it('updates a room area only', () => {
+    const plan = makePlan();
+    const changes: Change[] = [
+      { type: 'update_room', room_id: 'r1', area: 25.5 },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.rooms[0].area).toBe(25.5);
+  });
+
+  it('ignores update_room for nonexistent ID', () => {
+    const plan = makePlan();
+    const changes: Change[] = [
+      { type: 'update_room', room_id: 'nonexistent', polygon: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }] },
+    ];
+    const result = applyChanges(plan, changes);
+    expect(result.rooms).toHaveLength(1);
+    expect(result.rooms[0].polygon).toHaveLength(4); // unchanged
+  });
+
   it('applies multiple changes in order', () => {
     const plan = makePlan();
     const changes: Change[] = [
