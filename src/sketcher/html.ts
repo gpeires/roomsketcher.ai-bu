@@ -410,6 +410,8 @@ export function sketcherHtml(sketchId: string): string {
     document.getElementById(entry[1]).addEventListener('click', function() { setTool(entry[0]); });
   });
   document.getElementById('btn-download').addEventListener('click', downloadPdf);
+  document.getElementById('btn-undo').addEventListener('click', performUndo);
+  document.getElementById('btn-redo').addEventListener('click', performRedo);
 
   function setTool(t) {
     tool = t;
@@ -495,10 +497,59 @@ export function sketcherHtml(sketchId: string): string {
     }
   }
 
+  function computeInverse(change) {
+    switch (change.type) {
+      case 'add_wall': return { type: 'remove_wall', wall_id: change.wall.id };
+      case 'remove_wall': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        return w ? { type: 'add_wall', wall: JSON.parse(JSON.stringify(w)) } : null;
+      }
+      case 'move_wall': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        return w ? { type: 'move_wall', wall_id: change.wall_id, start: { x: w.start.x, y: w.start.y }, end: { x: w.end.x, y: w.end.y } } : null;
+      }
+      case 'update_wall': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        return w ? { type: 'update_wall', wall_id: change.wall_id, thickness: w.thickness, wall_type: w.type } : null;
+      }
+      case 'add_opening': return { type: 'remove_opening', wall_id: change.wall_id, opening_id: change.opening.id };
+      case 'remove_opening': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        if (!w) return null;
+        var o = w.openings.find(function(o) { return o.id === change.opening_id; });
+        return o ? { type: 'add_opening', wall_id: change.wall_id, opening: JSON.parse(JSON.stringify(o)) } : null;
+      }
+      case 'add_room': return { type: 'remove_room', room_id: change.room.id };
+      case 'remove_room': {
+        var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
+        return r ? { type: 'add_room', room: JSON.parse(JSON.stringify(r)) } : null;
+      }
+      case 'rename_room': {
+        var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
+        return r ? { type: 'rename_room', room_id: change.room_id, label: r.label, room_type: r.type } : null;
+      }
+      case 'update_room': {
+        var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
+        return r ? { type: 'update_room', room_id: change.room_id, polygon: r.polygon.map(function(p) { return { x: p.x, y: p.y }; }) } : null;
+      }
+      case 'add_furniture': return { type: 'remove_furniture', furniture_id: change.furniture.id };
+      case 'remove_furniture': {
+        var f = plan.furniture.find(function(f) { return f.id === change.furniture_id; });
+        return f ? { type: 'add_furniture', furniture: JSON.parse(JSON.stringify(f)) } : null;
+      }
+      case 'move_furniture': {
+        var f = plan.furniture.find(function(f) { return f.id === change.furniture_id; });
+        return f ? { type: 'move_furniture', furniture_id: change.furniture_id, position: { x: f.position.x, y: f.position.y }, rotation: f.rotation } : null;
+      }
+      default: return null;
+    }
+  }
+
   function sendChange(change) {
     if (!plan) return;
+    var inverse = computeInverse(change);
     applyChangeLocal(change);
-    // Refit so the sketch stays properly positioned (accounting for sheet)
+    if (inverse) pushUndo([change], [inverse]);
     userViewBox = false;
     render();
     showProperties();
@@ -1381,6 +1432,36 @@ export function sketcherHtml(sketchId: string): string {
     if (mRedo) mRedo.disabled = redoStack.length === 0;
   }
 
+  function performUndo() {
+    if (undoStack.length === 0) return;
+    var entry = undoStack.pop();
+    for (var i = 0; i < entry.inverseChanges.length; i++) {
+      applyChangeLocal(entry.inverseChanges[i]);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(entry.inverseChanges[i]));
+      }
+    }
+    redoStack.push(entry);
+    updateUndoButtons();
+    render();
+    showProperties();
+  }
+
+  function performRedo() {
+    if (redoStack.length === 0) return;
+    var entry = redoStack.pop();
+    for (var i = 0; i < entry.changes.length; i++) {
+      applyChangeLocal(entry.changes[i]);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(entry.changes[i]));
+      }
+    }
+    undoStack.push(entry);
+    updateUndoButtons();
+    render();
+    showProperties();
+  }
+
   function commitEndpointDrag() {
     if (!dragState || !plan) { isDragging = false; return; }
     var wall = plan.walls.find(function(w) { return w.id === dragState.wallId; });
@@ -1483,19 +1564,30 @@ export function sketcherHtml(sketchId: string): string {
 
   // --- Keyboard shortcuts ---
   document.addEventListener('keydown', function(e) {
+    // Skip shortcuts when typing in form fields
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+
     if (e.key === 'Escape') { setTool('select'); selected = null; render(); showProperties(); }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selected) {
         if (selected.type === 'wall') sendChange({ type: 'remove_wall', wall_id: selected.id });
-        if (selected.type === 'room') sendChange({ type: 'remove_room', room_id: selected.id });
+        else if (selected.type === 'room') sendChange({ type: 'remove_room', room_id: selected.id });
+        else if (selected.type === 'furniture') sendChange({ type: 'remove_furniture', furniture_id: selected.id });
         selected = null;
         showProperties();
       }
     }
-    if (e.key === 'w') setTool('wall');
-    if (e.key === 's' && !e.ctrlKey && !e.metaKey) setTool('select');
+    if (!e.ctrlKey && !e.metaKey) {
+      if (e.key === 'w') setTool('wall');
+      if (e.key === 's') setTool('select');
+      if (e.key === 'd') setTool('door');
+      if (e.key === 'r') setTool('room');
+      if (e.key === 'f') setTool('furniture');
+    }
     if (e.ctrlKey || e.metaKey) {
-      if (e.key === 's') { e.preventDefault(); save(); }
+      if (e.key === 'z' && !e.shiftKey) { e.preventDefault(); performUndo(); }
+      if (e.key === 'z' && e.shiftKey) { e.preventDefault(); performRedo(); }
+      if (e.key === 'Z') { e.preventDefault(); performRedo(); }
     }
   });
 
