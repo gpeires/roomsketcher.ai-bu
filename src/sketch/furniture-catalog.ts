@@ -4,7 +4,6 @@ export interface CatalogItem {
   defaultWidth: number  // cm
   defaultDepth: number  // cm
   roomTypes: string[]
-  svgIcon?: string
   catalogId?: string
 }
 
