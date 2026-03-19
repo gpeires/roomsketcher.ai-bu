@@ -74,3 +74,79 @@ CREATE TABLE IF NOT EXISTS sketches (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sketches_expires ON sketches(expires_at);
+
+-- Design knowledge chunks (extracted from articles during sync)
+CREATE TABLE IF NOT EXISTS design_knowledge (
+  id TEXT PRIMARY KEY,
+  article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+  article_updated_at TEXT NOT NULL,
+  article_title TEXT,
+  article_url TEXT,
+  heading TEXT,
+  content TEXT NOT NULL,
+  room_types TEXT DEFAULT '[]',
+  design_aspects TEXT DEFAULT '[]',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_design_knowledge_article ON design_knowledge(article_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS design_knowledge_fts USING fts5(
+  heading,
+  content,
+  content='design_knowledge',
+  content_rowid='rowid'
+);
+
+CREATE TRIGGER IF NOT EXISTS design_knowledge_ai AFTER INSERT ON design_knowledge BEGIN
+  INSERT INTO design_knowledge_fts(rowid, heading, content)
+  VALUES (new.rowid, COALESCE(new.heading, ''), new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS design_knowledge_ad AFTER DELETE ON design_knowledge BEGIN
+  INSERT INTO design_knowledge_fts(design_knowledge_fts, rowid, heading, content)
+  VALUES ('delete', old.rowid, COALESCE(old.heading, ''), old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS design_knowledge_au AFTER UPDATE ON design_knowledge BEGIN
+  INSERT INTO design_knowledge_fts(design_knowledge_fts, rowid, heading, content)
+  VALUES ('delete', old.rowid, COALESCE(old.heading, ''), old.content);
+  INSERT INTO design_knowledge_fts(rowid, heading, content)
+  VALUES (new.rowid, COALESCE(new.heading, ''), new.content);
+END;
+
+-- Agent insights (accumulated discoveries, never cleared during sync)
+CREATE TABLE IF NOT EXISTS agent_insights (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content TEXT NOT NULL,
+  context TEXT,
+  source_chunk_ids TEXT DEFAULT '[]',
+  confidence REAL DEFAULT 0.5,
+  stale INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS agent_insights_fts USING fts5(
+  content,
+  context,
+  content='agent_insights',
+  content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS agent_insights_ai AFTER INSERT ON agent_insights BEGIN
+  INSERT INTO agent_insights_fts(rowid, content, context)
+  VALUES (new.id, new.content, COALESCE(new.context, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS agent_insights_ad AFTER DELETE ON agent_insights BEGIN
+  INSERT INTO agent_insights_fts(agent_insights_fts, rowid, content, context)
+  VALUES ('delete', old.id, old.content, COALESCE(old.context, ''));
+END;
+
+CREATE TRIGGER IF NOT EXISTS agent_insights_au AFTER UPDATE ON agent_insights BEGIN
+  INSERT INTO agent_insights_fts(agent_insights_fts, rowid, content, context)
+  VALUES ('delete', old.id, old.content, COALESCE(old.context, ''));
+  INSERT INTO agent_insights_fts(rowid, content, context)
+  VALUES (new.id, new.content, COALESCE(new.context, ''));
+END;
