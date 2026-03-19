@@ -87,11 +87,12 @@ export function sketcherHtml(sketchId: string): string {
     .props { display: none; }
     .footer { display: none; }
     .main { flex: 1; }
-    .canvas-wrap { padding-bottom: 48px; }
+    .canvas-wrap { padding-bottom: 100px; }
     .canvas-wrap svg { touch-action: none; }
 
     .bottom-sheet {
-      display: block;
+      display: flex;
+      flex-direction: column;
       position: fixed;
       bottom: 0; left: 0; right: 0;
       background: #fff;
@@ -103,7 +104,7 @@ export function sketcherHtml(sketchId: string): string {
       max-height: 60vh;
       overflow: hidden;
     }
-    .bottom-sheet.collapsed { transform: translateY(calc(100% - 48px - env(safe-area-inset-bottom))); }
+    .bottom-sheet.collapsed { transform: translateY(calc(100% - 100px - env(safe-area-inset-bottom))); }
     .bottom-sheet.expanded { transform: translateY(0); }
 
     .sheet-handle {
@@ -164,7 +165,8 @@ export function sketcherHtml(sketchId: string): string {
     .sheet-props {
       padding: 0 12px 12px;
       overflow-y: auto;
-      max-height: calc(60vh - 120px);
+      flex: 1;
+      min-height: 0;
     }
     .sheet-props h3 { font-size: 12px; color: var(--rs-teal-dark); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; }
     .sheet-props label { display: block; font-size: 12px; color: var(--rs-gray); margin-top: 8px; }
@@ -173,15 +175,16 @@ export function sketcherHtml(sketchId: string): string {
 
     @media (orientation: landscape) {
       .bottom-sheet { max-height: 50vh; }
-      .sheet-props { max-height: calc(50vh - 120px); }
     }
   }
 </style>
 </head>
 <body>
 <div class="header">
-  <img src="https://wpmedia.roomsketcher.com/content/uploads/2021/12/15075948/roomsketcher-logo-square.png" alt="RoomSketcher">
-  <div class="brand">RoomSketcher <span>AI Sketcher</span></div>
+  <a href="/" style="display:flex;align-items:center;gap:12px;text-decoration:none;color:inherit">
+    <img src="https://wpmedia.roomsketcher.com/content/uploads/2021/12/15075948/roomsketcher-logo-square.png" alt="RoomSketcher">
+    <div class="brand">RoomSketcher <span>AI Sketcher</span></div>
+  </a>
   <div class="spacer"></div>
   <span class="status" id="status">Loading...</span>
 </div>
@@ -255,9 +258,17 @@ export function sketcherHtml(sketchId: string): string {
   const sheetPropsEl = document.getElementById('sheet-props');
   const sheetToolsEl = document.getElementById('sheet-tools');
 
+  function sheetIsExpanded() { return sheetEl.classList.contains('expanded'); }
+
   function setSheetState(state) {
+    var wasExpanded = sheetIsExpanded();
     sheetEl.classList.toggle('collapsed', state === 'collapsed');
     sheetEl.classList.toggle('expanded', state === 'expanded');
+    // When sheet state changes, refit the sketch to visible area
+    if (wasExpanded !== sheetIsExpanded()) {
+      userViewBox = false;
+      render();
+    }
   }
 
   // Sheet handle drag
@@ -460,11 +471,13 @@ export function sketcherHtml(sketchId: string): string {
         statusEl.textContent = 'Connected';
         ws.send(JSON.stringify({ type: 'load', sketch_id: SKETCH_ID }));
       };
+      var wsInitialLoad = true;
       ws.onmessage = function(e) {
         var msg = JSON.parse(e.data);
         if (msg.type === 'state_update') {
           plan = msg.plan;
-          userViewBox = false;
+          // Only auto-fit on first load; subsequent updates preserve user's viewport
+          if (wsInitialLoad) { userViewBox = false; wsInitialLoad = false; }
           render();
         } else if (msg.type === 'saved') {
           statusEl.textContent = 'Saved ' + new Date(msg.updated_at).toLocaleTimeString();
@@ -481,7 +494,10 @@ export function sketcherHtml(sketchId: string): string {
   function sendChange(change) {
     if (!plan) return;
     applyChangeLocal(change);
+    // Refit so the sketch stays properly positioned (accounting for sheet)
+    userViewBox = false;
     render();
+    showProperties();
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(change));
     }
@@ -577,7 +593,21 @@ export function sketcherHtml(sketchId: string): string {
       }
       var pad = 80;
       viewBox = { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
+
+      // On mobile with expanded sheet, add bottom padding so content fits above the sheet
+      if (isMobile() && sheetIsExpanded()) {
+        var svgRect = svg.getBoundingClientRect();
+        var sheetRect = sheetEl.getBoundingClientRect();
+        var sheetOverlap = svgRect.bottom - sheetRect.top;
+        if (sheetOverlap > 0 && svgRect.height > 0) {
+          var scale = viewBox.h / svgRect.height;
+          viewBox.h += sheetOverlap * scale;
+        }
+      }
     }
+    // Top-align on mobile so content stays above sheet; center on desktop
+    var par = (isMobile() && sheetIsExpanded()) ? 'xMidYMin meet' : 'xMidYMid meet';
+    svg.setAttribute('preserveAspectRatio', par);
     svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
 
     var html = window.__furnitureDefs;
