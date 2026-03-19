@@ -392,3 +392,11 @@ function fallbackRect(w: number, h: number, type: string): string {
     `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#999" ${NS}>${type}</text>`,
   ].join('')
 }
+
+export function furnitureDefsBlock(): string {
+  const symbols = SYMBOL_TYPES.map(type => {
+    const inner = furnitureSymbol(type, 100, 100);
+    return `<symbol id="fs-${type}" viewBox="0 0 100 100" preserveAspectRatio="none">${inner}</symbol>`;
+  }).join('\n');
+  return `<defs>${symbols}</defs>`;
+}

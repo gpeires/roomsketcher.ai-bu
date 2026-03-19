@@ -1,3 +1,5 @@
+import { furnitureDefsBlock } from '../sketch/furniture-symbols';
+
 export function sketcherHtml(sketchId: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -98,7 +100,7 @@ export function sketcherHtml(sketchId: string): string {
 
 <div class="main">
   <div class="canvas-wrap" id="canvas-wrap">
-    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <svg id="canvas" xmlns="http://www.w3.org/2000/svg">${furnitureDefsBlock()}</svg>
   </div>
   <div class="props" id="props">
     <h3>Properties</h3>
@@ -392,9 +394,14 @@ export function sketcherHtml(sketchId: string): string {
       const cx = item.position.x + item.width / 2;
       const cy = item.position.y + item.depth / 2;
       const transform = rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '';
-      const sel = (selected && selected.type === 'furniture' && selected.id === item.id) ? ' stroke="#D84200" stroke-width="2"' : ' stroke="#888" stroke-width="1"';
-      html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="#E8D8C4" fill-opacity="0.7"' + sel + ' rx="2"' + transform + ' data-id="' + item.id + '" data-type="furniture"/>';
-      html += '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="10" font-family="sans-serif" fill="#555"' + (rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '') + '>' + escHtml(item.label || item.type) + '</text>';
+      const sel = (selected && selected.type === 'furniture' && selected.id === item.id);
+      const symbolId = 'fs-' + item.type;
+      html += '<g' + transform + ' data-id="' + item.id + '" data-type="furniture">';
+      if (sel) {
+        html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="none" stroke="#D84200" stroke-width="2"/>';
+      }
+      html += '<use href="#' + symbolId + '" x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '"/>';
+      html += '</g>';
     }
     html += '</g>';
 
