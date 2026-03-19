@@ -44,7 +44,7 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
   });
 
   private getCtaState(): SessionCTAState {
-    const cta = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+    const cta = (this.state ?? {}).cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
     cta.toolCallCount++;
     return cta;
   }
@@ -53,12 +53,12 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
     const ctaState = this.getCtaState();
     return {
       db: this.env.DB,
-      state: this.state,
+      state: this.state ?? {},
       setState: (s) => { this.setState({ ...s, cta: ctaState }); },
       workerUrl: this.getWorkerUrl(),
       ctaVariant: this.env.CTA_VARIANT ?? 'default',
       ctaState,
-      updateCta: (cta) => { this.setState({ ...this.state, cta }); },
+      updateCta: (cta) => { this.setState({ ...(this.state ?? {}), cta }); },
       ...overrides,
     };
   }
