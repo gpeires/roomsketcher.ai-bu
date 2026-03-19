@@ -5,7 +5,7 @@ export function sketcherHtml(sketchId: string): string {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
 <title>RoomSketcher AI Sketcher</title>
 <link rel="icon" type="image/png" href="https://wpmedia.roomsketcher.com/content/uploads/2021/12/15075948/roomsketcher-logo-square.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -77,6 +77,105 @@ export function sketcherHtml(sketchId: string): string {
   /* Drawing guide line */
   .guide-line { stroke: var(--rs-teal); stroke-width: 2; stroke-dasharray: 6,4; pointer-events: none; }
   .snap-point { fill: var(--rs-danger); r: 4; pointer-events: none; }
+
+  /* Bottom sheet (hidden on desktop) */
+  .bottom-sheet { display: none; }
+
+  /* Mobile styles */
+  @media (max-width: 768px) {
+    .toolbar { display: none; }
+    .props { display: none; }
+    .footer { display: none; }
+    .main { flex: 1; }
+    .canvas-wrap { padding-bottom: 48px; }
+    .canvas-wrap svg { touch-action: none; }
+
+    .bottom-sheet {
+      display: block;
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: #fff;
+      border-top: 2px solid var(--rs-gray-light);
+      border-radius: 12px 12px 0 0;
+      transition: transform 0.3s ease;
+      z-index: 100;
+      padding-bottom: env(safe-area-inset-bottom);
+      max-height: 60vh;
+      overflow: hidden;
+    }
+    .bottom-sheet.collapsed { transform: translateY(calc(100% - 48px - env(safe-area-inset-bottom))); }
+    .bottom-sheet.expanded { transform: translateY(0); }
+
+    .sheet-handle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 0;
+      cursor: grab;
+    }
+    .sheet-handle-bar {
+      width: 32px;
+      height: 4px;
+      background: var(--rs-gray-light);
+      border-radius: 2px;
+    }
+
+    .sheet-actions {
+      display: flex;
+      gap: 6px;
+      padding: 0 12px 8px;
+      justify-content: center;
+    }
+    .sheet-actions button {
+      padding: 6px 16px;
+      border: 1px solid var(--rs-gray-light);
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-family: inherit;
+      color: var(--rs-dark);
+    }
+    .sheet-actions .btn-save { background: var(--rs-dark); color: #fff; border-color: var(--rs-dark); }
+    .sheet-actions .btn-download { background: var(--rs-gold); color: var(--rs-dark); border-color: var(--rs-gold); font-weight: 700; }
+
+    .sheet-tools {
+      display: flex;
+      gap: 4px;
+      padding: 0 12px 8px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .sheet-tools button {
+      padding: 5px 12px;
+      border: 1px solid var(--rs-gray-light);
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 12px;
+      font-family: inherit;
+      color: var(--rs-dark);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .sheet-tools button.active { background: var(--rs-teal); color: #fff; border-color: var(--rs-teal-dark); }
+    .sheet-tools button:disabled { opacity: 0.4; cursor: default; }
+
+    .sheet-props {
+      padding: 0 12px 12px;
+      overflow-y: auto;
+      max-height: calc(60vh - 120px);
+    }
+    .sheet-props h3 { font-size: 12px; color: var(--rs-teal-dark); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.8px; font-weight: 700; }
+    .sheet-props label { display: block; font-size: 12px; color: var(--rs-gray); margin-top: 8px; }
+    .sheet-props input, .sheet-props select { width: 100%; padding: 5px 8px; border: 1px solid var(--rs-gray-light); border-radius: 4px; margin-top: 2px; font-size: 13px; font-family: inherit; }
+    .sheet-props .none { color: var(--rs-gray); font-size: 12px; font-style: italic; }
+
+    @media (orientation: landscape) {
+      .bottom-sheet { max-height: 50vh; }
+      .sheet-props { max-height: calc(50vh - 120px); }
+    }
+  }
 </style>
 </head>
 <body>
@@ -113,6 +212,18 @@ export function sketcherHtml(sketchId: string): string {
   Powered by <a href="https://roomsketcher.com/signup?utm_source=ai-sketcher&utm_medium=mcp&utm_campaign=sketch-upgrade&utm_content=sketcher-banner" target="_blank">RoomSketcher</a> \u2014 Upgrade for 3D walkthroughs, 7000+ furniture items, and HD renders
 </div>
 
+<div class="bottom-sheet collapsed" id="bottom-sheet">
+  <div class="sheet-handle" id="sheet-handle">
+    <div class="sheet-handle-bar"></div>
+  </div>
+  <div class="sheet-actions">
+    <button class="btn-save" id="mobile-save">Save</button>
+    <button class="btn-download" id="mobile-download">SVG</button>
+  </div>
+  <div class="sheet-tools" id="sheet-tools"></div>
+  <div class="sheet-props" id="sheet-props"></div>
+</div>
+
 <script>
 (function() {
   'use strict';
@@ -122,24 +233,165 @@ export function sketcherHtml(sketchId: string): string {
   const WS_PROTO = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const WS_URL = WS_PROTO + '//' + location.host + '/ws/' + SKETCH_ID;
 
-  // \u2500\u2500\u2500 State \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- State ---
   let plan = null;
-  let tool = 'select'; // select | wall | door | window | room
-  let selected = null; // { type: 'wall'|'room', id: string }
-  let drawStart = null; // Point for wall drawing
+  let tool = 'select';
+  let selected = null;
+  let drawStart = null;
   let isPanning = false;
   let panStart = { x: 0, y: 0 };
   let viewBox = { x: 0, y: 0, w: 1000, h: 800 };
+  let userViewBox = false;
   let ws = null;
 
   const svg = document.getElementById('canvas');
   const statusEl = document.getElementById('status');
   const propsEl = document.getElementById('props');
 
-  // \u2500\u2500\u2500 Tool buttons \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  const toolButtons = { select: 'btn-select', wall: 'btn-wall', door: 'btn-door', window: 'btn-window', room: 'btn-room' };
-  Object.entries(toolButtons).forEach(([t, id]) => {
-    document.getElementById(id).addEventListener('click', () => setTool(t));
+  // --- Mobile helpers ---
+  const mobileQuery = window.matchMedia('(max-width: 768px)');
+  function isMobile() { return mobileQuery.matches; }
+  const sheetEl = document.getElementById('bottom-sheet');
+  const sheetPropsEl = document.getElementById('sheet-props');
+  const sheetToolsEl = document.getElementById('sheet-tools');
+
+  function setSheetState(state) {
+    sheetEl.classList.toggle('collapsed', state === 'collapsed');
+    sheetEl.classList.toggle('expanded', state === 'expanded');
+  }
+
+  // Sheet handle drag
+  (function initSheetDrag() {
+    const handle = document.getElementById('sheet-handle');
+    let startY = 0, wasExpanded = false;
+    handle.addEventListener('touchstart', function(e) {
+      startY = e.touches[0].clientY;
+      wasExpanded = sheetEl.classList.contains('expanded');
+      sheetEl.style.transition = 'none';
+    }, { passive: true });
+    handle.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+    handle.addEventListener('touchend', function(e) {
+      sheetEl.style.transition = '';
+      var dy = e.changedTouches[0].clientY - startY;
+      if (wasExpanded && dy > 40) setSheetState('collapsed');
+      else if (!wasExpanded && dy < -40) setSheetState('expanded');
+    });
+  })();
+
+  // Mobile save/download buttons
+  document.getElementById('mobile-save').addEventListener('click', function() { save(); });
+  document.getElementById('mobile-download').addEventListener('click', function() { downloadPdf(); });
+
+  // Populate mobile tool buttons
+  function updateMobileTools() {
+    var tools = [
+      { id: 'select', label: 'Select', enabled: true },
+      { id: 'wall', label: 'Wall', enabled: false },
+      { id: 'door', label: 'Door', enabled: false },
+      { id: 'window', label: 'Window', enabled: false },
+      { id: 'room', label: 'Room', enabled: false },
+    ];
+    sheetToolsEl.innerHTML = tools.map(function(t) {
+      return '<button data-tool="' + t.id + '"' + (t.id === tool ? ' class="active"' : '') + (!t.enabled ? ' disabled' : '') + '>' + t.label + '</button>';
+    }).join('');
+    sheetToolsEl.querySelectorAll('button:not([disabled])').forEach(function(btn) {
+      btn.addEventListener('click', function() { setTool(btn.dataset.tool); });
+    });
+  }
+  updateMobileTools();
+
+  // --- Touch gestures (bound once, outside attachInteraction) ---
+  (function initTouchHandlers() {
+    var touchStart = null;
+    var touchStartVB = null;
+    var lastPinchDist = 0;
+    var isTouchPanning = false;
+    var tapStart = null;
+
+    svg.addEventListener('touchstart', function(e) {
+      if (e.touches.length === 1) {
+        var t = e.touches[0];
+        touchStart = { x: t.clientX, y: t.clientY };
+        touchStartVB = { x: viewBox.x, y: viewBox.y };
+        isTouchPanning = false;
+        tapStart = { x: t.clientX, y: t.clientY, time: Date.now() };
+      } else if (e.touches.length === 2) {
+        tapStart = null;
+        var dx = e.touches[0].clientX - e.touches[1].clientX;
+        var dy = e.touches[0].clientY - e.touches[1].clientY;
+        lastPinchDist = Math.sqrt(dx * dx + dy * dy);
+      }
+    }, { passive: true });
+
+    svg.addEventListener('touchmove', function(e) {
+      e.preventDefault();
+      if (e.touches.length === 1 && touchStart) {
+        isTouchPanning = true;
+        var t = e.touches[0];
+        var rect = svg.getBoundingClientRect();
+        var dx = (t.clientX - touchStart.x) / rect.width * viewBox.w;
+        var dy = (t.clientY - touchStart.y) / rect.height * viewBox.h;
+        viewBox.x = touchStartVB.x - dx;
+        viewBox.y = touchStartVB.y - dy;
+        userViewBox = true;
+        svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
+      } else if (e.touches.length === 2) {
+        var dx2 = e.touches[0].clientX - e.touches[1].clientX;
+        var dy2 = e.touches[0].clientY - e.touches[1].clientY;
+        var dist = Math.sqrt(dx2 * dx2 + dy2 * dy2);
+        if (lastPinchDist > 0) {
+          var scale = lastPinchDist / dist;
+          var rect = svg.getBoundingClientRect();
+          var midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          var midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          var mx = viewBox.x + (midX - rect.left) / rect.width * viewBox.w;
+          var my = viewBox.y + (midY - rect.top) / rect.height * viewBox.h;
+          viewBox.w *= scale;
+          viewBox.h *= scale;
+          viewBox.x = mx - (midX - rect.left) / rect.width * viewBox.w;
+          viewBox.y = my - (midY - rect.top) / rect.height * viewBox.h;
+          userViewBox = true;
+          svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
+        }
+        lastPinchDist = dist;
+      }
+    }, { passive: false });
+
+    svg.addEventListener('touchend', function(e) {
+      if (e.touches.length === 0) {
+        // Detect tap: short duration, small movement
+        if (tapStart && !isTouchPanning) {
+          var ct = e.changedTouches[0];
+          var dx = ct.clientX - tapStart.x;
+          var dy = ct.clientY - tapStart.y;
+          var elapsed = Date.now() - tapStart.time;
+          if (Math.sqrt(dx * dx + dy * dy) < 10 && elapsed < 300) {
+            // Find element under tap point
+            var el = document.elementFromPoint(ct.clientX, ct.clientY);
+            while (el && !el.dataset.id && el !== svg) el = el.parentElement;
+            if (el && el.dataset.id && tool === 'select') {
+              selected = { type: el.dataset.type, id: el.dataset.id };
+              render();
+              showProperties();
+            } else {
+              // Tapped on empty space — collapse sheet
+              if (isMobile()) setSheetState('collapsed');
+            }
+          }
+        }
+        touchStart = null;
+        touchStartVB = null;
+        lastPinchDist = 0;
+        isTouchPanning = false;
+        tapStart = null;
+      }
+    }, { passive: true });
+  })();
+
+  // --- Tool buttons ---
+  var toolButtons = { select: 'btn-select', wall: 'btn-wall', door: 'btn-door', window: 'btn-window', room: 'btn-room' };
+  Object.entries(toolButtons).forEach(function(entry) {
+    document.getElementById(entry[1]).addEventListener('click', function() { setTool(entry[0]); });
   });
   document.getElementById('btn-save').addEventListener('click', save);
   document.getElementById('btn-download').addEventListener('click', downloadPdf);
@@ -148,17 +400,18 @@ export function sketcherHtml(sketchId: string): string {
     tool = t;
     drawStart = null;
     removeGuide();
-    Object.entries(toolButtons).forEach(([k, id]) => {
-      document.getElementById(id).classList.toggle('active', k === t);
+    Object.entries(toolButtons).forEach(function(entry) {
+      document.getElementById(entry[1]).classList.toggle('active', entry[0] === t);
     });
+    updateMobileTools();
   }
 
-  // \u2500\u2500\u2500 Load plan \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Load plan ---
   async function load() {
     try {
-      const res = await fetch(API_URL);
+      var res = await fetch(API_URL);
       if (!res.ok) throw new Error('Sketch not found');
-      const data = await res.json();
+      var data = await res.json();
       plan = data.plan;
       render();
       statusEl.textContent = 'Loaded';
@@ -168,7 +421,7 @@ export function sketcherHtml(sketchId: string): string {
     }
   }
 
-  // \u2500\u2500\u2500 Save \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Save ---
   async function save() {
     if (!plan) return;
     statusEl.textContent = 'Saving...';
@@ -188,10 +441,10 @@ export function sketcherHtml(sketchId: string): string {
     }
   }
 
-  // \u2500\u2500\u2500 Download PDF \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Download PDF ---
   function downloadPdf() {
-    const url = '/api/sketches/' + SKETCH_ID + '/export.pdf';
-    const a = document.createElement('a');
+    var url = '/api/sketches/' + SKETCH_ID + '/export.pdf';
+    var a = document.createElement('a');
     a.href = url;
     a.download = (plan ? plan.name : 'floor-plan') + '.svg';
     document.body.appendChild(a);
@@ -199,18 +452,19 @@ export function sketcherHtml(sketchId: string): string {
     a.remove();
   }
 
-  // \u2500\u2500\u2500 WebSocket \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- WebSocket ---
   function connectWs() {
     try {
       ws = new WebSocket(WS_URL);
-      ws.onopen = () => {
+      ws.onopen = function() {
         statusEl.textContent = 'Connected';
         ws.send(JSON.stringify({ type: 'load', sketch_id: SKETCH_ID }));
       };
-      ws.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
+      ws.onmessage = function(e) {
+        var msg = JSON.parse(e.data);
         if (msg.type === 'state_update') {
           plan = msg.plan;
+          userViewBox = false;
           render();
         } else if (msg.type === 'saved') {
           statusEl.textContent = 'Saved ' + new Date(msg.updated_at).toLocaleTimeString();
@@ -218,7 +472,7 @@ export function sketcherHtml(sketchId: string): string {
           statusEl.textContent = 'Error: ' + msg.message;
         }
       };
-      ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
+      ws.onclose = function() { statusEl.textContent = 'Disconnected'; };
     } catch (e) {
       // WebSocket not available, REST fallback
     }
@@ -226,10 +480,8 @@ export function sketcherHtml(sketchId: string): string {
 
   function sendChange(change) {
     if (!plan) return;
-    // Apply locally
     applyChangeLocal(change);
     render();
-    // Send to server
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(change));
     }
@@ -241,7 +493,7 @@ export function sketcherHtml(sketchId: string): string {
         plan.walls.push(change.wall);
         break;
       case 'move_wall': {
-        const w = plan.walls.find(w => w.id === change.wall_id);
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
         if (w) {
           if (change.start) w.start = change.start;
           if (change.end) w.end = change.end;
@@ -249,10 +501,10 @@ export function sketcherHtml(sketchId: string): string {
         break;
       }
       case 'remove_wall':
-        plan.walls = plan.walls.filter(w => w.id !== change.wall_id);
+        plan.walls = plan.walls.filter(function(w) { return w.id !== change.wall_id; });
         break;
       case 'update_wall': {
-        const w = plan.walls.find(w => w.id === change.wall_id);
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
         if (w) {
           if (change.thickness !== undefined) w.thickness = change.thickness;
           if (change.wall_type !== undefined) w.type = change.wall_type;
@@ -260,21 +512,21 @@ export function sketcherHtml(sketchId: string): string {
         break;
       }
       case 'add_opening': {
-        const w = plan.walls.find(w => w.id === change.wall_id);
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
         if (w) w.openings.push(change.opening);
         break;
       }
       case 'remove_opening': {
-        const w = plan.walls.find(w => w.id === change.wall_id);
-        if (w) w.openings = w.openings.filter(o => o.id !== change.opening_id);
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        if (w) w.openings = w.openings.filter(function(o) { return o.id !== change.opening_id; });
         break;
       }
       case 'add_room':
         plan.rooms.push(change.room);
         break;
       case 'rename_room': {
-        const COLORS = {living:'#E8F5E9',bedroom:'#E3F2FD',kitchen:'#FFF3E0',bathroom:'#E0F7FA',hallway:'#F5F5F5',office:'#F3E5F5',dining:'#FFF8E1',garage:'#EFEBE9',closet:'#ECEFF1',laundry:'#E8EAF6',balcony:'#F1F8E9',terrace:'#F1F8E9',storage:'#ECEFF1',utility:'#ECEFF1',other:'#FAFAFA'};
-        const r = plan.rooms.find(r => r.id === change.room_id);
+        var COLORS = {living:'#E8F5E9',bedroom:'#E3F2FD',kitchen:'#FFF3E0',bathroom:'#E0F7FA',hallway:'#F5F5F5',office:'#F3E5F5',dining:'#FFF8E1',garage:'#EFEBE9',closet:'#ECEFF1',laundry:'#E8EAF6',balcony:'#F1F8E9',terrace:'#F1F8E9',storage:'#ECEFF1',utility:'#ECEFF1',other:'#FAFAFA'};
+        var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
         if (r) {
           r.label = change.label;
           if (change.room_type) { r.type = change.room_type; r.color = COLORS[change.room_type] || '#FAFAFA'; }
@@ -282,13 +534,13 @@ export function sketcherHtml(sketchId: string): string {
         break;
       }
       case 'remove_room':
-        plan.rooms = plan.rooms.filter(r => r.id !== change.room_id);
+        plan.rooms = plan.rooms.filter(function(r) { return r.id !== change.room_id; });
         break;
       case 'add_furniture':
         plan.furniture.push(change.furniture);
         break;
       case 'move_furniture': {
-        const f = plan.furniture.find(f => f.id === change.furniture_id);
+        var f = plan.furniture.find(function(f) { return f.id === change.furniture_id; });
         if (f) {
           if (change.position) f.position = change.position;
           if (change.rotation !== undefined) f.rotation = change.rotation;
@@ -296,92 +548,99 @@ export function sketcherHtml(sketchId: string): string {
         break;
       }
       case 'remove_furniture':
-        plan.furniture = plan.furniture.filter(f => f.id !== change.furniture_id);
+        plan.furniture = plan.furniture.filter(function(f) { return f.id !== change.furniture_id; });
         break;
     }
     plan.metadata.updated_at = new Date().toISOString();
     plan.metadata.source = 'mixed';
   }
 
-  // \u2500\u2500\u2500 Render \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Render ---
   function render() {
     if (!plan) return;
 
-    // Compute viewBox from walls
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const w of plan.walls) {
-      for (const p of [w.start, w.end]) {
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
+    // Only recalculate viewBox if user hasn't panned/zoomed
+    if (!userViewBox) {
+      var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (var i = 0; i < plan.walls.length; i++) {
+        var w = plan.walls[i];
+        for (var j = 0; j < 2; j++) {
+          var p = j === 0 ? w.start : w.end;
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+        }
       }
+      if (plan.walls.length === 0) {
+        minX = 0; minY = 0; maxX = plan.canvas.width; maxY = plan.canvas.height;
+      }
+      var pad = 80;
+      viewBox = { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
     }
-    if (plan.walls.length === 0) {
-      minX = 0; minY = 0; maxX = plan.canvas.width; maxY = plan.canvas.height;
-    }
-    const pad = 80;
-    viewBox = { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
     svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
 
-    let html = window.__furnitureDefs;
+    var html = window.__furnitureDefs;
 
     // Grid
     html += '<g id="grid" opacity="0.15">';
-    const gs = plan.canvas.gridSize || 10;
-    const gStep = gs * 5; // render every 5th grid line for performance
-    for (let x = Math.floor(viewBox.x / gStep) * gStep; x <= viewBox.x + viewBox.w; x += gStep) {
+    var gs = plan.canvas.gridSize || 10;
+    var gStep = gs * 5;
+    for (var x = Math.floor(viewBox.x / gStep) * gStep; x <= viewBox.x + viewBox.w; x += gStep) {
       html += '<line x1="' + x + '" y1="' + viewBox.y + '" x2="' + x + '" y2="' + (viewBox.y + viewBox.h) + '" stroke="#ccc" stroke-width="0.5"/>';
     }
-    for (let y = Math.floor(viewBox.y / gStep) * gStep; y <= viewBox.y + viewBox.h; y += gStep) {
+    for (var y = Math.floor(viewBox.y / gStep) * gStep; y <= viewBox.y + viewBox.h; y += gStep) {
       html += '<line x1="' + viewBox.x + '" y1="' + y + '" x2="' + (viewBox.x + viewBox.w) + '" y2="' + y + '" stroke="#ccc" stroke-width="0.5"/>';
     }
     html += '</g>';
 
     // Rooms
     html += '<g id="rooms">';
-    for (const room of plan.rooms) {
-      const pts = room.polygon.map(p => p.x + ',' + p.y).join(' ');
-      const cx = room.polygon.reduce((s, p) => s + p.x, 0) / room.polygon.length;
-      const cy = room.polygon.reduce((s, p) => s + p.y, 0) / room.polygon.length;
-      const area = computeArea(room.polygon);
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      var room = plan.rooms[ri];
+      var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      var cx = room.polygon.reduce(function(s, p) { return s + p.x; }, 0) / room.polygon.length;
+      var cy = room.polygon.reduce(function(s, p) { return s + p.y; }, 0) / room.polygon.length;
+      var area = computeArea(room.polygon);
       html += '<polygon points="' + pts + '" fill="' + room.color + '" fill-opacity="0.5" stroke="none" data-id="' + room.id + '" data-type="room"/>';
       html += '<text x="' + cx + '" y="' + (cy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(room.label) + '</text>';
-      html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\u00B2</text>';
+      html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\\u00B2</text>';
     }
     html += '</g>';
 
     // Walls
     html += '<g id="walls">';
-    for (const w of plan.walls) {
-      const sw = w.type === 'exterior' ? 4 : w.type === 'interior' ? 2 : 1;
-      const dash = w.type === 'divider' ? ' stroke-dasharray="6,4"' : '';
-      const sel = (selected && selected.type === 'wall' && selected.id === w.id) ? ' class="selected"' : '';
+    for (var wi = 0; wi < plan.walls.length; wi++) {
+      var w = plan.walls[wi];
+      var sw = w.type === 'exterior' ? 4 : w.type === 'interior' ? 2 : 1;
+      var dash = w.type === 'divider' ? ' stroke-dasharray="6,4"' : '';
+      var sel = (selected && selected.type === 'wall' && selected.id === w.id) ? ' class="selected"' : '';
       html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="' + sw + '" stroke-linecap="round"' + dash + ' data-id="' + w.id + '" data-type="wall"' + sel + '/>';
     }
     html += '</g>';
 
     // Openings
     html += '<g id="openings">';
-    for (const w of plan.walls) {
-      const angle = Math.atan2(w.end.y - w.start.y, w.end.x - w.start.x);
-      const cos = Math.cos(angle), sin = Math.sin(angle);
-      for (const o of w.openings) {
-        const ox = w.start.x + cos * o.offset;
-        const oy = w.start.y + sin * o.offset;
-        const ex = ox + cos * o.width;
-        const ey = oy + sin * o.width;
-        // Gap
+    for (var oi = 0; oi < plan.walls.length; oi++) {
+      var w = plan.walls[oi];
+      var angle = Math.atan2(w.end.y - w.start.y, w.end.x - w.start.x);
+      var cos = Math.cos(angle), sin = Math.sin(angle);
+      for (var oj = 0; oj < w.openings.length; oj++) {
+        var o = w.openings[oj];
+        var ox = w.start.x + cos * o.offset;
+        var oy = w.start.y + sin * o.offset;
+        var ex = ox + cos * o.width;
+        var ey = oy + sin * o.width;
         html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="6"/>';
         if (o.type === 'door') {
-          const dir = o.properties.swingDirection === 'right' ? 1 : -1;
-          const r = o.width;
-          const px = -sin * dir * r, py = cos * dir * r;
-          const ax = ox + px, ay = oy + py;
-          const sweep = dir === 1 ? 1 : 0;
+          var dir = o.properties.swingDirection === 'right' ? 1 : -1;
+          var r = o.width;
+          var px = -sin * dir * r, py = cos * dir * r;
+          var ax = ox + px, ay = oy + py;
+          var sweep = dir === 1 ? 1 : 0;
           html += '<path d="M' + ox + ',' + oy + ' L' + ex + ',' + ey + ' A' + r + ',' + r + ' 0 0,' + sweep + ' ' + ax + ',' + ay + ' Z" fill="none" stroke="#666" stroke-width="1"/>';
         } else if (o.type === 'window') {
-          const nx = -sin * 4, ny = cos * 4;
+          var nx = -sin * 4, ny = cos * 4;
           html += '<line x1="' + (ox+nx) + '" y1="' + (oy+ny) + '" x2="' + (ex+nx) + '" y2="' + (ey+ny) + '" stroke="#4FC3F7" stroke-width="2"/>';
           html += '<line x1="' + (ox-nx) + '" y1="' + (oy-ny) + '" x2="' + (ex-nx) + '" y2="' + (ey-ny) + '" stroke="#4FC3F7" stroke-width="2"/>';
         }
@@ -391,29 +650,31 @@ export function sketcherHtml(sketchId: string): string {
 
     // Dimensions
     html += '<g id="dimensions">';
-    for (const w of plan.walls) {
-      const dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
-      const len = Math.sqrt(dx*dx + dy*dy);
+    for (var di = 0; di < plan.walls.length; di++) {
+      var w = plan.walls[di];
+      var dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
+      var len = Math.sqrt(dx*dx + dy*dy);
       if (len < 1) continue;
-      const label = (len / 100).toFixed(2) + 'm';
-      const mx = (w.start.x + w.end.x) / 2, my = (w.start.y + w.end.y) / 2;
-      const angle = Math.atan2(dy, dx);
-      const lx = mx + Math.cos(angle + Math.PI/2) * 14;
-      const ly = my + Math.sin(angle + Math.PI/2) * 14;
-      const deg = angle * 180 / Math.PI;
+      var label = (len / 100).toFixed(2) + 'm';
+      var mx = (w.start.x + w.end.x) / 2, my = (w.start.y + w.end.y) / 2;
+      var angle = Math.atan2(dy, dx);
+      var lx = mx + Math.cos(angle + Math.PI/2) * 14;
+      var ly = my + Math.sin(angle + Math.PI/2) * 14;
+      var deg = angle * 180 / Math.PI;
       html += '<text x="' + lx + '" y="' + ly + '" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#999" transform="rotate(' + deg + ',' + lx + ',' + ly + ')">' + label + '</text>';
     }
     html += '</g>';
 
     // Furniture
     html += '<g id="furniture">';
-    for (const item of plan.furniture) {
-      const rot = item.rotation || 0;
-      const cx = item.position.x + item.width / 2;
-      const cy = item.position.y + item.depth / 2;
-      const transform = rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '';
-      const sel = (selected && selected.type === 'furniture' && selected.id === item.id);
-      const symbolId = 'fs-' + item.type;
+    for (var fi = 0; fi < plan.furniture.length; fi++) {
+      var item = plan.furniture[fi];
+      var rot = item.rotation || 0;
+      var cx = item.position.x + item.width / 2;
+      var cy = item.position.y + item.depth / 2;
+      var transform = rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '';
+      var sel = (selected && selected.type === 'furniture' && selected.id === item.id);
+      var symbolId = 'fs-' + item.type;
       html += '<g' + transform + ' data-id="' + item.id + '" data-type="furniture">';
       if (sel) {
         html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="none" stroke="#D84200" stroke-width="2"/>';
@@ -428,21 +689,20 @@ export function sketcherHtml(sketchId: string): string {
   }
 
   function computeArea(polygon) {
-    let sum = 0;
-    for (let i = 0; i < polygon.length; i++) {
-      const j = (i + 1) % polygon.length;
+    var sum = 0;
+    for (var i = 0; i < polygon.length; i++) {
+      var j = (i + 1) % polygon.length;
       sum += polygon[i].x * polygon[j].y - polygon[j].x * polygon[i].y;
     }
-    return Math.abs(sum) / 2 / 10000; // cm\u00B2 \u2192 m\u00B2
+    return Math.abs(sum) / 2 / 10000;
   }
 
   function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-  // \u2500\u2500\u2500 Interaction \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Interaction ---
   function attachInteraction() {
-    // Click on walls/rooms for selection
-    svg.querySelectorAll('[data-id]').forEach(el => {
-      el.addEventListener('click', (e) => {
+    svg.querySelectorAll('[data-id]').forEach(function(el) {
+      el.addEventListener('click', function(e) {
         e.stopPropagation();
         if (tool === 'select') {
           selected = { type: el.dataset.type, id: el.dataset.id };
@@ -457,66 +717,110 @@ export function sketcherHtml(sketchId: string): string {
     });
   }
 
-  function showProperties() {
+  // --- Properties rendering ---
+  function renderPropertiesHtml() {
     if (!selected || !plan) {
-      propsEl.innerHTML = '<h3>Properties</h3><p class="none">Select a wall or room</p>';
-      return;
+      return '<h3>Properties</h3><p class="none">Select a wall or room</p>';
     }
 
     if (selected.type === 'wall') {
-      const wall = plan.walls.find(w => w.id === selected.id);
-      if (!wall) return;
-      const len = Math.sqrt(Math.pow(wall.end.x - wall.start.x, 2) + Math.pow(wall.end.y - wall.start.y, 2));
-      propsEl.innerHTML = '<h3>Wall</h3>' +
+      var wall = plan.walls.find(function(w) { return w.id === selected.id; });
+      if (!wall) return '';
+      var len = Math.sqrt(Math.pow(wall.end.x - wall.start.x, 2) + Math.pow(wall.end.y - wall.start.y, 2));
+      return '<h3>Wall</h3>' +
         '<label>Type</label><select id="prop-wall-type"><option value="exterior"' + (wall.type==='exterior'?' selected':'') + '>Exterior</option><option value="interior"' + (wall.type==='interior'?' selected':'') + '>Interior</option><option value="divider"' + (wall.type==='divider'?' selected':'') + '>Divider</option></select>' +
         '<label>Thickness (cm)</label><input id="prop-wall-thick" type="number" value="' + wall.thickness + '">' +
         '<label>Length</label><p style="font-size:13px;margin-top:2px">' + (len/100).toFixed(2) + 'm</p>' +
         '<label>Openings</label><p style="font-size:13px;margin-top:2px">' + wall.openings.length + '</p>' +
         '<br><button id="prop-wall-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Wall</button>';
+    } else if (selected.type === 'room') {
+      var room = plan.rooms.find(function(r) { return r.id === selected.id; });
+      if (!room) return '';
+      var area = computeArea(room.polygon);
+      return '<h3>Room</h3>' +
+        '<label>Label</label><input id="prop-room-label" type="text" value="' + escHtml(room.label) + '">' +
+        '<label>Type</label><select id="prop-room-type">' +
+        ['living','bedroom','kitchen','bathroom','hallway','closet','laundry','office','dining','garage','balcony','terrace','storage','utility','other']
+          .map(function(t) { return '<option value="' + t + '"' + (room.type===t?' selected':'') + '>' + t.charAt(0).toUpperCase() + t.slice(1) + '</option>'; }).join('') +
+        '</select>' +
+        '<label>Area</label><p style="font-size:13px;margin-top:2px">' + area.toFixed(1) + ' m\\u00B2</p>' +
+        '<br><button id="prop-room-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Room</button>';
+    } else if (selected.type === 'furniture') {
+      var item = plan.furniture.find(function(f) { return f.id === selected.id; });
+      if (!item) return '';
+      return '<h3>Furniture</h3>' +
+        '<label>Type</label><p style="font-size:13px;margin-top:2px">' + escHtml(item.type) + '</p>' +
+        '<label>Size</label><p style="font-size:13px;margin-top:2px">' + item.width + ' x ' + item.depth + ' cm</p>' +
+        '<label>Rotation</label><p style="font-size:13px;margin-top:2px">' + (item.rotation || 0) + '\\u00B0</p>' +
+        '<br><button id="prop-furn-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete</button>';
+    }
+    return '';
+  }
 
-      document.getElementById('prop-wall-type').onchange = (e) => {
+  function attachPropertiesHandlers() {
+    if (!selected || !plan) return;
+
+    if (selected.type === 'wall') {
+      var wall = plan.walls.find(function(w) { return w.id === selected.id; });
+      if (!wall) return;
+      var typeEl = document.getElementById('prop-wall-type');
+      var thickEl = document.getElementById('prop-wall-thick');
+      var delEl = document.getElementById('prop-wall-delete');
+      if (typeEl) typeEl.onchange = function(e) {
         sendChange({ type: 'update_wall', wall_id: wall.id, wall_type: e.target.value });
       };
-      document.getElementById('prop-wall-thick').onchange = (e) => {
+      if (thickEl) thickEl.onchange = function(e) {
         sendChange({ type: 'update_wall', wall_id: wall.id, thickness: parseInt(e.target.value) });
       };
-      document.getElementById('prop-wall-delete').onclick = () => {
+      if (delEl) delEl.onclick = function() {
         sendChange({ type: 'remove_wall', wall_id: wall.id });
         selected = null;
         showProperties();
       };
     } else if (selected.type === 'room') {
-      const room = plan.rooms.find(r => r.id === selected.id);
+      var room = plan.rooms.find(function(r) { return r.id === selected.id; });
       if (!room) return;
-      const area = computeArea(room.polygon);
-      propsEl.innerHTML = '<h3>Room</h3>' +
-        '<label>Label</label><input id="prop-room-label" type="text" value="' + escHtml(room.label) + '">' +
-        '<label>Type</label><select id="prop-room-type">' +
-        ['living','bedroom','kitchen','bathroom','hallway','closet','laundry','office','dining','garage','balcony','terrace','storage','utility','other']
-          .map(t => '<option value="' + t + '"' + (room.type===t?' selected':'') + '>' + t.charAt(0).toUpperCase() + t.slice(1) + '</option>').join('') +
-        '</select>' +
-        '<label>Area</label><p style="font-size:13px;margin-top:2px">' + area.toFixed(1) + ' m\u00B2</p>' +
-        '<br><button id="prop-room-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Room</button>';
-
-      document.getElementById('prop-room-label').onchange = (e) => {
+      var labelEl = document.getElementById('prop-room-label');
+      var typeEl = document.getElementById('prop-room-type');
+      var delEl = document.getElementById('prop-room-delete');
+      if (labelEl) labelEl.onchange = function(e) {
         sendChange({ type: 'rename_room', room_id: room.id, label: e.target.value });
       };
-      document.getElementById('prop-room-type').onchange = (e) => {
+      if (typeEl) typeEl.onchange = function(e) {
         sendChange({ type: 'rename_room', room_id: room.id, label: room.label, room_type: e.target.value });
       };
-      document.getElementById('prop-room-delete').onclick = () => {
+      if (delEl) delEl.onclick = function() {
         sendChange({ type: 'remove_room', room_id: room.id });
+        selected = null;
+        showProperties();
+      };
+    } else if (selected.type === 'furniture') {
+      var delEl = document.getElementById('prop-furn-delete');
+      if (delEl) delEl.onclick = function() {
+        sendChange({ type: 'remove_furniture', furniture_id: selected.id });
         selected = null;
         showProperties();
       };
     }
   }
 
-  // \u2500\u2500\u2500 Wall drawing \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  function showProperties() {
+    var html = renderPropertiesHtml();
+    if (isMobile()) {
+      sheetPropsEl.innerHTML = html;
+      attachPropertiesHandlers();
+      if (selected) setSheetState('expanded');
+    } else {
+      propsEl.innerHTML = html;
+      attachPropertiesHandlers();
+    }
+  }
+
+  // --- Wall drawing ---
   function svgPoint(e) {
-    const rect = svg.getBoundingClientRect();
-    const scaleX = viewBox.w / rect.width;
-    const scaleY = viewBox.h / rect.height;
+    var rect = svg.getBoundingClientRect();
+    var scaleX = viewBox.w / rect.width;
+    var scaleY = viewBox.h / rect.height;
     return {
       x: Math.round((viewBox.x + (e.clientX - rect.left) * scaleX) / 10) * 10,
       y: Math.round((viewBox.y + (e.clientY - rect.top) * scaleY) / 10) * 10,
@@ -525,37 +829,40 @@ export function sketcherHtml(sketchId: string): string {
 
   function snapToEndpoint(pt) {
     if (!plan) return pt;
-    const threshold = 15;
-    for (const w of plan.walls) {
-      for (const ep of [w.start, w.end]) {
-        const d = Math.sqrt(Math.pow(pt.x - ep.x, 2) + Math.pow(pt.y - ep.y, 2));
+    var threshold = 15;
+    for (var i = 0; i < plan.walls.length; i++) {
+      var w = plan.walls[i];
+      var endpoints = [w.start, w.end];
+      for (var j = 0; j < endpoints.length; j++) {
+        var ep = endpoints[j];
+        var d = Math.sqrt(Math.pow(pt.x - ep.x, 2) + Math.pow(pt.y - ep.y, 2));
         if (d < threshold) return { x: ep.x, y: ep.y };
       }
     }
     return pt;
   }
 
-  svg.addEventListener('click', (e) => {
+  svg.addEventListener('click', function(e) {
     if (tool !== 'wall') return;
-    const pt = snapToEndpoint(svgPoint(e));
+    var pt = snapToEndpoint(svgPoint(e));
 
     if (!drawStart) {
       drawStart = pt;
     } else {
-      const id = 'w' + Date.now().toString(36);
+      var id = 'w' + Date.now().toString(36);
       sendChange({
         type: 'add_wall',
-        wall: { id, start: drawStart, end: pt, thickness: 20, height: 250, type: 'exterior', openings: [] },
+        wall: { id: id, start: drawStart, end: pt, thickness: 20, height: 250, type: 'exterior', openings: [] },
       });
-      drawStart = pt; // chain walls
+      drawStart = pt;
     }
   });
 
-  svg.addEventListener('mousemove', (e) => {
+  svg.addEventListener('mousemove', function(e) {
     if (tool === 'wall' && drawStart) {
       removeGuide();
-      const pt = snapToEndpoint(svgPoint(e));
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      var pt = snapToEndpoint(svgPoint(e));
+      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.setAttribute('x1', drawStart.x);
       line.setAttribute('y1', drawStart.y);
       line.setAttribute('x2', pt.x);
@@ -567,67 +874,68 @@ export function sketcherHtml(sketchId: string): string {
   });
 
   function removeGuide() {
-    const g = document.getElementById('guide');
+    var g = document.getElementById('guide');
     if (g) g.remove();
   }
 
-  // \u2500\u2500\u2500 Opening placement \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Opening placement ---
   function addOpeningToWall(wallId, openingType, event) {
-    const wall = plan.walls.find(w => w.id === wallId);
+    var wall = plan.walls.find(function(w) { return w.id === wallId; });
     if (!wall) return;
-    const pt = svgPoint(event);
-    const dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
-    const len = Math.sqrt(dx*dx + dy*dy);
-    // Project click onto wall to get offset
-    const t = ((pt.x - wall.start.x) * dx + (pt.y - wall.start.y) * dy) / (len * len);
-    const offset = Math.round(Math.max(0, Math.min(len - 90, t * len)) / 10) * 10;
-    const id = (openingType === 'door' ? 'd' : 'win') + Date.now().toString(36);
-    const opening = {
-      id,
+    var pt = svgPoint(event);
+    var dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
+    var len = Math.sqrt(dx*dx + dy*dy);
+    var t = ((pt.x - wall.start.x) * dx + (pt.y - wall.start.y) * dy) / (len * len);
+    var offset = Math.round(Math.max(0, Math.min(len - 90, t * len)) / 10) * 10;
+    var id = (openingType === 'door' ? 'd' : 'win') + Date.now().toString(36);
+    var opening = {
+      id: id,
       type: openingType,
-      offset,
+      offset: offset,
       width: openingType === 'door' ? 90 : 120,
       properties: openingType === 'door' ? { swingDirection: 'left' } : {},
     };
-    sendChange({ type: 'add_opening', wall_id: wallId, opening });
+    sendChange({ type: 'add_opening', wall_id: wallId, opening: opening });
     setTool('select');
   }
 
-  // \u2500\u2500\u2500 Pan & zoom \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  svg.addEventListener('wheel', (e) => {
+  // --- Pan & zoom (mouse) ---
+  svg.addEventListener('wheel', function(e) {
     e.preventDefault();
-    const scale = e.deltaY > 0 ? 1.1 : 0.9;
-    const rect = svg.getBoundingClientRect();
-    const mx = viewBox.x + (e.clientX - rect.left) / rect.width * viewBox.w;
-    const my = viewBox.y + (e.clientY - rect.top) / rect.height * viewBox.h;
+    var scale = e.deltaY > 0 ? 1.1 : 0.9;
+    var rect = svg.getBoundingClientRect();
+    var mx = viewBox.x + (e.clientX - rect.left) / rect.width * viewBox.w;
+    var my = viewBox.y + (e.clientY - rect.top) / rect.height * viewBox.h;
     viewBox.w *= scale;
     viewBox.h *= scale;
     viewBox.x = mx - (e.clientX - rect.left) / rect.width * viewBox.w;
     viewBox.y = my - (e.clientY - rect.top) / rect.height * viewBox.h;
+    userViewBox = true;
     svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
   }, { passive: false });
 
-  svg.addEventListener('mousedown', (e) => {
+  svg.addEventListener('mousedown', function(e) {
     if (tool === 'select' && e.target === svg) {
       isPanning = true;
       panStart = { x: e.clientX, y: e.clientY };
     }
   });
-  svg.addEventListener('mousemove', (e) => {
+  svg.addEventListener('mousemove', function(e) {
     if (isPanning) {
-      const rect = svg.getBoundingClientRect();
-      const dx = (e.clientX - panStart.x) / rect.width * viewBox.w;
-      const dy = (e.clientY - panStart.y) / rect.height * viewBox.h;
+      var rect = svg.getBoundingClientRect();
+      var dx = (e.clientX - panStart.x) / rect.width * viewBox.w;
+      var dy = (e.clientY - panStart.y) / rect.height * viewBox.h;
       viewBox.x -= dx;
       viewBox.y -= dy;
       panStart = { x: e.clientX, y: e.clientY };
+      userViewBox = true;
       svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
     }
   });
-  svg.addEventListener('mouseup', () => { isPanning = false; });
+  svg.addEventListener('mouseup', function() { isPanning = false; });
 
-  // \u2500\u2500\u2500 Keyboard shortcuts \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  document.addEventListener('keydown', (e) => {
+  // --- Keyboard shortcuts ---
+  document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') { setTool('select'); selected = null; render(); showProperties(); }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selected) {
@@ -644,7 +952,7 @@ export function sketcherHtml(sketchId: string): string {
     }
   });
 
-  // \u2500\u2500\u2500 Init \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // --- Init ---
   load();
 })();
 </script>
