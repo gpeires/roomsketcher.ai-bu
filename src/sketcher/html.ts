@@ -41,10 +41,12 @@ export function sketcherHtml(sketchId: string): string {
   .toolbar button:hover { background: var(--rs-teal-bg); border-color: var(--rs-teal-light); }
   .toolbar button.active { background: var(--rs-teal); color: #fff; border-color: var(--rs-teal-dark); }
   .toolbar .spacer { flex: 1; }
-  .toolbar .btn-save { background: var(--rs-dark); color: #fff; border-color: var(--rs-dark); }
-  .toolbar .btn-save:hover { background: var(--rs-gray); }
-  .toolbar .btn-download { background: var(--rs-gold); color: var(--rs-dark); border-color: var(--rs-gold); font-weight: 700; padding: 6px 18px; }
+.toolbar .btn-download { background: var(--rs-gold); color: var(--rs-dark); border-color: var(--rs-gold); font-weight: 700; padding: 6px 18px; }
   .toolbar .btn-download:hover { background: var(--rs-gold-light); }
+  .toolbar .btn-icon { padding: 6px 8px; font-size: 16px; color: var(--rs-gray); }
+  .toolbar .btn-icon:disabled { opacity: 0.3; cursor: default; }
+  .toolbar .btn-icon:disabled:hover { background: #fff; border-color: var(--rs-gray-light); }
+  .toolbar-sep { width: 1px; height: 24px; background: var(--rs-gray-light); margin: 0 4px; }
   .toolbar .btn-download svg { vertical-align: -3px; margin-right: 4px; }
 
   /* Main area */
@@ -121,25 +123,6 @@ export function sketcherHtml(sketchId: string): string {
       border-radius: 2px;
     }
 
-    .sheet-actions {
-      display: flex;
-      gap: 6px;
-      padding: 0 12px 8px;
-      justify-content: center;
-    }
-    .sheet-actions button {
-      padding: 6px 16px;
-      border: 1px solid var(--rs-gray-light);
-      border-radius: 6px;
-      background: #fff;
-      cursor: pointer;
-      font-size: 13px;
-      font-family: inherit;
-      color: var(--rs-dark);
-    }
-    .sheet-actions .btn-save { background: var(--rs-dark); color: #fff; border-color: var(--rs-dark); }
-    .sheet-actions .btn-download { background: var(--rs-gold); color: var(--rs-dark); border-color: var(--rs-gold); font-weight: 700; }
-
     .sheet-tools {
       display: flex;
       gap: 4px;
@@ -192,12 +175,15 @@ export function sketcherHtml(sketchId: string): string {
 <div class="toolbar">
   <button id="btn-select" class="active" title="Select &amp; move (S)">Select</button>
   <button id="btn-wall" title="Draw walls (W)">Wall</button>
-  <button id="btn-door" title="Add door to wall">Door</button>
+  <button id="btn-door" title="Add door to wall (D)">Door</button>
   <button id="btn-window" title="Add window to wall">Window</button>
-  <button id="btn-room" title="Label rooms">Room</button>
+  <button id="btn-room" title="Label rooms (R)">Room</button>
+  <button id="btn-furniture" title="Select furniture (F)">Furniture</button>
   <div class="spacer"></div>
-  <button id="btn-save" class="btn-save" title="Save to server (\u2318S)">Save</button>
-  <button id="btn-download" class="btn-download" title="Download as PDF"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>SVG</button>
+  <button id="btn-undo" class="btn-icon" title="Undo (&#8984;Z)" disabled>&#8630;</button>
+  <button id="btn-redo" class="btn-icon" title="Redo (&#8984;&#8679;Z)" disabled>&#8631;</button>
+  <div class="toolbar-sep"></div>
+  <button id="btn-download" class="btn-download" title="Download SVG"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>SVG</button>
 </div>
 
 <div class="main">
@@ -218,10 +204,6 @@ export function sketcherHtml(sketchId: string): string {
 <div class="bottom-sheet collapsed" id="bottom-sheet">
   <div class="sheet-handle" id="sheet-handle">
     <div class="sheet-handle-bar"></div>
-  </div>
-  <div class="sheet-actions">
-    <button class="btn-save" id="mobile-save">Save</button>
-    <button class="btn-download" id="mobile-download">SVG</button>
   </div>
   <div class="sheet-tools" id="sheet-tools"></div>
   <div class="sheet-props" id="sheet-props"></div>
@@ -289,25 +271,29 @@ export function sketcherHtml(sketchId: string): string {
     });
   })();
 
-  // Mobile save/download buttons
-  document.getElementById('mobile-save').addEventListener('click', function() { save(); });
-  document.getElementById('mobile-download').addEventListener('click', function() { downloadPdf(); });
-
   // Populate mobile tool buttons
   function updateMobileTools() {
     var tools = [
-      { id: 'select', label: 'Select', enabled: true },
-      { id: 'wall', label: 'Wall', enabled: false },
-      { id: 'door', label: 'Door', enabled: false },
-      { id: 'window', label: 'Window', enabled: false },
-      { id: 'room', label: 'Room', enabled: false },
+      { id: 'select', label: 'Select' },
+      { id: 'wall', label: 'Wall' },
+      { id: 'door', label: 'Door' },
+      { id: 'window', label: 'Window' },
+      { id: 'room', label: 'Room' },
+      { id: 'furniture', label: 'Furniture' },
     ];
-    sheetToolsEl.innerHTML = tools.map(function(t) {
-      return '<button data-tool="' + t.id + '"' + (t.id === tool ? ' class="active"' : '') + (!t.enabled ? ' disabled' : '') + '>' + t.label + '</button>';
+    var html = tools.map(function(t) {
+      return '<button data-tool="' + t.id + '"' + (t.id === tool ? ' class="active"' : '') + '>' + t.label + '</button>';
     }).join('');
-    sheetToolsEl.querySelectorAll('button:not([disabled])').forEach(function(btn) {
+    html += '<div style="width:1px;height:20px;background:var(--rs-gray-light);margin:0 3px;flex-shrink:0"></div>';
+    html += '<button id="mobile-undo" style="flex-shrink:0;font-size:14px;padding:4px 7px;border:1px solid var(--rs-gray-light);border-radius:6px;background:#fff;color:var(--rs-gray)" disabled>&#8630;</button>';
+    html += '<button id="mobile-redo" style="flex-shrink:0;font-size:14px;padding:4px 7px;border:1px solid var(--rs-gray-light);border-radius:6px;background:#fff;color:var(--rs-gray)" disabled>&#8631;</button>';
+    html += '<button id="mobile-download" style="flex-shrink:0;padding:4px 12px;font-size:11px;border:1px solid var(--rs-gold);border-radius:6px;background:var(--rs-gold);color:var(--rs-dark);font-weight:700">&#8595; SVG</button>';
+    sheetToolsEl.innerHTML = html;
+    sheetToolsEl.querySelectorAll('[data-tool]').forEach(function(btn) {
       btn.addEventListener('click', function() { setTool(btn.dataset.tool); });
     });
+    var dlBtn = document.getElementById('mobile-download');
+    if (dlBtn) dlBtn.addEventListener('click', function() { downloadPdf(); });
   }
   updateMobileTools();
 
@@ -400,11 +386,10 @@ export function sketcherHtml(sketchId: string): string {
   })();
 
   // --- Tool buttons ---
-  var toolButtons = { select: 'btn-select', wall: 'btn-wall', door: 'btn-door', window: 'btn-window', room: 'btn-room' };
+  var toolButtons = { select: 'btn-select', wall: 'btn-wall', door: 'btn-door', window: 'btn-window', room: 'btn-room', furniture: 'btn-furniture' };
   Object.entries(toolButtons).forEach(function(entry) {
     document.getElementById(entry[1]).addEventListener('click', function() { setTool(entry[0]); });
   });
-  document.getElementById('btn-save').addEventListener('click', save);
   document.getElementById('btn-download').addEventListener('click', downloadPdf);
 
   function setTool(t) {
