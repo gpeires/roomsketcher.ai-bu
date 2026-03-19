@@ -75,6 +75,7 @@ export function sketcherHtml(sketchId: string): string {
   svg line.selected { stroke: var(--rs-danger) !important; }
   .drag-handle { cursor: grab; }
   .drag-handle:active { cursor: grabbing; }
+  .dimmed { opacity: 0.2; pointer-events: none; }
   svg polygon[data-id] { cursor: pointer; }
   svg polygon[data-id]:hover { fill-opacity: 0.7; }
 
@@ -688,8 +689,14 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
+    // Visual filter: dim non-relevant layers based on active tool
+    var dimRooms = (tool === 'wall' || tool === 'door' || tool === 'window' || tool === 'furniture');
+    var dimWalls = (tool === 'room' || tool === 'furniture');
+    var dimOpenings = (tool === 'wall' || tool === 'room' || tool === 'furniture');
+    var dimFurniture = (tool === 'wall' || tool === 'door' || tool === 'window' || tool === 'room');
+
     // Rooms
-    html += '<g id="rooms">';
+    html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
     for (var ri = 0; ri < plan.rooms.length; ri++) {
       var room = plan.rooms[ri];
       var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
@@ -703,7 +710,7 @@ export function sketcherHtml(sketchId: string): string {
     html += '</g>';
 
     // Walls
-    html += '<g id="walls">';
+    html += '<g id="walls"' + (dimWalls ? ' class="dimmed"' : '') + '>';
     for (var wi = 0; wi < plan.walls.length; wi++) {
       var w = plan.walls[wi];
       var sw = w.type === 'exterior' ? 4 : w.type === 'interior' ? 2 : 1;
@@ -714,7 +721,7 @@ export function sketcherHtml(sketchId: string): string {
     html += '</g>';
 
     // Openings
-    html += '<g id="openings">';
+    html += '<g id="openings"' + (dimOpenings ? ' class="dimmed"' : '') + '>';
     for (var oi = 0; oi < plan.walls.length; oi++) {
       var w = plan.walls[oi];
       var angle = Math.atan2(w.end.y - w.start.y, w.end.x - w.start.x);
@@ -760,7 +767,7 @@ export function sketcherHtml(sketchId: string): string {
     html += '</g>';
 
     // Furniture
-    html += '<g id="furniture">';
+    html += '<g id="furniture"' + (dimFurniture ? ' class="dimmed"' : '') + '>';
     for (var fi = 0; fi < plan.furniture.length; fi++) {
       var item = plan.furniture[fi];
       var rot = item.rotation || 0;
