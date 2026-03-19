@@ -1,26 +1,60 @@
 import { nanoid } from 'nanoid';
-import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './types';
+import { FloorPlanInputSchema, ChangeSchema } from './types';
 import type { FloorPlan, Change } from './types';
 import { floorPlanToSvg } from './svg';
-import { shoelaceArea, pointInPolygon } from './geometry';
+import { shoelaceArea, pointInPolygon, totalArea } from './geometry';
 import { loadSketch, saveSketch } from './persistence';
 import { applyChanges } from './changes';
 import { applyDefaults } from './defaults';
 import { pickCTA } from './cta-config';
-import type { SessionCTAState } from '../types';
+import type { SessionCTAState, SketchSession } from '../types';
+import type { CTAMessage } from './cta-config';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> };
+
+export interface ToolContext {
+  db: D1Database
+  state: SketchSession
+  setState: (s: SketchSession) => void
+  workerUrl: string
+  ctaVariant: string
+  ctaState: SessionCTAState
+  updateCta: (s: SessionCTAState) => void
+  broadcast?: (msg: string) => void | Promise<void>
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+async function resolvePlan(sketchId: string, ctx: ToolContext): Promise<FloorPlan | ToolResult> {
+  if (ctx.state.sketchId === sketchId && ctx.state.plan) return ctx.state.plan;
+  const loaded = await loadSketch(ctx.db, sketchId);
+  if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
+  return loaded.plan;
+}
+
+function isToolResult(v: FloorPlan | ToolResult): v is ToolResult {
+  return 'content' in v;
+}
+
+function fireCTA(trigger: string, ctx: ToolContext): CTAMessage | null {
+  const cta = pickCTA(trigger, ctx.ctaState, ctx.ctaVariant);
+  if (cta) {
+    ctx.ctaState.ctasShown++;
+    ctx.ctaState.lastCtaAt = ctx.ctaState.toolCallCount;
+    ctx.updateCta(ctx.ctaState);
+  }
+  return cta;
+}
+
+function ctaSuffix(cta: CTAMessage | null): string {
+  return cta ? `\n\n_${cta.text} [Try RoomSketcher](${cta.url})_` : '';
+}
 
 // ─── generate_floor_plan ────────────────────────────────────────────────────
 
 export async function handleGenerateFloorPlan(
   plan: unknown,
-  db: D1Database,
-  setState: (s: { sketchId: string; plan: FloorPlan }) => void,
-  workerUrl: string,
-  ctaVariant: string,
-  ctaState: SessionCTAState,
-  updateCta: (s: SessionCTAState) => void,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   // Phase 1: Validate against relaxed input schema
   const parsed = FloorPlanInputSchema.safeParse(plan);
@@ -46,34 +80,28 @@ export async function handleGenerateFloorPlan(
 
   // Render SVG + persist
   const svg = floorPlanToSvg(floorPlan);
-  await saveSketch(db, floorPlan.id, floorPlan, svg);
-  setState({ sketchId: floorPlan.id, plan: floorPlan });
+  await saveSketch(ctx.db, floorPlan.id, floorPlan, svg);
+  ctx.setState({ ...ctx.state, sketchId: floorPlan.id, plan: floorPlan });
 
   // CTA — fallback chain: first_generation → furniture_placed → room-specific
-  let cta = pickCTA('first_generation', ctaState, ctaVariant);
+  let cta = fireCTA('first_generation', ctx);
   if (!cta && floorPlan.furniture.length > 0) {
-    cta = pickCTA('furniture_placed', ctaState, ctaVariant);
+    cta = fireCTA('furniture_placed', ctx);
   }
   if (!cta) {
     for (const r of floorPlan.rooms) {
-      cta = pickCTA(`room:${r.type}`, ctaState, ctaVariant);
+      cta = fireCTA(`room:${r.type}`, ctx);
       if (cta) break;
     }
   }
-  if (cta) {
-    ctaState.ctasShown++;
-    ctaState.lastCtaAt = ctaState.toolCallCount;
-    updateCta(ctaState);
-  }
 
   // Summary
-  const totalArea = floorPlan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
   const lines = [
     `**${floorPlan.name}** created`,
     `${floorPlan.walls.length} walls, ${floorPlan.rooms.length} rooms, ${floorPlan.furniture.length} furniture items`,
-    `Total area: ${totalArea.toFixed(1)} m\u00B2`,
+    `Total area: ${totalArea(floorPlan.rooms).toFixed(1)} m\u00B2`,
     ``,
-    `Open in sketcher: ${workerUrl}/sketcher/${floorPlan.id}`,
+    `Open in sketcher: ${ctx.workerUrl}/sketcher/${floorPlan.id}`,
   ];
   if (cta) {
     lines.push('', `_${cta.text} [Try RoomSketcher](${cta.url})_`);
@@ -86,26 +114,17 @@ export async function handleGenerateFloorPlan(
 
 export async function handleGetSketch(
   sketchId: string,
-  db: D1Database,
-  state: { sketchId?: string; plan?: FloorPlan },
+  ctx: ToolContext,
 ): Promise<ToolResult> {
-  // Try in-memory state first
-  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
+  const result = await resolvePlan(sketchId, ctx);
+  if (isToolResult(result)) return result;
+  const plan = result;
 
-  if (!plan) {
-    const loaded = await loadSketch(db, sketchId);
-    if (!loaded) {
-      return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
-    }
-    plan = loaded.plan;
-  }
-
-  const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
   const summary = [
     `**${plan.name}**`,
     `${plan.walls.length} walls, ${plan.rooms.length} rooms`,
     `Rooms: ${plan.rooms.map(r => `${r.label} (${(r.area ?? 0).toFixed(1)} m\u00B2)`).join(', ')}`,
-    `Total area: ${totalArea.toFixed(1)} m\u00B2`,
+    `Total area: ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
     `Source: ${plan.metadata.source}`,
     `Updated: ${plan.metadata.updated_at}`,
   ].join('\n');
@@ -129,13 +148,7 @@ export function handleOpenSketcher(
 export async function handleUpdateSketch(
   sketchId: string,
   changes: unknown[],
-  db: D1Database,
-  getState: () => { sketchId?: string; plan?: FloorPlan },
-  setState: (s: { sketchId: string; plan: FloorPlan }) => void,
-  broadcast: (msg: string) => void | Promise<void>,
-  ctaVariant: string,
-  ctaState: SessionCTAState,
-  updateCta: (s: SessionCTAState) => void,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   // Validate changes
   const parsed: Change[] = [];
@@ -148,37 +161,28 @@ export async function handleUpdateSketch(
   }
 
   // Load plan
-  const state = getState();
-  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
-  if (!plan) {
-    const loaded = await loadSketch(db, sketchId);
-    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
-    plan = loaded.plan;
-  }
+  const planResult = await resolvePlan(sketchId, ctx);
+  if (isToolResult(planResult)) return planResult;
 
   // Apply changes
-  plan = applyChanges(plan, parsed);
+  const plan = applyChanges(planResult, parsed);
 
   // Persist + update state
   const svg = floorPlanToSvg(plan);
-  await saveSketch(db, sketchId, plan, svg);
-  setState({ sketchId, plan });
+  await saveSketch(ctx.db, sketchId, plan, svg);
+  ctx.setState({ ...ctx.state, sketchId, plan });
 
   // Broadcast to browser
-  await broadcast(JSON.stringify({ type: 'state_update', plan }));
-
-  // CTA
-  const cta = pickCTA('first_edit', ctaState, ctaVariant);
-  if (cta) {
-    ctaState.ctasShown++;
-    ctaState.lastCtaAt = ctaState.toolCallCount;
-    updateCta(ctaState);
+  if (ctx.broadcast) {
+    await ctx.broadcast(JSON.stringify({ type: 'state_update', plan }));
   }
 
-  const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
+  // CTA
+  const cta = fireCTA('first_edit', ctx);
+
   const lines = [
     `Applied ${parsed.length} change(s) to **${plan.name}**`,
-    `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m\u00B2`,
+    `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
   ];
   if (cta) {
     lines.push('', `_${cta.text} [Try RoomSketcher](${cta.url})_`);
@@ -191,18 +195,11 @@ export async function handleUpdateSketch(
 
 export async function handleSuggestImprovements(
   sketchId: string,
-  db: D1Database,
-  state: { sketchId?: string; plan?: FloorPlan },
-  ctaVariant: string,
-  ctaState: SessionCTAState,
-  updateCta: (s: SessionCTAState) => void,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
-  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
-  if (!plan) {
-    const loaded = await loadSketch(db, sketchId);
-    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
-    plan = loaded.plan;
-  }
+  const result = await resolvePlan(sketchId, ctx);
+  if (isToolResult(result)) return result;
+  const plan = result;
 
   // Room dimensions from polygon bounding boxes
   const roomData = plan.rooms.map(r => {
@@ -213,14 +210,14 @@ export async function handleSuggestImprovements(
     const area = r.area ?? shoelaceArea(r.polygon);
 
     // Furniture in this room
-    const roomFurniture = plan!.furniture.filter(f =>
+    const roomFurniture = plan.furniture.filter(f =>
       pointInPolygon(f.position, r.polygon)
     );
 
     // Openings on walls bordering this room
     let doors = 0;
     let windows = 0;
-    for (const wall of plan!.walls) {
+    for (const wall of plan.walls) {
       const startInRoom = pointInPolygon(wall.start, r.polygon);
       const endInRoom = pointInPolygon(wall.end, r.polygon);
       if (startInRoom || endInRoom) {
@@ -234,7 +231,7 @@ export async function handleSuggestImprovements(
     return { label: r.label, type: r.type, width: w, height: h, area, furniture: roomFurniture, doors, windows };
   });
 
-  const totalArea = roomData.reduce((s, r) => s + r.area, 0);
+  const total = roomData.reduce((s, r) => s + r.area, 0);
   const emptyRooms = roomData.filter(r => r.furniture.length === 0).map(r => r.label);
 
   // Furniture not assigned to any room
@@ -246,7 +243,7 @@ export async function handleSuggestImprovements(
     '',
     'SPATIAL DATA:',
     ...roomData.map(r => `- ${r.label} (${r.type}): ${r.width.toFixed(1)}m x ${r.height.toFixed(1)}m (${r.area.toFixed(1)}sqm), furniture: ${r.furniture.map(f => f.label ?? f.type).join(', ') || 'none'}`),
-    `- Total area: ${totalArea.toFixed(1)}sqm across ${roomData.length} rooms`,
+    `- Total area: ${total.toFixed(1)}sqm across ${roomData.length} rooms`,
     '',
     'OPENING DATA:',
     ...roomData.map(r => `- ${r.label}: ${r.doors} doors, ${r.windows} windows`),
@@ -267,12 +264,9 @@ export async function handleSuggestImprovements(
   ];
 
   // CTA
-  const cta = pickCTA('suggest_improvements', ctaState, ctaVariant);
+  const cta = fireCTA('suggest_improvements', ctx);
   if (cta) {
     lines.push('', `_${cta.text} [Try RoomSketcher](${cta.url})_`);
-    ctaState.ctasShown++;
-    ctaState.lastCtaAt = ctaState.toolCallCount;
-    updateCta(ctaState);
   }
 
   return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
@@ -283,33 +277,19 @@ export async function handleSuggestImprovements(
 export async function handleExportSketch(
   sketchId: string,
   format: 'svg' | 'pdf' | 'summary',
-  db: D1Database,
-  state: { sketchId?: string; plan?: FloorPlan },
-  workerUrl: string,
-  ctaVariant: string,
-  ctaState: SessionCTAState,
-  updateCta: (s: SessionCTAState) => void,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
-  let plan: FloorPlan | undefined = state.sketchId === sketchId ? state.plan : undefined;
-  if (!plan) {
-    const loaded = await loadSketch(db, sketchId);
-    if (!loaded) return { content: [{ type: 'text' as const, text: `Sketch ${sketchId} not found.` }] };
-    plan = loaded.plan;
-  }
+  const result = await resolvePlan(sketchId, ctx);
+  if (isToolResult(result)) return result;
+  const plan = result;
 
-  const totalArea = plan.rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
-  const ctaMsg = pickCTA('export', ctaState, ctaVariant);
-  if (ctaMsg) {
-    ctaState.ctasShown++;
-    ctaState.lastCtaAt = ctaState.toolCallCount;
-    updateCta(ctaState);
-  }
-  const cta = ctaMsg ? `\n\n_${ctaMsg.text} [Try RoomSketcher](${ctaMsg.url})_` : '';
+  const total = totalArea(plan.rooms);
+  const cta = ctaSuffix(fireCTA('export', ctx));
 
   if (format === 'summary') {
     const text = [
       `## ${plan.name}`,
-      `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea.toFixed(1)} m\u00B2`,
+      `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${total.toFixed(1)} m\u00B2`,
       `Rooms: ${plan.rooms.map(r => `${r.label} (${(r.area ?? 0).toFixed(1)} m\u00B2)`).join(', ')}`,
       `${plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'door').length, 0)} doors, ${plan.walls.reduce((s, w) => s + w.openings.filter(o => o.type === 'window').length, 0)} windows`,
       cta,
@@ -320,7 +300,7 @@ export async function handleExportSketch(
   if (format === 'pdf') {
     const text = [
       `Download your floor plan:`,
-      `${workerUrl}/api/sketches/${sketchId}/export.pdf`,
+      `${ctx.workerUrl}/api/sketches/${sketchId}/export.pdf`,
       cta,
     ].join('\n');
     return { content: [{ type: 'text' as const, text }] };
@@ -329,7 +309,7 @@ export async function handleExportSketch(
   // SVG format (default) — provide download link
   return {
     content: [
-      { type: 'text' as const, text: `**${plan.name}** — ${totalArea.toFixed(1)} m\u00B2\n\nView in sketcher: ${workerUrl}/sketcher/${sketchId}${cta}` },
+      { type: 'text' as const, text: `**${plan.name}** — ${total.toFixed(1)} m\u00B2\n\nView in sketcher: ${ctx.workerUrl}/sketcher/${sketchId}${cta}` },
     ],
   };
 }

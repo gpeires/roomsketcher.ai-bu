@@ -36,7 +36,7 @@ export function applyDefaults(input: FloorPlanInput): FloorPlan {
     ...w,
     thickness: w.thickness ?? WALL_THICKNESS[w.type] ?? 10,
     height: w.height ?? DEFAULT_HEIGHT,
-    openings: w.openings.map(o => ({ ...o })),
+    openings: [...w.openings],
   }));
 
   // Rooms

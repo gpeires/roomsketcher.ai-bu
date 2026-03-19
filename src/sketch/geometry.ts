@@ -1,4 +1,4 @@
-import type { Point, Wall } from './types';
+import type { Point, Wall, Room } from './types';
 
 /**
  * Shoelace formula for polygon area.
@@ -49,6 +49,13 @@ export function boundingBox(walls: Wall[]): {
     }
   }
   return { minX, minY, maxX, maxY };
+}
+
+/**
+ * Sum of all room areas (m²). Handles rooms with missing area gracefully.
+ */
+export function totalArea(rooms: Room[]): number {
+  return rooms.reduce((sum, r) => sum + (r.area ?? 0), 0);
 }
 
 /**

@@ -201,9 +201,3 @@ export type ServerMessage =
   | { type: 'saved'; updated_at: string }
   | { type: 'error'; message: string };
 
-// ─── DO session state ──────────────────────────────────────────────────────
-
-export interface SketchSession {
-  sketchId?: string;
-  plan?: FloorPlan;
-}

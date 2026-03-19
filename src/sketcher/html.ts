@@ -264,6 +264,20 @@ export function sketcherHtml(sketchId: string): string {
       case 'remove_room':
         plan.rooms = plan.rooms.filter(r => r.id !== change.room_id);
         break;
+      case 'add_furniture':
+        plan.furniture.push(change.furniture);
+        break;
+      case 'move_furniture': {
+        const f = plan.furniture.find(f => f.id === change.furniture_id);
+        if (f) {
+          if (change.position) f.position = change.position;
+          if (change.rotation !== undefined) f.rotation = change.rotation;
+        }
+        break;
+      }
+      case 'remove_furniture':
+        plan.furniture = plan.furniture.filter(f => f.id !== change.furniture_id);
+        break;
     }
     plan.metadata.updated_at = new Date().toISOString();
     plan.metadata.source = 'mixed';
@@ -368,6 +382,19 @@ export function sketcherHtml(sketchId: string): string {
       const ly = my + Math.sin(angle + Math.PI/2) * 14;
       const deg = angle * 180 / Math.PI;
       html += '<text x="' + lx + '" y="' + ly + '" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#999" transform="rotate(' + deg + ',' + lx + ',' + ly + ')">' + label + '</text>';
+    }
+    html += '</g>';
+
+    // Furniture
+    html += '<g id="furniture">';
+    for (const item of plan.furniture) {
+      const rot = item.rotation || 0;
+      const cx = item.position.x + item.width / 2;
+      const cy = item.position.y + item.depth / 2;
+      const transform = rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '';
+      const sel = (selected && selected.type === 'furniture' && selected.id === item.id) ? ' stroke="#D84200" stroke-width="2"' : ' stroke="#888" stroke-width="1"';
+      html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="#E8D8C4" fill-opacity="0.7"' + sel + ' rx="2"' + transform + ' data-id="' + item.id + '" data-type="furniture"/>';
+      html += '<text x="' + cx + '" y="' + cy + '" text-anchor="middle" dominant-baseline="central" font-size="10" font-family="sans-serif" fill="#555"' + (rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '') + '>' + escHtml(item.label || item.type) + '</text>';
     }
     html += '</g>';
 

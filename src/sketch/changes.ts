@@ -6,6 +6,8 @@ import { shoelaceArea } from './geometry';
  * Ignores changes targeting nonexistent IDs.
  */
 export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
+  if (changes.length === 0) return plan;
+
   // Shallow clone top-level arrays so we don't mutate the original
   const result: FloorPlan = {
     ...plan,

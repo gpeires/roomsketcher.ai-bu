@@ -7,10 +7,11 @@ import { searchArticles } from './tools/search';
 import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { syncFromZendesk } from './sync/ingest';
-import type { Env, SketchSession } from './types';
+import type { Env, SketchSession, SessionCTAState } from './types';
 import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
 import type { ClientMessage, Change } from './sketch/types';
 import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch } from './sketch/tools';
+import type { ToolContext } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
 import { applyChanges } from './sketch/changes';
 import { floorPlanToSvg } from './sketch/svg';
@@ -41,6 +42,26 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
       },
     ],
   });
+
+  private getCtaState(): SessionCTAState {
+    const cta = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
+    cta.toolCallCount++;
+    return cta;
+  }
+
+  private buildCtx(overrides?: { broadcast?: (msg: string) => void | Promise<void> }): ToolContext {
+    const ctaState = this.getCtaState();
+    return {
+      db: this.env.DB,
+      state: this.state,
+      setState: (s) => this.setState({ ...s, cta: ctaState }),
+      workerUrl: this.getWorkerUrl(),
+      ctaVariant: this.env.CTA_VARIANT ?? 'default',
+      ctaState,
+      updateCta: (cta) => this.setState({ ...this.state, cta }),
+      ...overrides,
+    };
+  }
 
   async init() {
     this.server.registerTool(
@@ -247,17 +268,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
         },
       },
       async ({ plan }) => {
-        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
-        ctaState.toolCallCount++;
-        return handleGenerateFloorPlan(
-          plan,
-          this.env.DB,
-          (s) => this.setState({ ...s, cta: ctaState }),
-          this.getWorkerUrl(),
-          this.env.CTA_VARIANT ?? 'default',
-          ctaState,
-          (cta) => this.setState({ ...this.state, cta }),
-        );
+        return handleGenerateFloorPlan(plan, this.buildCtx());
       },
     );
 
@@ -270,7 +281,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
         },
       },
       async ({ sketch_id }) => {
-        return handleGetSketch(sketch_id, this.env.DB, this.state);
+        return handleGetSketch(sketch_id, this.buildCtx());
       },
     );
 
@@ -297,15 +308,8 @@ Provide a name and description. The system will fill in defaults for wall thickn
         },
       },
       async ({ sketch_id, changes }) => {
-        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
-        ctaState.toolCallCount++;
-        return handleUpdateSketch(
-          sketch_id,
-          changes,
-          this.env.DB,
-          () => this.state,
-          (s) => this.setState({ ...s, cta: ctaState }),
-          async (msg) => {
+        return handleUpdateSketch(sketch_id, changes, this.buildCtx({
+          broadcast: async (msg) => {
             const id = this.env.SKETCH_SYNC.idFromName(sketch_id);
             const obj = this.env.SKETCH_SYNC.get(id);
             await obj.fetch(new Request('http://internal/broadcast', {
@@ -313,10 +317,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
               body: msg,
             }));
           },
-          this.env.CTA_VARIANT ?? 'default',
-          ctaState,
-          (cta) => this.setState({ ...this.state, cta }),
-        );
+        }));
       },
     );
 
@@ -329,16 +330,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
         },
       },
       async ({ sketch_id }) => {
-        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
-        ctaState.toolCallCount++;
-        return handleSuggestImprovements(
-          sketch_id,
-          this.env.DB,
-          this.state,
-          this.env.CTA_VARIANT ?? 'default',
-          ctaState,
-          (cta) => this.setState({ ...this.state, cta }),
-        );
+        return handleSuggestImprovements(sketch_id, this.buildCtx());
       },
     );
 
@@ -352,18 +344,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
         },
       },
       async ({ sketch_id, format }) => {
-        const ctaState = this.state.cta ?? { ctasShown: 0, lastCtaAt: 0, toolCallCount: 0 };
-        ctaState.toolCallCount++;
-        return handleExportSketch(
-          sketch_id,
-          format,
-          this.env.DB,
-          this.state,
-          this.getWorkerUrl(),
-          this.env.CTA_VARIANT ?? 'default',
-          ctaState,
-          (cta) => this.setState({ ...this.state, cta }),
-        );
+        return handleExportSketch(sketch_id, format, this.buildCtx());
       },
     );
 
@@ -439,7 +420,7 @@ Provide a name and description. The system will fill in defaults for wall thickn
 // names (sse:xxx, streamable-http:xxx) so sketch connections can't share it.
 
 export class SketchSync extends Agent<Env, SketchSession> {
-  private sketchWsClients = new Set<Connection>();
+  private dirty = false;
 
   // Internal endpoint for MCP DO to trigger broadcasts
   async onRequest(request: Request): Promise<Response> {
@@ -475,18 +456,17 @@ export class SketchSync extends Agent<Env, SketchSession> {
     }
   }
 
-  async onClose(connection: Connection, _code: number, _reason: string, _wasClean: boolean) {
-    this.sketchWsClients.delete(connection);
-    // If last sketch client disconnected, flush to D1
-    if (this.sketchWsClients.size === 0 && this.state?.plan && this.state?.sketchId) {
+  async onClose(_connection: Connection, _code: number, _reason: string, _wasClean: boolean) {
+    // If last client disconnected and changes were made, flush to D1
+    const connections = [...this.getConnections()];
+    if (connections.length === 0 && this.dirty && this.state?.plan && this.state?.sketchId) {
       const svg = floorPlanToSvg(this.state.plan);
       await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
+      this.dirty = false;
     }
   }
 
   private async handleSketchMessage(sender: Connection, msg: ClientMessage) {
-    this.sketchWsClients.add(sender);
-
     if (msg.type === 'load') {
       let plan = this.state?.plan;
       if (!plan && msg.sketch_id) {
@@ -506,7 +486,8 @@ export class SketchSync extends Agent<Env, SketchSession> {
       if (this.state?.plan && this.state?.sketchId) {
         const svg = floorPlanToSvg(this.state.plan);
         await saveSketch(this.env.DB, this.state.sketchId, this.state.plan, svg);
-        this.broadcastToSketchClients(JSON.stringify({
+        this.dirty = false;
+        this.broadcastToClients(JSON.stringify({
           type: 'saved', updated_at: new Date().toISOString(),
         }));
       }
@@ -524,13 +505,14 @@ export class SketchSync extends Agent<Env, SketchSession> {
     if (this.state?.plan) {
       const updated = applyChanges(this.state.plan, [msg as Change]);
       this.setState({ ...this.state, plan: updated });
-      this.broadcastToSketchClients(JSON.stringify({ type: 'state_update', plan: updated }));
+      this.dirty = true;
+      this.broadcastToClients(JSON.stringify({ type: 'state_update', plan: updated }));
     }
   }
 
-  broadcastToSketchClients(message: string) {
-    for (const ws of this.sketchWsClients) {
-      try { ws.send(message); } catch { this.sketchWsClients.delete(ws); }
+  private broadcastToClients(message: string) {
+    for (const conn of this.getConnections()) {
+      try { conn.send(message); } catch { /* ignore dead connections */ }
     }
   }
 }
@@ -587,7 +569,6 @@ export default {
       const loaded = await loadSketch(env.DB, sketchId);
       if (!loaded) return Response.json({ error: 'Not found' }, { status: 404 });
 
-      const { floorPlanToSvg } = await import('./sketch/svg');
       const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
       return new Response(svg, {
         headers: {
@@ -627,7 +608,6 @@ export default {
         if (!parsed.success) {
           return Response.json({ error: 'Invalid plan', issues: parsed.error.issues }, { status: 400 });
         }
-        const { floorPlanToSvg } = await import('./sketch/svg');
         const svg = floorPlanToSvg(parsed.data);
         await saveSketch(env.DB, sketchId, parsed.data, svg);
         return Response.json({ ok: true, updated_at: new Date().toISOString() });

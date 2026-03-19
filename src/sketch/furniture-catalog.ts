@@ -1,11 +1,9 @@
-import type { RoomType } from './types'
-
 export interface CatalogItem {
   type: string
   label: string
   defaultWidth: number  // cm
   defaultDepth: number  // cm
-  roomTypes: RoomType[]
+  roomTypes: string[]
   svgIcon?: string
   catalogId?: string
 }
@@ -50,7 +48,3 @@ export const FURNITURE_CATALOG: CatalogItem[] = [
   { type: 'shoe-rack', label: 'Shoe Rack', defaultWidth: 80, defaultDepth: 30, roomTypes: ['hallway'] },
   { type: 'coat-hook', label: 'Coat Hook', defaultWidth: 60, defaultDepth: 10, roomTypes: ['hallway'] },
 ]
-
-export function getItemsForRoom(roomType: RoomType): CatalogItem[] {
-  return FURNITURE_CATALOG.filter(item => item.roomTypes.includes(roomType))
-}
