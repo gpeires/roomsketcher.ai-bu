@@ -11,89 +11,39 @@ const SF = (fill: string) =>
   `stroke="#555" fill="${fill}" vector-effect="non-scaling-stroke"`
 const NS = 'vector-effect="non-scaling-stroke"'
 
-export const SYMBOL_TYPES: string[] = [
-  'bed-double',
-  'bed-single',
-  'nightstand',
-  'wardrobe',
-  'dresser',
-  'sofa-3seat',
-  'coffee-table',
-  'tv-unit',
-  'armchair',
-  'bookshelf',
-  'kitchen-counter',
-  'kitchen-sink',
-  'fridge',
-  'stove',
-  'dining-table',
-  'dining-chair',
-  'toilet',
-  'bath-sink',
-  'bathtub',
-  'shower',
-  'desk',
-  'office-chair',
-  'sideboard',
-  'shoe-rack',
-  'coat-hook',
-]
+const SYMBOL_MAP: Record<string, (w: number, h: number) => string> = {
+  'bed-double': bedDouble,
+  'bed-single': bedSingle,
+  'nightstand': nightstand,
+  'wardrobe': wardrobe,
+  'dresser': dresser,
+  'sofa-3seat': sofa3seat,
+  'coffee-table': simpleTable,
+  'tv-unit': tvUnit,
+  'armchair': armchair,
+  'bookshelf': (w, h) => shelfUnit(w, h, 5),
+  'kitchen-counter': kitchenCounter,
+  'kitchen-sink': kitchenSink,
+  'fridge': fridge,
+  'stove': stove,
+  'dining-table': simpleTable,
+  'dining-chair': diningChair,
+  'toilet': toilet,
+  'bath-sink': bathSink,
+  'bathtub': bathtub,
+  'shower': shower,
+  'desk': desk,
+  'office-chair': officeChair,
+  'sideboard': sideboard,
+  'shoe-rack': (w, h) => shelfUnit(w, h, 4),
+  'coat-hook': coatHook,
+}
+
+export const SYMBOL_TYPES: string[] = Object.keys(SYMBOL_MAP)
 
 export function furnitureSymbol(type: string, w: number, h: number): string {
-  switch (type) {
-    case 'bed-double':
-      return bedDouble(w, h)
-    case 'bed-single':
-      return bedSingle(w, h)
-    case 'nightstand':
-      return nightstand(w, h)
-    case 'wardrobe':
-      return wardrobe(w, h)
-    case 'dresser':
-      return dresser(w, h)
-    case 'sofa-3seat':
-      return sofa3seat(w, h)
-    case 'coffee-table':
-      return coffeeTable(w, h)
-    case 'tv-unit':
-      return tvUnit(w, h)
-    case 'armchair':
-      return armchair(w, h)
-    case 'bookshelf':
-      return bookshelf(w, h)
-    case 'kitchen-counter':
-      return kitchenCounter(w, h)
-    case 'kitchen-sink':
-      return kitchenSink(w, h)
-    case 'fridge':
-      return fridge(w, h)
-    case 'stove':
-      return stove(w, h)
-    case 'dining-table':
-      return diningTable(w, h)
-    case 'dining-chair':
-      return diningChair(w, h)
-    case 'toilet':
-      return toilet(w, h)
-    case 'bath-sink':
-      return bathSink(w, h)
-    case 'bathtub':
-      return bathtub(w, h)
-    case 'shower':
-      return shower(w, h)
-    case 'desk':
-      return desk(w, h)
-    case 'office-chair':
-      return officeChair(w, h)
-    case 'sideboard':
-      return sideboard(w, h)
-    case 'shoe-rack':
-      return shoeRack(w, h)
-    case 'coat-hook':
-      return coatHook(w, h)
-    default:
-      return fallbackRect(w, h, type)
-  }
+  const fn = SYMBOL_MAP[type]
+  return fn ? fn(w, h) : fallbackRect(w, h, type)
 }
 
 // ── Bedroom ──────────────────────────────────────────────
@@ -180,7 +130,7 @@ function sofa3seat(w: number, h: number): string {
   ].join('')
 }
 
-function coffeeTable(w: number, h: number): string {
+function simpleTable(w: number, h: number): string {
   return `<rect x="0" y="0" width="${w}" height="${h}" rx="3" ${S}/>`
 }
 
@@ -208,9 +158,9 @@ function armchair(w: number, h: number): string {
   ].join('')
 }
 
-function bookshelf(w: number, h: number): string {
-  const lines = [1, 2, 3, 4].map(
-    (i) => `<line x1="0" y1="${(h * i) / 5}" x2="${w}" y2="${(h * i) / 5}" ${S}/>`
+function shelfUnit(w: number, h: number, divisions: number): string {
+  const lines = Array.from({ length: divisions - 1 }, (_, i) =>
+    `<line x1="0" y1="${(h * (i + 1)) / divisions}" x2="${w}" y2="${(h * (i + 1)) / divisions}" ${S}/>`
   )
   return [`<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`, ...lines].join('')
 }
@@ -263,10 +213,6 @@ function stove(w: number, h: number): string {
     )
   )
   return [`<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`, ...burners].join('')
-}
-
-function diningTable(w: number, h: number): string {
-  return `<rect x="0" y="0" width="${w}" height="${h}" rx="3" ${S}/>`
 }
 
 function diningChair(w: number, h: number): string {
@@ -366,13 +312,6 @@ function sideboard(w: number, h: number): string {
 
 // ── Hallway ──────────────────────────────────────────────
 
-function shoeRack(w: number, h: number): string {
-  const lines = [1, 2, 3].map(
-    (i) => `<line x1="0" y1="${(h * i) / 4}" x2="${w}" y2="${(h * i) / 4}" ${S}/>`
-  )
-  return [`<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`, ...lines].join('')
-}
-
 function coatHook(w: number, h: number): string {
   const n = 4
   const r = Math.min(w, h) * 0.08
@@ -393,10 +332,14 @@ function fallbackRect(w: number, h: number, type: string): string {
   ].join('')
 }
 
+let _defsCache: string | null = null
 export function furnitureDefsBlock(): string {
-  const symbols = SYMBOL_TYPES.map(type => {
-    const inner = furnitureSymbol(type, 100, 100);
-    return `<symbol id="fs-${type}" viewBox="0 0 100 100" preserveAspectRatio="none">${inner}</symbol>`;
-  }).join('\n');
-  return `<defs>${symbols}</defs>`;
+  if (!_defsCache) {
+    const symbols = SYMBOL_TYPES.map(type => {
+      const inner = furnitureSymbol(type, 100, 100);
+      return `<symbol id="fs-${type}" viewBox="0 0 100 100" preserveAspectRatio="none">${inner}</symbol>`;
+    }).join('\n');
+    _defsCache = `<defs>${symbols}</defs>`;
+  }
+  return _defsCache;
 }

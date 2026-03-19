@@ -100,7 +100,8 @@ export function sketcherHtml(sketchId: string): string {
 
 <div class="main">
   <div class="canvas-wrap" id="canvas-wrap">
-    <svg id="canvas" xmlns="http://www.w3.org/2000/svg">${furnitureDefsBlock()}</svg>
+    <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <template id="furniture-defs">${furnitureDefsBlock()}</template>
   </div>
   <div class="props" id="props">
     <h3>Properties</h3>
@@ -306,7 +307,7 @@ export function sketcherHtml(sketchId: string): string {
     viewBox = { x: minX - pad, y: minY - pad, w: (maxX - minX) + pad * 2, h: (maxY - minY) + pad * 2 };
     svg.setAttribute('viewBox', viewBox.x + ' ' + viewBox.y + ' ' + viewBox.w + ' ' + viewBox.h);
 
-    let html = '';
+    let html = document.getElementById('furniture-defs').innerHTML;
 
     // Grid
     html += '<g id="grid" opacity="0.15">';

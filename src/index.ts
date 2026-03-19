@@ -54,11 +54,11 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
     return {
       db: this.env.DB,
       state: this.state,
-      setState: (s) => this.setState({ ...s, cta: ctaState }),
+      setState: (s) => { this.setState({ ...s, cta: ctaState }); },
       workerUrl: this.getWorkerUrl(),
       ctaVariant: this.env.CTA_VARIANT ?? 'default',
       ctaState,
-      updateCta: (cta) => this.setState({ ...this.state, cta }),
+      updateCta: (cta) => { this.setState({ ...this.state, cta }); },
       ...overrides,
     };
   }
