@@ -1,8 +1,12 @@
 import type { Env, ZendeskArticle } from '../types';
 import { fetchCategories, fetchSections, fetchArticles } from './zendesk';
 import { htmlToText } from './html-to-text';
+import { chunkArticle } from './chunker';
+import { tagChunk } from './tagger';
 
-export async function syncFromZendesk(db: D1Database): Promise<{ categories: number; sections: number; articles: number }> {
+export async function syncFromZendesk(db: D1Database): Promise<{
+  categories: number; sections: number; articles: number; chunks: number;
+}> {
   const [categories, sections, articles] = await Promise.all([
     fetchCategories(),
     fetchSections(),
@@ -14,6 +18,7 @@ export async function syncFromZendesk(db: D1Database): Promise<{ categories: num
 
   // Clear existing data (order matters for FK constraints)
   // FTS triggers handle cleanup automatically
+  await db.prepare('DELETE FROM design_knowledge').run();
   await db.prepare('DELETE FROM articles').run();
   await db.prepare('DELETE FROM sections').run();
   await db.prepare('DELETE FROM categories').run();
@@ -67,6 +72,48 @@ export async function syncFromZendesk(db: D1Database): Promise<{ categories: num
   await db.batch(sectionStmts);
   await db.batch(articleStmts);
 
+  // Chunk articles into design knowledge
+  const chunkStmts: ReturnType<D1Database['prepare']>[] = [];
+  for (const article of publishedArticles) {
+    const chunks = chunkArticle(article.id, article.title, article.body || '');
+    for (const chunk of chunks) {
+      const tags = tagChunk(chunk.heading, chunk.content);
+      chunkStmts.push(
+        db.prepare(
+          `INSERT INTO design_knowledge (id, article_id, article_updated_at, article_title, article_url, heading, content, room_types, design_aspects)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          chunk.id,
+          article.id,
+          article.updated_at,
+          article.title,
+          article.html_url,
+          chunk.heading,
+          chunk.content,
+          JSON.stringify(tags.roomTypes),
+          JSON.stringify(tags.designAspects),
+        )
+      );
+    }
+  }
+
+  // D1 batch limit is ~100 statements — insert in groups
+  for (let i = 0; i < chunkStmts.length; i += 100) {
+    await db.batch(chunkStmts.slice(i, i + 100));
+  }
+
+  // Flag stale agent insights (source articles changed since insight was created)
+  await db.prepare(`
+    UPDATE agent_insights SET stale = 1, updated_at = datetime('now')
+    WHERE stale = 0
+      AND id IN (
+        SELECT DISTINCT ai.id
+        FROM agent_insights ai, json_each(ai.source_chunk_ids) je
+        JOIN design_knowledge dk ON dk.id = je.value
+        WHERE dk.article_updated_at > ai.created_at
+      )
+  `).run();
+
   // Update sync metadata
   await db
     .prepare(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('last_sync', ?)`)
@@ -77,5 +124,6 @@ export async function syncFromZendesk(db: D1Database): Promise<{ categories: num
     categories: categories.length,
     sections: sections.length,
     articles: publishedArticles.length,
+    chunks: chunkStmts.length,
   };
 }
