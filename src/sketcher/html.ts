@@ -342,6 +342,8 @@ export function sketcherHtml(sketchId: string): string {
         var el = document.elementFromPoint(t.clientX, t.clientY);
         if (el && el.classList && el.classList.contains('drag-handle')) {
           touchDragHandle = { wallId: el.dataset.wallId, endpoint: el.dataset.endpoint };
+          // Set mouseDownPoint so beginEndpointDrag can compute grab offset
+          mouseDownPoint = { x: t.clientX, y: t.clientY };
           beginEndpointDrag(el.dataset.wallId, el.dataset.endpoint);
           if (isMobile()) setSheetState('collapsed');
           e.preventDefault();
@@ -1286,13 +1288,19 @@ export function sketcherHtml(sketchId: string): string {
     var wall = plan.walls.find(function(w) { return w.id === wallId; });
     if (!wall) return;
     var startPoint = endpoint === 'start' ? wall.start : wall.end;
+    // Compute grab offset: difference between where the cursor actually is
+    // (in SVG coords) and the endpoint position, so the handle doesn't jump
+    // to the cursor on the first drag frame.
+    var grabPt = svgPointRaw({ clientX: mouseDownPoint.x, clientY: mouseDownPoint.y });
+    var grabOffset = { x: grabPt.x - startPoint.x, y: grabPt.y - startPoint.y };
     dragState = {
       wallId: wallId,
       endpoint: endpoint,
       startPoint: { x: startPoint.x, y: startPoint.y },
       connectedWalls: findConnectedEndpoints(wallId, endpoint),
       originalPositions: {},
-      detached: false
+      detached: false,
+      grabOffset: grabOffset
     };
     dragState.originalPositions[wallId] = {
       start: { x: wall.start.x, y: wall.start.y },
@@ -1423,6 +1431,11 @@ export function sketcherHtml(sketchId: string): string {
   function updateEndpointDrag(e) {
     if (!dragState || !plan) return;
     var rawPt = svgPointRaw(e);
+    // Subtract grab offset so the endpoint stays under the finger/cursor
+    if (dragState.grabOffset) {
+      rawPt.x -= dragState.grabOffset.x;
+      rawPt.y -= dragState.grabOffset.y;
+    }
     var excludeIds = [dragState.wallId];
     if (dragState.connectedWalls) {
       dragState.connectedWalls.forEach(function(c) { excludeIds.push(c.wallId); });
@@ -1574,17 +1587,26 @@ export function sketcherHtml(sketchId: string): string {
     }
 
     // Room polygon propagation (added in Task 8)
+    // Room polygon vertices are offset inward from wall endpoints by half the wall
+    // thickness, so we use a generous threshold and apply the drag delta (not snap
+    // to the wall point) to preserve the inward offset.
     var origPt = dragState.startPoint;
     var newPt = dragState.endpoint === 'start' ? wall.start : wall.end;
-    if (origPt.x !== newPt.x || origPt.y !== newPt.y) {
-      var roomThreshold = 2; // 2cm
+    var dx = newPt.x - origPt.x;
+    var dy = newPt.y - origPt.y;
+    if (dx !== 0 || dy !== 0) {
+      var maxThick = 0;
+      for (var ti = 0; ti < plan.walls.length; ti++) {
+        if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
+      }
+      var roomThreshold = maxThick + 5;
       for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
         var room = plan.rooms[rpi];
         var roomChanged = false;
         var newPolygon = room.polygon.map(function(v) {
           if (Math.abs(v.x - origPt.x) <= roomThreshold && Math.abs(v.y - origPt.y) <= roomThreshold) {
             roomChanged = true;
-            return { x: newPt.x, y: newPt.y };
+            return { x: v.x + dx, y: v.y + dy };
           }
           return { x: v.x, y: v.y };
         });
@@ -1594,6 +1616,70 @@ export function sketcherHtml(sketchId: string): string {
           room.area = computeArea(newPolygon);
           changes.push({ type: 'update_room', room_id: room.id, polygon: newPolygon });
           inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: oldPolygon });
+        }
+      }
+
+      // Rebuild room polygons from wall geometry when vertices drifted too far.
+      // This catches cases where walls were disconnected and reconnected.
+      for (var rri = 0; rri < plan.rooms.length; rri++) {
+        var rm = plan.rooms[rri];
+        if (!rm.wall_ids || rm.wall_ids.length === 0) continue;
+        // Collect all wall endpoints that border this room
+        var wallPts = [];
+        for (var wii = 0; wii < rm.wall_ids.length; wii++) {
+          var rw = plan.walls.find(function(w) { return w.id === rm.wall_ids[wii]; });
+          if (rw) {
+            wallPts.push(rw.start);
+            wallPts.push(rw.end);
+          }
+        }
+        // Check each polygon vertex: is it still within threshold of some wall endpoint?
+        var drifted = false;
+        for (var vi = 0; vi < rm.polygon.length; vi++) {
+          var v = rm.polygon[vi];
+          var nearAny = false;
+          for (var wpi = 0; wpi < wallPts.length; wpi++) {
+            if (Math.abs(v.x - wallPts[wpi].x) <= roomThreshold && Math.abs(v.y - wallPts[wpi].y) <= roomThreshold) {
+              nearAny = true;
+              break;
+            }
+          }
+          if (!nearAny) { drifted = true; break; }
+        }
+        // If a vertex drifted, snap each vertex to its nearest wall endpoint (preserving inward offset direction)
+        if (drifted) {
+          var alreadyChanged = changes.some(function(c) { return c.type === 'update_room' && c.room_id === rm.id; });
+          var repairedPolygon = rm.polygon.map(function(v) {
+            var bestDist = Infinity, bestPt = null;
+            for (var wpi = 0; wpi < wallPts.length; wpi++) {
+              var d = Math.abs(v.x - wallPts[wpi].x) + Math.abs(v.y - wallPts[wpi].y);
+              if (d < bestDist) { bestDist = d; bestPt = wallPts[wpi]; }
+            }
+            if (bestPt && bestDist > roomThreshold) {
+              // Preserve the inward offset direction but snap near the wall endpoint
+              var offX = v.x > bestPt.x ? -(maxThick / 2) : (v.x < bestPt.x ? (maxThick / 2) : 0);
+              var offY = v.y > bestPt.y ? -(maxThick / 2) : (v.y < bestPt.y ? (maxThick / 2) : 0);
+              return { x: bestPt.x + offX, y: bestPt.y + offY };
+            }
+            return { x: v.x, y: v.y };
+          });
+          if (!alreadyChanged) {
+            var oldPoly = rm.polygon.map(function(v) { return { x: v.x, y: v.y }; });
+            rm.polygon = repairedPolygon;
+            rm.area = computeArea(repairedPolygon);
+            changes.push({ type: 'update_room', room_id: rm.id, polygon: repairedPolygon });
+            inverseChanges.push({ type: 'update_room', room_id: rm.id, polygon: oldPoly });
+          } else {
+            rm.polygon = repairedPolygon;
+            rm.area = computeArea(repairedPolygon);
+            // Update the existing change entry
+            for (var cci = 0; cci < changes.length; cci++) {
+              if (changes[cci].type === 'update_room' && changes[cci].room_id === rm.id) {
+                changes[cci].polygon = repairedPolygon;
+                break;
+              }
+            }
+          }
         }
       }
     }
