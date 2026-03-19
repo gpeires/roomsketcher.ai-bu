@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { searchArticles } from './tools/search';
 import { listCategories, listSections } from './tools/browse';
 import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
+import { searchDesignKnowledge, logInsight } from './tools/knowledge';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession, SessionCTAState } from './types';
 import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
@@ -229,6 +230,95 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
           .join('\n');
         return {
           content: [{ type: 'text' as const, text: formatted }],
+        };
+      },
+    );
+
+    // ─── Design Knowledge tools ─────────────────────────────────────────
+
+    this.server.registerTool(
+      'search_design_knowledge',
+      {
+        description:
+          'Search extracted design knowledge from RoomSketcher help articles. Returns focused chunks about room layouts, fixture placement, clearance rules, and design patterns — tagged by room type and design aspect. Also returns agent-contributed insights. Use this instead of search_articles when you need specific design guidance.',
+        inputSchema: {
+          query: z.string().describe('Natural language search query (e.g. "bathroom fixture placement", "kitchen work triangle")'),
+          room_type: z.string().optional().describe('Filter by room type: bathroom, kitchen, bedroom, living, dining, hallway, office, outdoor'),
+          design_aspect: z.string().optional().describe('Filter by design aspect: clearance, placement, workflow, dimensions, openings, fixtures, materials, color'),
+          include_insights: z.boolean().default(true).describe('Include agent-contributed insights in results'),
+          limit: z.number().min(1).max(50).default(10).describe('Max results per section'),
+        },
+      },
+      async ({ query, room_type, design_aspect, include_insights, limit }) => {
+        const results = await searchDesignKnowledge(this.env.DB, query, {
+          roomType: room_type,
+          designAspect: design_aspect,
+          includeInsights: include_insights,
+          limit,
+        });
+
+        if (results.chunks.length === 0 && results.insights.length === 0) {
+          return {
+            content: [{ type: 'text' as const, text: `No design knowledge found for "${query}".` }],
+          };
+        }
+
+        const parts: string[] = [];
+
+        if (results.chunks.length > 0) {
+          parts.push('## Design Knowledge\n');
+          parts.push(...results.chunks.map((c, i) => [
+            `${i + 1}. **${c.heading}**`,
+            `   Room types: ${c.room_types}`,
+            `   Design aspects: ${c.design_aspects}`,
+            `   ${c.content.slice(0, 300)}${c.content.length > 300 ? '...' : ''}`,
+            `   Source: [${c.source_article_title}](${c.source_article_url}) (ID: ${c.id})`,
+          ].join('\n')));
+        }
+
+        if (results.insights.length > 0) {
+          parts.push('\n## Agent Insights\n');
+          parts.push(...results.insights.map((ins, i) => [
+            `${i + 1}. ${ins.content}`,
+            ins.context ? `   Context: ${ins.context}` : null,
+            `   Confidence: ${ins.confidence}${ins.stale ? ' ⚠️ STALE' : ''}`,
+          ].filter(Boolean).join('\n')));
+        }
+
+        return {
+          content: [{ type: 'text' as const, text: parts.join('\n\n') }],
+        };
+      },
+    );
+
+    this.server.registerTool(
+      'log_insight',
+      {
+        description:
+          'Log a design insight or discovery to the shared knowledge base. IMPORTANT: You MUST ask the user for permission before calling this tool. Only store sanitized design knowledge — never include personal details, names, or raw prompts. Insights help future agents find design patterns faster.',
+        inputSchema: {
+          content: z.string().describe('The insight (e.g. "L-shaped kitchens need 120cm aisle minimum for two-person workflow")'),
+          context: z.string().optional().describe('Sanitized design context — what prompted this discovery (no personal data)'),
+          source_chunk_ids: z.array(z.string()).optional().describe('IDs of design_knowledge chunks that informed this insight'),
+          confidence: z.number().min(0).max(1).default(0.5).describe('Self-rated confidence 0.0-1.0'),
+        },
+      },
+      async ({ content, context, source_chunk_ids, confidence }) => {
+        const result = await logInsight(this.env.DB, {
+          content,
+          context,
+          sourceChunkIds: source_chunk_ids,
+          confidence,
+        });
+
+        if (result.error) {
+          return {
+            content: [{ type: 'text' as const, text: `Error: ${result.error}` }],
+          };
+        }
+
+        return {
+          content: [{ type: 'text' as const, text: `Insight logged (ID: ${result.id}). ${result.message}` }],
         };
       },
     );
