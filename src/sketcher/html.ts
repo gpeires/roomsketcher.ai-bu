@@ -251,17 +251,34 @@ export function sketcherHtml(sketchId: string): string {
       case 'remove_wall':
         plan.walls = plan.walls.filter(w => w.id !== change.wall_id);
         break;
+      case 'update_wall': {
+        const w = plan.walls.find(w => w.id === change.wall_id);
+        if (w) {
+          if (change.thickness !== undefined) w.thickness = change.thickness;
+          if (change.wall_type !== undefined) w.type = change.wall_type;
+        }
+        break;
+      }
       case 'add_opening': {
         const w = plan.walls.find(w => w.id === change.wall_id);
         if (w) w.openings.push(change.opening);
+        break;
+      }
+      case 'remove_opening': {
+        const w = plan.walls.find(w => w.id === change.wall_id);
+        if (w) w.openings = w.openings.filter(o => o.id !== change.opening_id);
         break;
       }
       case 'add_room':
         plan.rooms.push(change.room);
         break;
       case 'rename_room': {
+        const COLORS = {living:'#E8F5E9',bedroom:'#E3F2FD',kitchen:'#FFF3E0',bathroom:'#E0F7FA',hallway:'#F5F5F5',office:'#F3E5F5',dining:'#FFF8E1',garage:'#EFEBE9',closet:'#ECEFF1',laundry:'#E8EAF6',balcony:'#F1F8E9',terrace:'#F1F8E9',storage:'#ECEFF1',utility:'#ECEFF1',other:'#FAFAFA'};
         const r = plan.rooms.find(r => r.id === change.room_id);
-        if (r) { r.label = change.label; if (change.room_type) r.type = change.room_type; }
+        if (r) {
+          r.label = change.label;
+          if (change.room_type) { r.type = change.room_type; r.color = COLORS[change.room_type] || '#FAFAFA'; }
+        }
         break;
       }
       case 'remove_room':

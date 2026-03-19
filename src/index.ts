@@ -512,6 +512,9 @@ Provide a name and description. The system will fill in defaults for wall thickn
 export class SketchSync extends Agent<Env, SketchSession> {
   private dirty = false;
 
+  // Use our own WebSocket protocol, not the Agent framework's state sync
+  shouldSendProtocolMessages() { return false; }
+
   // Internal endpoint for MCP DO to trigger broadcasts
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);

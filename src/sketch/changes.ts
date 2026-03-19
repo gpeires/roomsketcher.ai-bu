@@ -1,5 +1,6 @@
 import type { FloorPlan, Change } from './types';
 import { shoelaceArea } from './geometry';
+import { ROOM_COLORS } from './defaults';
 
 /**
  * Apply a list of changes to a FloorPlan. Returns a new object (shallow clone).
@@ -68,7 +69,10 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
         const room = result.rooms.find(r => r.id === change.room_id);
         if (!room) break;
         room.label = change.label;
-        if (change.room_type !== undefined) room.type = change.room_type;
+        if (change.room_type !== undefined) {
+          room.type = change.room_type;
+          room.color = ROOM_COLORS[change.room_type] ?? '#FAFAFA';
+        }
         break;
       }
 
