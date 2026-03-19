@@ -1,691 +1,286 @@
 {
   "version": 1,
   "id": "3br-house",
-  "name": "3 Bedroom House",
+  "name": "3BR House",
   "units": "metric",
   "canvas": { "width": 1500, "height": 960, "gridSize": 10 },
   "walls": [
     {
-      "id": "w1",
-      "start": { "x": 0, "y": 0 },
-      "end": { "x": 1400, "y": 0 },
+      "id": "w-n",
+      "start": { "x": 50, "y": 50 },
+      "end": { "x": 1450, "y": 50 },
       "thickness": 20,
       "height": 270,
       "type": "exterior",
       "openings": [
-        {
-          "id": "win1",
-          "type": "window",
-          "offset": 80,
-          "width": 150,
-          "properties": { "windowType": "double", "sillHeight": 90 }
-        },
-        {
-          "id": "win2",
-          "type": "window",
-          "offset": 450,
-          "width": 150,
-          "properties": { "windowType": "double", "sillHeight": 90 }
-        },
-        {
-          "id": "win3",
-          "type": "window",
-          "offset": 800,
-          "width": 150,
-          "properties": { "windowType": "double", "sillHeight": 90 }
-        },
-        {
-          "id": "win4",
-          "type": "window",
-          "offset": 1120,
-          "width": 150,
-          "properties": { "windowType": "double", "sillHeight": 90 }
-        }
+        { "id": "win-b1", "type": "window", "offset": 130, "width": 150, "properties": { "sillHeight": 90, "windowType": "double" } },
+        { "id": "win-b2", "type": "window", "offset": 600, "width": 150, "properties": { "sillHeight": 90, "windowType": "double" } },
+        { "id": "win-b3", "type": "window", "offset": 1080, "width": 120, "properties": { "sillHeight": 90, "windowType": "single" } }
       ]
     },
     {
-      "id": "w2",
-      "start": { "x": 1400, "y": 0 },
-      "end": { "x": 1400, "y": 860 },
+      "id": "w-s",
+      "start": { "x": 50, "y": 910 },
+      "end": { "x": 1450, "y": 910 },
       "thickness": 20,
       "height": 270,
       "type": "exterior",
       "openings": [
-        {
-          "id": "win5",
-          "type": "window",
-          "offset": 200,
-          "width": 120,
-          "properties": { "windowType": "single", "sillHeight": 90 }
-        },
-        {
-          "id": "win6",
-          "type": "window",
-          "offset": 550,
-          "width": 120,
-          "properties": { "windowType": "single", "sillHeight": 90 }
-        }
+        { "id": "door-front", "type": "door", "offset": 580, "width": 90, "properties": { "swingDirection": "right", "swingAngle": 90 } }
       ]
     },
     {
-      "id": "w3",
-      "start": { "x": 1400, "y": 860 },
-      "end": { "x": 0, "y": 860 },
+      "id": "w-w",
+      "start": { "x": 50, "y": 50 },
+      "end": { "x": 50, "y": 910 },
       "thickness": 20,
       "height": 270,
       "type": "exterior",
       "openings": [
-        {
-          "id": "door-front",
-          "type": "door",
-          "offset": 600,
-          "width": 100,
-          "properties": { "swingDirection": "left", "swingAngle": 90 }
-        }
+        { "id": "win-liv", "type": "window", "offset": 530, "width": 150, "properties": { "sillHeight": 90, "windowType": "double" } }
       ]
     },
     {
-      "id": "w4",
-      "start": { "x": 0, "y": 860 },
-      "end": { "x": 0, "y": 0 },
+      "id": "w-e",
+      "start": { "x": 1450, "y": 50 },
+      "end": { "x": 1450, "y": 910 },
       "thickness": 20,
       "height": 270,
       "type": "exterior",
       "openings": [
-        {
-          "id": "win7",
-          "type": "window",
-          "offset": 200,
-          "width": 120,
-          "properties": { "windowType": "single", "sillHeight": 90 }
-        }
+        { "id": "win-b3e", "type": "window", "offset": 100, "width": 100, "properties": { "sillHeight": 90, "windowType": "single" } }
       ]
     },
     {
-      "id": "w5",
-      "start": { "x": 450, "y": 0 },
-      "end": { "x": 450, "y": 460 },
+      "id": "w-b1-e",
+      "start": { "x": 500, "y": 50 },
+      "end": { "x": 500, "y": 480 },
       "thickness": 12,
       "height": 270,
       "type": "interior",
       "openings": [
-        {
-          "id": "door-bed1",
-          "type": "door",
-          "offset": 360,
-          "width": 80,
-          "properties": { "swingDirection": "left", "swingAngle": 90 }
-        }
+        { "id": "door-b1", "type": "door", "offset": 310, "width": 80, "properties": { "swingDirection": "right", "swingAngle": 90 } }
       ]
     },
     {
-      "id": "w6",
-      "start": { "x": 900, "y": 0 },
-      "end": { "x": 900, "y": 460 },
+      "id": "w-b2-e",
+      "start": { "x": 960, "y": 50 },
+      "end": { "x": 960, "y": 480 },
       "thickness": 12,
       "height": 270,
       "type": "interior",
       "openings": [
-        {
-          "id": "door-bed2",
-          "type": "door",
-          "offset": 360,
-          "width": 80,
-          "properties": { "swingDirection": "right", "swingAngle": 90 }
-        }
+        { "id": "door-b2", "type": "door", "offset": 310, "width": 80, "properties": { "swingDirection": "right", "swingAngle": 90 } }
       ]
     },
     {
-      "id": "w7",
-      "start": { "x": 0, "y": 460 },
-      "end": { "x": 450, "y": 460 },
-      "thickness": 12,
-      "height": 270,
-      "type": "interior",
-      "openings": [
-        {
-          "id": "door-living",
-          "type": "door",
-          "offset": 180,
-          "width": 80,
-          "properties": { "swingDirection": "right", "swingAngle": 90 }
-        }
-      ]
-    },
-    {
-      "id": "w8",
-      "start": { "x": 450, "y": 460 },
-      "end": { "x": 900, "y": 460 },
-      "thickness": 12,
-      "height": 270,
-      "type": "interior",
-      "openings": [
-        {
-          "id": "opening-hall",
-          "type": "opening",
-          "offset": 150,
-          "width": 150,
-          "properties": {}
-        }
-      ]
-    },
-    {
-      "id": "w9",
-      "start": { "x": 900, "y": 460 },
-      "end": { "x": 1400, "y": 460 },
-      "thickness": 12,
-      "height": 270,
-      "type": "interior",
-      "openings": [
-        {
-          "id": "door-bed3",
-          "type": "door",
-          "offset": 200,
-          "width": 80,
-          "properties": { "swingDirection": "left", "swingAngle": 90 }
-        }
-      ]
-    },
-    {
-      "id": "w10",
-      "start": { "x": 0, "y": 660 },
-      "end": { "x": 550, "y": 660 },
-      "thickness": 12,
-      "height": 270,
-      "type": "interior",
-      "openings": [
-        {
-          "id": "door-kitchen",
-          "type": "door",
-          "offset": 200,
-          "width": 90,
-          "properties": { "swingDirection": "left", "swingAngle": 90 }
-        }
-      ]
-    },
-    {
-      "id": "w11",
-      "start": { "x": 550, "y": 460 },
-      "end": { "x": 550, "y": 860 },
-      "thickness": 12,
-      "height": 270,
-      "type": "interior",
-      "openings": [
-        {
-          "id": "door-dining",
-          "type": "door",
-          "offset": 80,
-          "width": 80,
-          "properties": { "swingDirection": "right", "swingAngle": 90 }
-        }
-      ]
-    },
-    {
-      "id": "w12",
-      "start": { "x": 900, "y": 460 },
-      "end": { "x": 900, "y": 660 },
+      "id": "w-bed-s",
+      "start": { "x": 50, "y": 480 },
+      "end": { "x": 1450, "y": 480 },
       "thickness": 12,
       "height": 270,
       "type": "interior",
       "openings": []
     },
     {
-      "id": "w13",
-      "start": { "x": 900, "y": 660 },
-      "end": { "x": 1100, "y": 660 },
+      "id": "w-liv-e",
+      "start": { "x": 500, "y": 480 },
+      "end": { "x": 500, "y": 910 },
       "thickness": 12,
       "height": 270,
       "type": "interior",
       "openings": [
-        {
-          "id": "door-bath1",
-          "type": "door",
-          "offset": 50,
-          "width": 70,
-          "properties": { "swingDirection": "left", "swingAngle": 90 }
-        }
+        { "id": "open-liv", "type": "opening", "offset": 30, "width": 160, "properties": {} }
       ]
     },
     {
-      "id": "w14",
-      "start": { "x": 1100, "y": 460 },
-      "end": { "x": 1100, "y": 860 },
+      "id": "w-din-e",
+      "start": { "x": 850, "y": 480 },
+      "end": { "x": 850, "y": 910 },
       "thickness": 12,
       "height": 270,
       "type": "interior",
       "openings": [
-        {
-          "id": "door-bath2",
-          "type": "door",
-          "offset": 80,
-          "width": 70,
-          "properties": { "swingDirection": "right", "swingAngle": 90 }
-        }
+        { "id": "open-din", "type": "opening", "offset": 30, "width": 140, "properties": {} }
+      ]
+    },
+    {
+      "id": "w-ba1-w",
+      "start": { "x": 1150, "y": 480 },
+      "end": { "x": 1150, "y": 700 },
+      "thickness": 12,
+      "height": 270,
+      "type": "interior",
+      "openings": [
+        { "id": "door-ba1", "type": "door", "offset": 20, "width": 70, "properties": { "swingDirection": "left", "swingAngle": 90 } }
+      ]
+    },
+    {
+      "id": "w-ba1-s",
+      "start": { "x": 1150, "y": 700 },
+      "end": { "x": 1450, "y": 700 },
+      "thickness": 12,
+      "height": 270,
+      "type": "interior",
+      "openings": []
+    },
+    {
+      "id": "w-ba2-w",
+      "start": { "x": 1150, "y": 700 },
+      "end": { "x": 1150, "y": 910 },
+      "thickness": 12,
+      "height": 270,
+      "type": "interior",
+      "openings": [
+        { "id": "door-ba2", "type": "door", "offset": 20, "width": 70, "properties": { "swingDirection": "left", "swingAngle": 90 } }
       ]
     }
   ],
   "rooms": [
     {
-      "id": "room-bedroom1",
+      "id": "r-b1",
       "label": "Bedroom 1",
       "type": "bedroom",
       "polygon": [
-        { "x": 0, "y": 0 },
-        { "x": 450, "y": 0 },
-        { "x": 450, "y": 460 },
-        { "x": 0, "y": 460 }
+        { "x": 60, "y": 60 },
+        { "x": 494, "y": 60 },
+        { "x": 494, "y": 474 },
+        { "x": 60, "y": 474 }
       ],
-      "color": "#E3F2FD",
-      "wall_ids": ["w1", "w4", "w5", "w7"]
+      "wall_ids": ["w-n", "w-w", "w-b1-e", "w-bed-s"],
+      "color": "#E3F2FD"
     },
     {
-      "id": "room-bedroom2",
+      "id": "r-b2",
       "label": "Bedroom 2",
       "type": "bedroom",
       "polygon": [
-        { "x": 450, "y": 0 },
-        { "x": 900, "y": 0 },
-        { "x": 900, "y": 460 },
-        { "x": 450, "y": 460 }
+        { "x": 506, "y": 60 },
+        { "x": 954, "y": 60 },
+        { "x": 954, "y": 474 },
+        { "x": 506, "y": 474 }
       ],
-      "color": "#E3F2FD",
-      "wall_ids": ["w1", "w5", "w6", "w8"]
+      "wall_ids": ["w-n", "w-b1-e", "w-b2-e", "w-bed-s"],
+      "color": "#E3F2FD"
     },
     {
-      "id": "room-bedroom3",
+      "id": "r-b3",
       "label": "Bedroom 3",
       "type": "bedroom",
       "polygon": [
-        { "x": 900, "y": 0 },
-        { "x": 1400, "y": 0 },
-        { "x": 1400, "y": 460 },
-        { "x": 900, "y": 460 }
+        { "x": 966, "y": 60 },
+        { "x": 1440, "y": 60 },
+        { "x": 1440, "y": 474 },
+        { "x": 966, "y": 474 }
       ],
-      "color": "#E3F2FD",
-      "wall_ids": ["w1", "w2", "w6", "w9"]
+      "wall_ids": ["w-n", "w-e", "w-b2-e", "w-bed-s"],
+      "color": "#E3F2FD"
     },
     {
-      "id": "room-living",
+      "id": "r-living",
       "label": "Living Room",
       "type": "living",
       "polygon": [
-        { "x": 0, "y": 460 },
-        { "x": 550, "y": 460 },
-        { "x": 550, "y": 660 },
-        { "x": 0, "y": 660 }
+        { "x": 60, "y": 486 },
+        { "x": 494, "y": 486 },
+        { "x": 494, "y": 900 },
+        { "x": 60, "y": 900 }
       ],
-      "color": "#E8F5E9",
-      "wall_ids": ["w4", "w7", "w10", "w11"]
+      "wall_ids": ["w-s", "w-w", "w-bed-s", "w-liv-e"],
+      "color": "#E8F5E9"
     },
     {
-      "id": "room-kitchen",
+      "id": "r-dining",
+      "label": "Dining",
+      "type": "dining",
+      "polygon": [
+        { "x": 506, "y": 486 },
+        { "x": 844, "y": 486 },
+        { "x": 844, "y": 900 },
+        { "x": 506, "y": 900 }
+      ],
+      "wall_ids": ["w-s", "w-liv-e", "w-din-e"],
+      "color": "#FFF8E1"
+    },
+    {
+      "id": "r-kitchen",
       "label": "Kitchen",
       "type": "kitchen",
       "polygon": [
-        { "x": 0, "y": 660 },
-        { "x": 550, "y": 660 },
-        { "x": 550, "y": 860 },
-        { "x": 0, "y": 860 }
+        { "x": 856, "y": 486 },
+        { "x": 1144, "y": 486 },
+        { "x": 1144, "y": 900 },
+        { "x": 856, "y": 900 }
       ],
-      "color": "#FFF3E0",
-      "wall_ids": ["w3", "w4", "w10", "w11"]
+      "wall_ids": ["w-s", "w-din-e", "w-ba1-w", "w-ba2-w"],
+      "color": "#FFF3E0"
     },
     {
-      "id": "room-dining",
-      "label": "Dining Room",
-      "type": "dining",
-      "polygon": [
-        { "x": 550, "y": 460 },
-        { "x": 900, "y": 460 },
-        { "x": 900, "y": 660 },
-        { "x": 550, "y": 660 }
-      ],
-      "color": "#FFF8E1",
-      "wall_ids": ["w8", "w11", "w12"]
-    },
-    {
-      "id": "room-hallway",
-      "label": "Hallway",
-      "type": "hallway",
-      "polygon": [
-        { "x": 550, "y": 660 },
-        { "x": 900, "y": 660 },
-        { "x": 900, "y": 860 },
-        { "x": 550, "y": 860 }
-      ],
-      "color": "#F5F5F5",
-      "wall_ids": ["w3", "w10", "w11", "w12", "w13"]
-    },
-    {
-      "id": "room-bathroom1",
+      "id": "r-ba1",
       "label": "Bathroom 1",
       "type": "bathroom",
       "polygon": [
-        { "x": 900, "y": 460 },
-        { "x": 1100, "y": 460 },
-        { "x": 1100, "y": 660 },
-        { "x": 900, "y": 660 }
+        { "x": 1156, "y": 486 },
+        { "x": 1440, "y": 486 },
+        { "x": 1440, "y": 694 },
+        { "x": 1156, "y": 694 }
       ],
-      "color": "#E0F7FA",
-      "wall_ids": ["w9", "w12", "w13", "w14"]
+      "wall_ids": ["w-e", "w-ba1-w", "w-ba1-s"],
+      "color": "#E0F7FA"
     },
     {
-      "id": "room-bathroom2",
+      "id": "r-ba2",
       "label": "Bathroom 2",
       "type": "bathroom",
       "polygon": [
-        { "x": 1100, "y": 460 },
-        { "x": 1400, "y": 460 },
-        { "x": 1400, "y": 860 },
-        { "x": 1100, "y": 860 }
+        { "x": 1156, "y": 706 },
+        { "x": 1440, "y": 706 },
+        { "x": 1440, "y": 900 },
+        { "x": 1156, "y": 900 }
       ],
-      "color": "#E0F7FA",
-      "wall_ids": ["w2", "w3", "w9", "w14"]
+      "wall_ids": ["w-s", "w-e", "w-ba1-s", "w-ba2-w"],
+      "color": "#E0F7FA"
     }
   ],
   "furniture": [
-    {
-      "id": "f-bed1",
-      "type": "bed-double",
-      "position": { "x": 70, "y": 70 },
-      "rotation": 0,
-      "width": 160,
-      "depth": 200,
-      "label": "Double Bed"
-    },
-    {
-      "id": "f-nightstand1a",
-      "type": "nightstand",
-      "position": { "x": 240, "y": 70 },
-      "rotation": 0,
-      "width": 50,
-      "depth": 40,
-      "label": "Nightstand"
-    },
-    {
-      "id": "f-nightstand1b",
-      "type": "nightstand",
-      "position": { "x": 20, "y": 70 },
-      "rotation": 0,
-      "width": 50,
-      "depth": 40,
-      "label": "Nightstand"
-    },
-    {
-      "id": "f-wardrobe1",
-      "type": "wardrobe",
-      "position": { "x": 70, "y": 340 },
-      "rotation": 0,
-      "width": 120,
-      "depth": 60,
-      "label": "Wardrobe"
-    },
-    {
-      "id": "f-bed2",
-      "type": "bed-double",
-      "position": { "x": 520, "y": 70 },
-      "rotation": 0,
-      "width": 160,
-      "depth": 200,
-      "label": "Double Bed"
-    },
-    {
-      "id": "f-nightstand2a",
-      "type": "nightstand",
-      "position": { "x": 690, "y": 70 },
-      "rotation": 0,
-      "width": 50,
-      "depth": 40,
-      "label": "Nightstand"
-    },
-    {
-      "id": "f-nightstand2b",
-      "type": "nightstand",
-      "position": { "x": 470, "y": 70 },
-      "rotation": 0,
-      "width": 50,
-      "depth": 40,
-      "label": "Nightstand"
-    },
-    {
-      "id": "f-wardrobe2",
-      "type": "wardrobe",
-      "position": { "x": 520, "y": 340 },
-      "rotation": 0,
-      "width": 120,
-      "depth": 60,
-      "label": "Wardrobe"
-    },
-    {
-      "id": "f-bed3",
-      "type": "bed-single",
-      "position": { "x": 970, "y": 70 },
-      "rotation": 0,
-      "width": 90,
-      "depth": 200,
-      "label": "Single Bed"
-    },
-    {
-      "id": "f-nightstand3",
-      "type": "nightstand",
-      "position": { "x": 1070, "y": 70 },
-      "rotation": 0,
-      "width": 50,
-      "depth": 40,
-      "label": "Nightstand"
-    },
-    {
-      "id": "f-desk",
-      "type": "desk",
-      "position": { "x": 1200, "y": 70 },
-      "rotation": 0,
-      "width": 140,
-      "depth": 70,
-      "label": "Desk"
-    },
-    {
-      "id": "f-office-chair",
-      "type": "office-chair",
-      "position": { "x": 1240, "y": 150 },
-      "rotation": 0,
-      "width": 55,
-      "depth": 55,
-      "label": "Office Chair"
-    },
-    {
-      "id": "f-wardrobe3",
-      "type": "wardrobe",
-      "position": { "x": 970, "y": 340 },
-      "rotation": 0,
-      "width": 120,
-      "depth": 60,
-      "label": "Wardrobe"
-    },
-    {
-      "id": "f-sofa",
-      "type": "sofa-3seat",
-      "position": { "x": 70, "y": 480 },
-      "rotation": 0,
-      "width": 220,
-      "depth": 90,
-      "label": "Sofa"
-    },
-    {
-      "id": "f-coffee-table",
-      "type": "coffee-table",
-      "position": { "x": 100, "y": 580 },
-      "rotation": 0,
-      "width": 120,
-      "depth": 60,
-      "label": "Coffee Table"
-    },
-    {
-      "id": "f-tv-unit",
-      "type": "tv-unit",
-      "position": { "x": 340, "y": 480 },
-      "rotation": 0,
-      "width": 150,
-      "depth": 40,
-      "label": "TV Unit"
-    },
-    {
-      "id": "f-armchair",
-      "type": "armchair",
-      "position": { "x": 340, "y": 560 },
-      "rotation": 0,
-      "width": 80,
-      "depth": 80,
-      "label": "Armchair"
-    },
-    {
-      "id": "f-kitchen-counter",
-      "type": "kitchen-counter",
-      "position": { "x": 20, "y": 680 },
-      "rotation": 0,
-      "width": 240,
-      "depth": 60,
-      "label": "Kitchen Counter"
-    },
-    {
-      "id": "f-stove",
-      "type": "stove",
-      "position": { "x": 270, "y": 680 },
-      "rotation": 0,
-      "width": 60,
-      "depth": 60,
-      "label": "Stove"
-    },
-    {
-      "id": "f-fridge",
-      "type": "fridge",
-      "position": { "x": 340, "y": 680 },
-      "rotation": 0,
-      "width": 70,
-      "depth": 70,
-      "label": "Fridge"
-    },
-    {
-      "id": "f-kitchen-sink",
-      "type": "kitchen-sink",
-      "position": { "x": 20, "y": 790 },
-      "rotation": 0,
-      "width": 60,
-      "depth": 60,
-      "label": "Kitchen Sink"
-    },
-    {
-      "id": "f-dining-table",
-      "type": "dining-table",
-      "position": { "x": 580, "y": 500 },
-      "rotation": 0,
-      "width": 160,
-      "depth": 90,
-      "label": "Dining Table"
-    },
-    {
-      "id": "f-dining-chair1",
-      "type": "dining-chair",
-      "position": { "x": 610, "y": 600 },
-      "rotation": 0,
-      "width": 45,
-      "depth": 45,
-      "label": "Chair"
-    },
-    {
-      "id": "f-dining-chair2",
-      "type": "dining-chair",
-      "position": { "x": 680, "y": 600 },
-      "rotation": 0,
-      "width": 45,
-      "depth": 45,
-      "label": "Chair"
-    },
-    {
-      "id": "f-dining-chair3",
-      "type": "dining-chair",
-      "position": { "x": 610, "y": 470 },
-      "rotation": 0,
-      "width": 45,
-      "depth": 45,
-      "label": "Chair"
-    },
-    {
-      "id": "f-dining-chair4",
-      "type": "dining-chair",
-      "position": { "x": 680, "y": 470 },
-      "rotation": 0,
-      "width": 45,
-      "depth": 45,
-      "label": "Chair"
-    },
-    {
-      "id": "f-toilet1",
-      "type": "toilet",
-      "position": { "x": 920, "y": 580 },
-      "rotation": 0,
-      "width": 40,
-      "depth": 65,
-      "label": "Toilet"
-    },
-    {
-      "id": "f-bath-sink1",
-      "type": "bath-sink",
-      "position": { "x": 920, "y": 480 },
-      "rotation": 0,
-      "width": 60,
-      "depth": 45,
-      "label": "Sink"
-    },
-    {
-      "id": "f-shower",
-      "type": "shower",
-      "position": { "x": 1000, "y": 480 },
-      "rotation": 0,
-      "width": 90,
-      "depth": 90,
-      "label": "Shower"
-    },
-    {
-      "id": "f-toilet2",
-      "type": "toilet",
-      "position": { "x": 1120, "y": 580 },
-      "rotation": 0,
-      "width": 40,
-      "depth": 65,
-      "label": "Toilet"
-    },
-    {
-      "id": "f-bath-sink2",
-      "type": "bath-sink",
-      "position": { "x": 1120, "y": 480 },
-      "rotation": 0,
-      "width": 60,
-      "depth": 45,
-      "label": "Sink"
-    },
-    {
-      "id": "f-bathtub",
-      "type": "bathtub",
-      "position": { "x": 1220, "y": 480 },
-      "rotation": 0,
-      "width": 170,
-      "depth": 75,
-      "label": "Bathtub"
-    },
-    {
-      "id": "f-shoe-rack",
-      "type": "shoe-rack",
-      "position": { "x": 570, "y": 820 },
-      "rotation": 0,
-      "width": 80,
-      "depth": 30,
-      "label": "Shoe Rack"
-    }
+    { "id": "f-b1bed", "type": "bed-double", "position": { "x": 150, "y": 70 }, "rotation": 0, "width": 160, "depth": 200, "label": "Bed" },
+    { "id": "f-b1ns1", "type": "nightstand", "position": { "x": 95, "y": 70 }, "rotation": 0, "width": 50, "depth": 40, "label": "Nightstand" },
+    { "id": "f-b1ns2", "type": "nightstand", "position": { "x": 315, "y": 70 }, "rotation": 0, "width": 50, "depth": 40, "label": "Nightstand" },
+    { "id": "f-b1ward", "type": "wardrobe", "position": { "x": 70, "y": 350 }, "rotation": 0, "width": 120, "depth": 60, "label": "Wardrobe" },
+    { "id": "f-b2bed", "type": "bed-double", "position": { "x": 610, "y": 70 }, "rotation": 0, "width": 160, "depth": 200, "label": "Bed" },
+    { "id": "f-b2ns1", "type": "nightstand", "position": { "x": 555, "y": 70 }, "rotation": 0, "width": 50, "depth": 40, "label": "Nightstand" },
+    { "id": "f-b2ns2", "type": "nightstand", "position": { "x": 775, "y": 70 }, "rotation": 0, "width": 50, "depth": 40, "label": "Nightstand" },
+    { "id": "f-b2ward", "type": "wardrobe", "position": { "x": 520, "y": 350 }, "rotation": 0, "width": 120, "depth": 60, "label": "Wardrobe" },
+    { "id": "f-b3bed", "type": "bed-single", "position": { "x": 1050, "y": 70 }, "rotation": 0, "width": 90, "depth": 200, "label": "Bed" },
+    { "id": "f-b3ns", "type": "nightstand", "position": { "x": 1145, "y": 70 }, "rotation": 0, "width": 50, "depth": 40, "label": "Nightstand" },
+    { "id": "f-b3desk", "type": "desk", "position": { "x": 1000, "y": 320 }, "rotation": 0, "width": 140, "depth": 70, "label": "Desk" },
+    { "id": "f-b3chair", "type": "office-chair", "position": { "x": 1050, "y": 395 }, "rotation": 0, "width": 55, "depth": 55, "label": "Chair" },
+    { "id": "f-b3ward", "type": "wardrobe", "position": { "x": 1300, "y": 300 }, "rotation": 90, "width": 120, "depth": 60, "label": "Wardrobe" },
+    { "id": "f-sofa", "type": "sofa-3seat", "position": { "x": 70, "y": 510 }, "rotation": 90, "width": 220, "depth": 90, "label": "Sofa" },
+    { "id": "f-coffee", "type": "coffee-table", "position": { "x": 190, "y": 590 }, "rotation": 0, "width": 120, "depth": 60, "label": "Coffee Table" },
+    { "id": "f-tv", "type": "tv-unit", "position": { "x": 340, "y": 560 }, "rotation": 90, "width": 150, "depth": 40, "label": "TV Unit" },
+    { "id": "f-arm", "type": "armchair", "position": { "x": 170, "y": 780 }, "rotation": 0, "width": 80, "depth": 80, "label": "Armchair" },
+    { "id": "f-dtable", "type": "dining-table", "position": { "x": 560, "y": 600 }, "rotation": 0, "width": 160, "depth": 90, "label": "Table" },
+    { "id": "f-dc1", "type": "dining-chair", "position": { "x": 590, "y": 550 }, "rotation": 0, "width": 45, "depth": 45, "label": "Chair" },
+    { "id": "f-dc2", "type": "dining-chair", "position": { "x": 660, "y": 550 }, "rotation": 0, "width": 45, "depth": 45, "label": "Chair" },
+    { "id": "f-dc3", "type": "dining-chair", "position": { "x": 590, "y": 695 }, "rotation": 180, "width": 45, "depth": 45, "label": "Chair" },
+    { "id": "f-dc4", "type": "dining-chair", "position": { "x": 660, "y": 695 }, "rotation": 180, "width": 45, "depth": 45, "label": "Chair" },
+    { "id": "f-kcounter", "type": "kitchen-counter", "position": { "x": 870, "y": 500 }, "rotation": 0, "width": 240, "depth": 60, "label": "Counter" },
+    { "id": "f-ksink", "type": "kitchen-sink", "position": { "x": 870, "y": 840 }, "rotation": 0, "width": 60, "depth": 60, "label": "Sink" },
+    { "id": "f-kstove", "type": "stove", "position": { "x": 1000, "y": 840 }, "rotation": 0, "width": 60, "depth": 60, "label": "Stove" },
+    { "id": "f-kfridge", "type": "fridge", "position": { "x": 1070, "y": 830 }, "rotation": 0, "width": 70, "depth": 70, "label": "Fridge" },
+    { "id": "f-shoe", "type": "shoe-rack", "position": { "x": 590, "y": 860 }, "rotation": 0, "width": 80, "depth": 30, "label": "Shoe Rack" },
+    { "id": "f-ba1toilet", "type": "toilet", "position": { "x": 1370, "y": 500 }, "rotation": 0, "width": 40, "depth": 65, "label": "Toilet" },
+    { "id": "f-ba1sink", "type": "bath-sink", "position": { "x": 1170, "y": 500 }, "rotation": 0, "width": 60, "depth": 45, "label": "Sink" },
+    { "id": "f-ba1shower", "type": "shower", "position": { "x": 1340, "y": 600 }, "rotation": 0, "width": 90, "depth": 90, "label": "Shower" },
+    { "id": "f-ba2toilet", "type": "toilet", "position": { "x": 1370, "y": 720 }, "rotation": 0, "width": 40, "depth": 65, "label": "Toilet" },
+    { "id": "f-ba2sink", "type": "bath-sink", "position": { "x": 1170, "y": 720 }, "rotation": 0, "width": 60, "depth": 45, "label": "Sink" },
+    { "id": "f-ba2tub", "type": "bathtub", "position": { "x": 1190, "y": 810 }, "rotation": 0, "width": 170, "depth": 75, "label": "Bathtub" }
   ],
   "annotations": [],
   "metadata": {
-    "created_at": "2026-03-18T00:00:00Z",
-    "updated_at": "2026-03-18T00:00:00Z",
+    "created_at": "2026-03-19T00:00:00Z",
+    "updated_at": "2026-03-19T00:00:00Z",
     "source": "ai"
   }
 }
