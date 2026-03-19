@@ -758,13 +758,28 @@ export function sketcherHtml(sketchId: string): string {
     if (selected.type === 'wall') {
       var wall = plan.walls.find(function(w) { return w.id === selected.id; });
       if (!wall) return '';
-      var len = Math.sqrt(Math.pow(wall.end.x - wall.start.x, 2) + Math.pow(wall.end.y - wall.start.y, 2));
+      var dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      var angle = Math.atan2(dy, dx) * 180 / Math.PI;
       return '<h3>Wall</h3>' +
         '<label>Type</label><select id="prop-wall-type"><option value="exterior"' + (wall.type==='exterior'?' selected':'') + '>Exterior</option><option value="interior"' + (wall.type==='interior'?' selected':'') + '>Interior</option><option value="divider"' + (wall.type==='divider'?' selected':'') + '>Divider</option></select>' +
         '<label>Thickness (cm)</label><input id="prop-wall-thick" type="number" value="' + wall.thickness + '">' +
-        '<label>Length</label><p style="font-size:13px;margin-top:2px">' + (len/100).toFixed(2) + 'm</p>' +
-        '<label>Openings</label><p style="font-size:13px;margin-top:2px">' + wall.openings.length + '</p>' +
-        '<br><button id="prop-wall-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Wall</button>';
+        '<label>Length (m)</label><input id="prop-wall-length" type="number" step="0.01" value="' + (len / 100).toFixed(2) + '">' +
+        '<label>Angle (&deg;)</label><input id="prop-wall-angle" type="number" step="1" value="' + Math.round(angle) + '">' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px">' +
+        '<div><label>Start X</label><input id="prop-wall-sx" type="number" value="' + Math.round(wall.start.x) + '"></div>' +
+        '<div><label>Start Y</label><input id="prop-wall-sy" type="number" value="' + Math.round(wall.start.y) + '"></div>' +
+        '<div><label>End X</label><input id="prop-wall-ex" type="number" value="' + Math.round(wall.end.x) + '"></div>' +
+        '<div><label>End Y</label><input id="prop-wall-ey" type="number" value="' + Math.round(wall.end.y) + '"></div>' +
+        '</div>' +
+        '<label>Openings (' + wall.openings.length + ')</label>' +
+        wall.openings.map(function(o) {
+          return '<div style="display:flex;align-items:center;gap:4px;margin-top:4px;font-size:12px">' +
+            '<span>' + o.type + ' (' + o.width + 'cm)</span>' +
+            '<button data-remove-opening="' + o.id + '" style="color:#D84200;border:1px solid #D84200;border-radius:3px;background:#fff;cursor:pointer;font-size:11px;padding:1px 6px">&times;</button>' +
+            '</div>';
+        }).join('') +
+        '<br><button id="prop-wall-delete" style="color:#D84200;border:1px solid #D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Wall</button>';
     } else if (selected.type === 'room') {
       var room = plan.rooms.find(function(r) { return r.id === selected.id; });
       if (!room) return '';
@@ -782,9 +797,13 @@ export function sketcherHtml(sketchId: string): string {
       if (!item) return '';
       return '<h3>Furniture</h3>' +
         '<label>Type</label><p style="font-size:13px;margin-top:2px">' + escHtml(item.type) + '</p>' +
-        '<label>Size</label><p style="font-size:13px;margin-top:2px">' + item.width + ' x ' + item.depth + ' cm</p>' +
-        '<label>Rotation</label><p style="font-size:13px;margin-top:2px">' + (item.rotation || 0) + '\\u00B0</p>' +
-        '<br><button id="prop-furn-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete</button>';
+        '<label>Size</label><p style="font-size:13px;margin-top:2px">' + item.width + ' &times; ' + item.depth + ' cm</p>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:8px">' +
+        '<div><label>Position X</label><input id="prop-furn-x" type="number" value="' + Math.round(item.position.x) + '"></div>' +
+        '<div><label>Position Y</label><input id="prop-furn-y" type="number" value="' + Math.round(item.position.y) + '"></div>' +
+        '</div>' +
+        '<label>Rotation (&deg;)</label><input id="prop-furn-rot" type="number" step="15" value="' + (item.rotation || 0) + '">' +
+        '<br><button id="prop-furn-delete" style="color:#D84200;border:1px solid #D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete</button>';
     }
     return '';
   }
@@ -809,6 +828,44 @@ export function sketcherHtml(sketchId: string): string {
         selected = null;
         showProperties();
       };
+      // Length change: preserve start point and angle, adjust end point
+      var lenEl = document.getElementById('prop-wall-length');
+      if (lenEl) lenEl.onchange = function(e) {
+        var newLen = parseFloat(e.target.value) * 100;
+        if (isNaN(newLen) || newLen < 1) return;
+        var dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
+        var curLen = Math.sqrt(dx * dx + dy * dy);
+        if (curLen < 0.01) return;
+        var scale = newLen / curLen;
+        sendChange({ type: 'move_wall', wall_id: wall.id, end: { x: Math.round(wall.start.x + dx * scale), y: Math.round(wall.start.y + dy * scale) } });
+      };
+      // Angle change: preserve start point and length, rotate end point
+      var angEl = document.getElementById('prop-wall-angle');
+      if (angEl) angEl.onchange = function(e) {
+        var newAngle = parseFloat(e.target.value) * Math.PI / 180;
+        if (isNaN(newAngle)) return;
+        var dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
+        var len = Math.sqrt(dx * dx + dy * dy);
+        sendChange({ type: 'move_wall', wall_id: wall.id, end: { x: Math.round(wall.start.x + Math.cos(newAngle) * len), y: Math.round(wall.start.y + Math.sin(newAngle) * len) } });
+      };
+      // Coordinate changes (commit on blur/enter via onchange)
+      ['prop-wall-sx', 'prop-wall-sy', 'prop-wall-ex', 'prop-wall-ey'].forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.onchange = function() {
+          var sx = parseInt(document.getElementById('prop-wall-sx').value);
+          var sy = parseInt(document.getElementById('prop-wall-sy').value);
+          var ex = parseInt(document.getElementById('prop-wall-ex').value);
+          var ey = parseInt(document.getElementById('prop-wall-ey').value);
+          if ([sx, sy, ex, ey].some(isNaN)) return;
+          sendChange({ type: 'move_wall', wall_id: wall.id, start: { x: sx, y: sy }, end: { x: ex, y: ey } });
+        };
+      });
+      // Opening delete buttons
+      document.querySelectorAll('[data-remove-opening]').forEach(function(btn) {
+        btn.onclick = function() {
+          sendChange({ type: 'remove_opening', wall_id: wall.id, opening_id: btn.dataset.removeOpening });
+        };
+      });
     } else if (selected.type === 'room') {
       var room = plan.rooms.find(function(r) { return r.id === selected.id; });
       if (!room) return;
@@ -827,11 +884,25 @@ export function sketcherHtml(sketchId: string): string {
         showProperties();
       };
     } else if (selected.type === 'furniture') {
+      var item = plan.furniture.find(function(f) { return f.id === selected.id; });
+      if (!item) return;
       var delEl = document.getElementById('prop-furn-delete');
       if (delEl) delEl.onclick = function() {
         sendChange({ type: 'remove_furniture', furniture_id: selected.id });
         selected = null;
         showProperties();
+      };
+      var fxEl = document.getElementById('prop-furn-x');
+      var fyEl = document.getElementById('prop-furn-y');
+      var frotEl = document.getElementById('prop-furn-rot');
+      if (fxEl) fxEl.onchange = function(e) {
+        sendChange({ type: 'move_furniture', furniture_id: item.id, position: { x: parseInt(e.target.value), y: item.position.y } });
+      };
+      if (fyEl) fyEl.onchange = function(e) {
+        sendChange({ type: 'move_furniture', furniture_id: item.id, position: { x: item.position.x, y: parseInt(e.target.value) } });
+      };
+      if (frotEl) frotEl.onchange = function(e) {
+        sendChange({ type: 'move_furniture', furniture_id: item.id, rotation: parseInt(e.target.value) });
       };
     }
   }
