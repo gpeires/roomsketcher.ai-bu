@@ -380,7 +380,27 @@ How many iterations: If the user provided a reference image or detailed measurem
         },
       },
       async ({ sketch_id }) => {
-        return handleGetSketch(sketch_id, this.buildCtx());
+        const result = await handleGetSketch(sketch_id, this.buildCtx());
+        // Append recent browser changes if any
+        try {
+          const syncId = this.env.SKETCH_SYNC.idFromName(sketch_id);
+          const syncObj = this.env.SKETCH_SYNC.get(syncId);
+          const changesRes = await syncObj.fetch(new Request('http://internal/changes'));
+          const { changes, connections } = await changesRes.json() as { changes: { type: string; timestamp: string; summary: string }[]; connections: number };
+          if (changes.length > 0 || connections > 0) {
+            const lines = [`\n---\n**Live status:** ${connections} browser(s) connected`];
+            if (changes.length > 0) {
+              lines.push(`**Recent browser edits** (${changes.length}):`);
+              for (const c of changes.slice(-10)) {
+                lines.push(`  ${c.timestamp.slice(11, 19)} ${c.summary}`);
+              }
+            }
+            if (result.content && result.content[0] && result.content[0].type === 'text') {
+              result.content[0].text += lines.join('\n');
+            }
+          }
+        } catch { /* SketchSync not available, skip */ }
+        return result;
       },
     );
 
@@ -537,13 +557,39 @@ PURPOSE: This is your eyes. Use it to verify what you built before presenting to
 
 export class SketchSync extends Agent<Env, SketchSession> {
   private dirty = false;
+  private changeLog: { type: string; timestamp: string; summary: string }[] = [];
+  private static MAX_CHANGE_LOG = 50;
 
   // Use our own WebSocket protocol, not the Agent framework's state sync
   shouldSendProtocolMessages() { return false; }
 
+  private logChange(change: Change) {
+    const summary = change.type + (('wall_id' in change) ? ` wall:${(change as any).wall_id}` : '') +
+      (('furniture_id' in change) ? ` furniture:${(change as any).furniture_id}` : '') +
+      (('room_id' in change) ? ` room:${(change as any).room_id}` : '') +
+      (('opening_id' in change) ? ` opening:${(change as any).opening_id}` : '');
+    this.changeLog.push({ type: change.type, timestamp: new Date().toISOString(), summary });
+    if (this.changeLog.length > SketchSync.MAX_CHANGE_LOG) {
+      this.changeLog = this.changeLog.slice(-SketchSync.MAX_CHANGE_LOG);
+    }
+  }
+
   // Internal endpoint for MCP DO to trigger broadcasts
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // GET /changes — return recent browser changes for MCP agent awareness
+    if (url.pathname === '/changes' && request.method === 'GET') {
+      const since = url.searchParams.get('since');
+      let changes = this.changeLog;
+      if (since) {
+        changes = changes.filter(c => c.timestamp > since);
+      }
+      return new Response(JSON.stringify({ changes, connections: [...this.getConnections()].length }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     if (url.pathname === '/broadcast' && request.method === 'POST') {
       const msg = await request.text();
       // Also update our local state from the broadcast payload
@@ -622,6 +668,7 @@ export class SketchSync extends Agent<Env, SketchSession> {
     }
 
     if (this.state?.plan) {
+      this.logChange(msg as Change);
       const updated = applyChanges(this.state.plan, [msg as Change]);
       this.setState({ ...this.state, plan: updated });
       this.dirty = true;

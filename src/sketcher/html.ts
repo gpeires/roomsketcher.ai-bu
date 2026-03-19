@@ -224,10 +224,11 @@ export function sketcherHtml(sketchId: string): string {
   // --- State ---
   var plan = null;
   var tool = 'select';          // active tool: select|wall|door|window|room|furniture
-  var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|drawing_wall|panning|placing_opening|rotating_furniture
+  var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|dragging_furniture|drawing_wall|panning|placing_opening|rotating_furniture
   var selected = null;           // { type, id }
   var drawStart = null;          // wall drawing start point
   var dragState = null;          // { wallId, endpoint, startPoint, connectedWalls, originalPositions, detached }
+  var furnitureDragState = null;  // { furnitureId, originalPos, grabOffset }
   var snapResult = null;         // { point, guides[] }
   var undoStack = [];            // [{ changes[], inverseChanges[] }]
   var redoStack = [];
@@ -329,6 +330,7 @@ export function sketcherHtml(sketchId: string): string {
     var isTouchPanning = false;
     var tapStart = null;
     var touchDragHandle = null;
+    var touchDragFurniture = null;
 
     svg.addEventListener('touchstart', function(e) {
       if (e.touches.length === 1) {
@@ -349,7 +351,20 @@ export function sketcherHtml(sketchId: string): string {
           e.preventDefault();
           return;
         }
+        // Check if touch hit selected furniture (for drag)
+        if (selected && selected.type === 'furniture' && (tool === 'select' || tool === 'furniture')) {
+          while (el && !el.dataset.id && el !== svg) el = el.parentElement;
+          if (el && el.dataset.id === selected.id && el.dataset.type === 'furniture') {
+            touchDragFurniture = { id: el.dataset.id };
+            mouseDownPoint = { x: t.clientX, y: t.clientY };
+            beginFurnitureDrag(el.dataset.id, { clientX: t.clientX, clientY: t.clientY });
+            if (isMobile()) setSheetState('collapsed');
+            e.preventDefault();
+            return;
+          }
+        }
         touchDragHandle = null;
+        touchDragFurniture = null;
       } else if (e.touches.length === 2) {
         tapStart = null;
         touchDragHandle = null;
@@ -366,6 +381,10 @@ export function sketcherHtml(sketchId: string): string {
           // Endpoint drag via touch
           var fakeEvent = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
           updateEndpointDrag(fakeEvent);
+        } else if (touchDragFurniture && furnitureDragState) {
+          // Furniture drag via touch
+          var fakeEvent = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
+          updateFurnitureDrag(fakeEvent);
         } else {
           // Pan
           isTouchPanning = true;
@@ -415,6 +434,19 @@ export function sketcherHtml(sketchId: string): string {
           tapStart = null;
           return;
         }
+        if (touchDragFurniture && furnitureDragState) {
+          commitFurnitureDrag();
+          touchDragFurniture = null;
+          if (isMobile() && selected) {
+            setTimeout(function() { setSheetState('expanded'); showProperties(); }, 100);
+          }
+          touchStart = null;
+          touchStartVB = null;
+          lastPinchDist = 0;
+          isTouchPanning = false;
+          tapStart = null;
+          return;
+        }
         // Detect tap: short duration, small movement
         if (tapStart && !isTouchPanning) {
           var ct = e.changedTouches[0];
@@ -425,8 +457,20 @@ export function sketcherHtml(sketchId: string): string {
             // Find element under tap point
             var el = document.elementFromPoint(ct.clientX, ct.clientY);
             while (el && !el.dataset.id && el !== svg) el = el.parentElement;
-            if (el && el.dataset.id && tool === 'select') {
-              selected = { type: el.dataset.type, id: el.dataset.id };
+            if (el && el.dataset.id) {
+              if (el.dataset.type === 'opening') {
+                selected = { type: 'opening', id: el.dataset.id, wallId: el.dataset.wallId };
+                var tappedO = null;
+                if (plan) {
+                  var tw = plan.walls.find(function(w) { return w.id === el.dataset.wallId; });
+                  if (tw) tappedO = tw.openings.find(function(o) { return o.id === el.dataset.id; });
+                }
+                if (tappedO) setTool(tappedO.type === 'door' ? 'door' : 'window');
+              } else if ((tool === 'door' || tool === 'window') && el.dataset.type === 'wall') {
+                addOpeningToWall(el.dataset.id, tool, e.changedTouches[0]);
+              } else if (tool === 'select' || tool === 'furniture') {
+                selected = { type: el.dataset.type, id: el.dataset.id };
+              }
               render();
               showProperties();
             } else {
@@ -559,6 +603,13 @@ export function sketcherHtml(sketchId: string): string {
         var o = w.openings.find(function(o) { return o.id === change.opening_id; });
         return o ? { type: 'add_opening', wall_id: change.wall_id, opening: JSON.parse(JSON.stringify(o)) } : null;
       }
+      case 'update_opening': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        if (!w) return null;
+        var o = w.openings.find(function(o) { return o.id === change.opening_id; });
+        if (!o) return null;
+        return { type: 'update_opening', wall_id: change.wall_id, opening_id: change.opening_id, offset: o.offset, width: o.width, properties: JSON.parse(JSON.stringify(o.properties)) };
+      }
       case 'add_room': return { type: 'remove_room', room_id: change.room.id };
       case 'remove_room': {
         var r = plan.rooms.find(function(r) { return r.id === change.room_id; });
@@ -629,6 +680,24 @@ export function sketcherHtml(sketchId: string): string {
       case 'remove_opening': {
         var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
         if (w) w.openings = w.openings.filter(function(o) { return o.id !== change.opening_id; });
+        break;
+      }
+      case 'update_opening': {
+        var w = plan.walls.find(function(w) { return w.id === change.wall_id; });
+        if (w) {
+          var o = w.openings.find(function(o) { return o.id === change.opening_id; });
+          if (o) {
+            if (!o.properties) o.properties = {};
+            if (change.offset !== undefined) o.offset = change.offset;
+            if (change.width !== undefined) o.width = change.width;
+            if (change.properties) {
+              if (change.properties.swingDirection !== undefined) o.properties.swingDirection = change.properties.swingDirection;
+              if (change.properties.swingAngle !== undefined) o.properties.swingAngle = change.properties.swingAngle;
+              if (change.properties.sillHeight !== undefined) o.properties.sillHeight = change.properties.sillHeight;
+              if (change.properties.windowType !== undefined) o.properties.windowType = change.properties.windowType;
+            }
+          }
+        }
         break;
       }
       case 'add_room':
@@ -731,7 +800,7 @@ export function sketcherHtml(sketchId: string): string {
     var dimRooms = (tool === 'wall' || tool === 'door' || tool === 'window' || tool === 'furniture');
     var dimWalls = (tool === 'room' || tool === 'furniture');
     var dimOpenings = (tool === 'wall' || tool === 'room' || tool === 'furniture');
-    var dimFurniture = (tool === 'wall' || tool === 'door' || tool === 'window' || tool === 'room');
+    var dimFurniture = (tool !== 'select' && tool !== 'furniture');
 
     // Rooms
     html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
@@ -758,7 +827,7 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
-    // Openings
+    // Openings — first-class selectable elements
     html += '<g id="openings"' + (dimOpenings ? ' class="dimmed"' : '') + '>';
     for (var oi = 0; oi < plan.walls.length; oi++) {
       var w = plan.walls[oi];
@@ -770,18 +839,50 @@ export function sketcherHtml(sketchId: string): string {
         var oy = w.start.y + sin * o.offset;
         var ex = ox + cos * o.width;
         var ey = oy + sin * o.width;
-        html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="6"/>';
+        var oSel = (selected && selected.type === 'opening' && selected.id === o.id);
+        var oAttrs = ' data-id="' + o.id + '" data-type="opening" data-wall-id="' + w.id + '" style="cursor:pointer"';
+        // White gap (wall break)
+        html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="6"' + oAttrs + '/>';
         if (o.type === 'door') {
           var dir = o.properties.swingDirection === 'right' ? 1 : -1;
           var r = o.width;
           var px = -sin * dir * r, py = cos * dir * r;
           var ax = ox + px, ay = oy + py;
           var sweep = dir === 1 ? 1 : 0;
-          html += '<path d="M' + ox + ',' + oy + ' L' + ex + ',' + ey + ' A' + r + ',' + r + ' 0 0,' + sweep + ' ' + ax + ',' + ay + ' Z" fill="none" stroke="#666" stroke-width="1"/>';
+          html += '<path d="M' + ox + ',' + oy + ' L' + ex + ',' + ey + ' A' + r + ',' + r + ' 0 0,' + sweep + ' ' + ax + ',' + ay + ' Z" fill="rgba(0,0,0,0)" stroke="' + (oSel ? '#D84200' : '#666') + '" stroke-width="' + (oSel ? 2 : 1) + '"' + oAttrs + '/>';
         } else if (o.type === 'window') {
+          var wt = (o.properties && o.properties.windowType) || 'double';
+          var wColor = oSel ? '#D84200' : '#4FC3F7';
+          var wStroke = oSel ? 3 : 2;
           var nx = -sin * 4, ny = cos * 4;
-          html += '<line x1="' + (ox+nx) + '" y1="' + (oy+ny) + '" x2="' + (ex+nx) + '" y2="' + (ey+ny) + '" stroke="#4FC3F7" stroke-width="2"/>';
-          html += '<line x1="' + (ox-nx) + '" y1="' + (oy-ny) + '" x2="' + (ex-nx) + '" y2="' + (ey-ny) + '" stroke="#4FC3F7" stroke-width="2"/>';
+          // Transparent hit area
+          html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="transparent" stroke-width="14"' + oAttrs + '/>';
+          if (wt === 'single') {
+            // Single pane: one line with cross marks
+            html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="' + wColor + '" stroke-width="' + (wStroke + 1) + '"' + oAttrs + '/>';
+          } else if (wt === 'sliding') {
+            // Sliding: two offset overlapping panes
+            var mx = (ox + ex) / 2, my = (oy + ey) / 2;
+            var sx = cos * o.width * 0.1, sy = sin * o.width * 0.1;
+            html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + (mx + sx) + '" y2="' + (my + sy) + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+            html += '<line x1="' + (mx - sx) + '" y1="' + (my - sy) + '" x2="' + ex + '" y2="' + ey + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+            // Arrow in center showing slide direction
+            html += '<line x1="' + (mx - cos * 6) + '" y1="' + (my - sin * 6) + '" x2="' + (mx + cos * 6) + '" y2="' + (my + sin * 6) + '" stroke="' + wColor + '" stroke-width="1" marker-end="none" pointer-events="none"/>';
+          } else if (wt === 'bay') {
+            // Bay window: three angled segments
+            var bDepth = 8;
+            var bnx = -sin * bDepth, bny = cos * bDepth;
+            var t1x = ox + cos * o.width * 0.25, t1y = oy + sin * o.width * 0.25;
+            var t2x = ox + cos * o.width * 0.75, t2y = oy + sin * o.width * 0.75;
+            // Side segments angled outward
+            html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + (t1x + bnx) + '" y2="' + (t1y + bny) + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+            html += '<line x1="' + (t1x + bnx) + '" y1="' + (t1y + bny) + '" x2="' + (t2x + bnx) + '" y2="' + (t2y + bny) + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+            html += '<line x1="' + (t2x + bnx) + '" y1="' + (t2y + bny) + '" x2="' + ex + '" y2="' + ey + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+          } else {
+            // Double (default): two parallel lines
+            html += '<line x1="' + (ox+nx) + '" y1="' + (oy+ny) + '" x2="' + (ex+nx) + '" y2="' + (ey+ny) + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+            html += '<line x1="' + (ox-nx) + '" y1="' + (oy-ny) + '" x2="' + (ex-nx) + '" y2="' + (ey-ny) + '" stroke="' + wColor + '" stroke-width="' + wStroke + '"' + oAttrs + '/>';
+          }
         }
       }
     }
@@ -814,11 +915,13 @@ export function sketcherHtml(sketchId: string): string {
       var transform = rot ? ' transform="rotate(' + rot + ',' + cx + ',' + cy + ')"' : '';
       var sel = (selected && selected.type === 'furniture' && selected.id === item.id);
       var symbolId = 'fs-' + item.type;
-      html += '<g' + transform + ' data-id="' + item.id + '" data-type="furniture">';
+      html += '<g' + transform + ' data-id="' + item.id + '" data-type="furniture" style="cursor:pointer">';
+      // Transparent hit area so clicks register anywhere on the bounding box
+      html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="transparent" stroke="none"/>';
       if (sel) {
         html += '<rect x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" fill="none" stroke="#D84200" stroke-width="2"/>';
       }
-      html += '<use href="#' + symbolId + '" x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '"/>';
+      html += '<use href="#' + symbolId + '" x="' + item.position.x + '" y="' + item.position.y + '" width="' + item.width + '" height="' + item.depth + '" pointer-events="none"/>';
       html += '</g>';
     }
     html += '</g>';
@@ -900,13 +1003,12 @@ export function sketcherHtml(sketchId: string): string {
         '<div><label>End X</label><input id="prop-wall-ex" type="number" value="' + Math.round(wall.end.x) + '"></div>' +
         '<div><label>End Y</label><input id="prop-wall-ey" type="number" value="' + Math.round(wall.end.y) + '"></div>' +
         '</div>' +
-        '<label>Openings (' + wall.openings.length + ')</label>' +
+        (wall.openings.length > 0 ? '<label>Openings (' + wall.openings.length + ')</label>' +
         wall.openings.map(function(o) {
-          return '<div style="display:flex;align-items:center;gap:4px;margin-top:4px;font-size:12px">' +
-            '<span>' + o.type + ' (' + o.width + 'cm)</span>' +
-            '<button data-remove-opening="' + o.id + '" style="color:#D84200;border:1px solid #D84200;border-radius:3px;background:#fff;cursor:pointer;font-size:11px;padding:1px 6px">&times;</button>' +
-            '</div>';
-        }).join('') +
+          return '<div data-select-opening="' + o.id + '" data-select-wall="' + wall.id + '" style="border:1px solid var(--rs-gray-light);border-radius:4px;padding:6px 8px;margin-top:4px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:space-between">' +
+            '<span>' + o.type.charAt(0).toUpperCase() + o.type.slice(1) + ' &middot; ' + Math.round(o.width) + 'cm</span>' +
+            '<span style="color:var(--rs-teal);font-size:11px">Edit &rsaquo;</span></div>';
+        }).join('') : '') +
         '<br><button id="prop-wall-delete" style="color:#D84200;border:1px solid #D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Wall</button>';
     } else if (selected.type === 'room') {
       var room = plan.rooms.find(function(r) { return r.id === selected.id; });
@@ -920,6 +1022,36 @@ export function sketcherHtml(sketchId: string): string {
         '</select>' +
         '<label>Area</label><p style="font-size:13px;margin-top:2px">' + area.toFixed(1) + ' m\\u00B2</p>' +
         '<br><button id="prop-room-delete" style="color:#D84200;border-color:#D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete Room</button>';
+    } else if (selected.type === 'opening') {
+      var wall = plan.walls.find(function(w) { return w.id === selected.wallId; });
+      if (!wall) return '';
+      var o = wall.openings.find(function(o) { return o.id === selected.id; });
+      if (!o) return '';
+      var wallLen = Math.sqrt(Math.pow(wall.end.x - wall.start.x, 2) + Math.pow(wall.end.y - wall.start.y, 2));
+      var maxOffset = Math.round(wallLen - o.width);
+      var h = '<h3>' + (o.type === 'door' ? 'Door' : 'Window') + '</h3>';
+      h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">';
+      h += '<div><label>Offset (cm)</label><input data-opening-field="offset" data-opening-id="' + o.id + '" type="number" min="0" max="' + maxOffset + '" value="' + Math.round(o.offset) + '"></div>';
+      h += '<div><label>Width (cm)</label><input data-opening-field="width" data-opening-id="' + o.id + '" type="number" min="30" max="400" value="' + Math.round(o.width) + '"></div>';
+      h += '</div>';
+      if (o.type === 'door') {
+        h += '<label>Swing</label><select data-opening-field="swingDirection" data-opening-id="' + o.id + '">';
+        h += '<option value="left"' + ((o.properties.swingDirection || 'left') === 'left' ? ' selected' : '') + '>Left</option>';
+        h += '<option value="right"' + (o.properties.swingDirection === 'right' ? ' selected' : '') + '>Right</option>';
+        h += '</select>';
+      }
+      if (o.type === 'window') {
+        h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:4px">';
+        h += '<div><label>Sill (cm)</label><input data-opening-field="sillHeight" data-opening-id="' + o.id + '" type="number" min="0" max="200" value="' + (o.properties.sillHeight || 90) + '"></div>';
+        h += '<div><label>Type</label><select data-opening-field="windowType" data-opening-id="' + o.id + '">';
+        ['single','double','sliding','bay'].forEach(function(wt) {
+          h += '<option value="' + wt + '"' + ((o.properties.windowType || 'double') === wt ? ' selected' : '') + '>' + wt.charAt(0).toUpperCase() + wt.slice(1) + '</option>';
+        });
+        h += '</select></div></div>';
+      }
+      h += '<p style="font-size:11px;color:var(--rs-gray);margin-top:8px">On wall: ' + (wallLen / 100).toFixed(2) + 'm</p>';
+      h += '<br><button id="prop-opening-delete" style="color:#D84200;border:1px solid #D84200;padding:4px 12px;border-radius:4px;background:#fff;cursor:pointer;font-family:inherit">Delete</button>';
+      return h;
     } else if (selected.type === 'furniture') {
       var item = plan.furniture.find(function(f) { return f.id === selected.id; });
       if (!item) return '';
@@ -988,10 +1120,16 @@ export function sketcherHtml(sketchId: string): string {
           sendChange({ type: 'move_wall', wall_id: wall.id, start: { x: sx, y: sy }, end: { x: ex, y: ey } });
         };
       });
-      // Opening delete buttons
-      document.querySelectorAll('[data-remove-opening]').forEach(function(btn) {
-        btn.onclick = function() {
-          sendChange({ type: 'remove_opening', wall_id: wall.id, opening_id: btn.dataset.removeOpening });
+      // Opening list items — click to select the opening
+      document.querySelectorAll('[data-select-opening]').forEach(function(el) {
+        el.onclick = function() {
+          var oId = el.dataset.selectOpening;
+          var wId = el.dataset.selectWall;
+          var o = wall.openings.find(function(o) { return o.id === oId; });
+          selected = { type: 'opening', id: oId, wallId: wId };
+          if (o) setTool(o.type === 'door' ? 'door' : 'window');
+          render();
+          showProperties();
         };
       });
     } else if (selected.type === 'room') {
@@ -1008,6 +1146,29 @@ export function sketcherHtml(sketchId: string): string {
       };
       if (delEl) delEl.onclick = function() {
         sendChange({ type: 'remove_room', room_id: room.id });
+        selected = null;
+        showProperties();
+      };
+    } else if (selected.type === 'opening') {
+      var wall = plan.walls.find(function(w) { return w.id === selected.wallId; });
+      if (!wall) return;
+      // Opening property inputs (shared with wall panel)
+      document.querySelectorAll('[data-opening-field]').forEach(function(el) {
+        el.onchange = function() {
+          var field = el.dataset.openingField;
+          var openingId = el.dataset.openingId;
+          var change = { type: 'update_opening', wall_id: wall.id, opening_id: openingId };
+          if (field === 'offset') change.offset = parseInt(el.value);
+          else if (field === 'width') change.width = parseInt(el.value);
+          else if (field === 'swingDirection') change.properties = { swingDirection: el.value };
+          else if (field === 'sillHeight') change.properties = { sillHeight: parseInt(el.value) };
+          else if (field === 'windowType') change.properties = { windowType: el.value };
+          sendChange(change);
+        };
+      });
+      var delEl = document.getElementById('prop-opening-delete');
+      if (delEl) delEl.onclick = function() {
+        sendChange({ type: 'remove_opening', wall_id: wall.id, opening_id: selected.id });
         selected = null;
         showProperties();
       };
@@ -1113,7 +1274,8 @@ export function sketcherHtml(sketchId: string): string {
       properties: openingType === 'door' ? { swingDirection: 'left' } : {},
     };
     sendChange({ type: 'add_opening', wall_id: wallId, opening: opening });
-    setTool('select');
+    // Select the new opening (stay on current tool for adding more)
+    selected = { type: 'opening', id: id, wallId: wallId };
   }
 
   // --- Pan & zoom (mouse) ---
@@ -1161,10 +1323,11 @@ export function sketcherHtml(sketchId: string): string {
       return;
     }
 
-    // Check if we clicked on a data element (wall, room, furniture)
+    // Check if we clicked on a data element (wall, room, furniture, opening)
     while (el && !el.dataset.id && el !== svg) el = el.parentElement;
     if (el && el.dataset.id) {
       mouseDownTarget = { type: el.dataset.type, id: el.dataset.id };
+      if (el.dataset.wallId) mouseDownTarget.wallId = el.dataset.wallId;
       interactionMode = 'selecting';
       return;
     }
@@ -1199,8 +1362,11 @@ export function sketcherHtml(sketchId: string): string {
           beginEndpointDrag(mouseDownTarget.wallId, mouseDownTarget.endpoint);
           // Alt/Option key = detach mode (don't move connected walls)
           if (e.altKey && dragState) dragState.detached = true;
+        } else if (mouseDownTarget && mouseDownTarget.type === 'furniture' && (tool === 'select' || tool === 'furniture')) {
+          interactionMode = 'dragging_furniture';
+          beginFurnitureDrag(mouseDownTarget.id, e);
         } else {
-          // Not on a handle — fall through to panning
+          // Not on a handle or furniture — fall through to panning
           interactionMode = 'panning';
           panStart = { x: e.clientX, y: e.clientY };
         }
@@ -1213,6 +1379,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
       updateFurnitureRotation(e);
+    }
+
+    if (interactionMode === 'dragging_furniture') {
+      updateFurnitureDrag(e);
     }
 
     if (interactionMode === 'panning') {
@@ -1231,12 +1401,24 @@ export function sketcherHtml(sketchId: string): string {
     if (interactionMode === 'selecting') {
       // Was a click (< 3px movement)
       if (mouseDownTarget && mouseDownTarget.type !== 'handle') {
-        if (tool === 'select' || tool === 'furniture') {
-          selected = { type: mouseDownTarget.type, id: mouseDownTarget.id };
+        if (mouseDownTarget.type === 'opening') {
+          // Clicking an opening always selects it, regardless of tool
+          selected = { type: 'opening', id: mouseDownTarget.id, wallId: mouseDownTarget.wallId };
+          // Switch tool to match opening type
+          var clickedOpening = null;
+          if (plan) {
+            var ow = plan.walls.find(function(w) { return w.id === mouseDownTarget.wallId; });
+            if (ow) clickedOpening = ow.openings.find(function(o) { return o.id === mouseDownTarget.id; });
+          }
+          if (clickedOpening) setTool(clickedOpening.type === 'door' ? 'door' : 'window');
           render();
           showProperties();
         } else if ((tool === 'door' || tool === 'window') && mouseDownTarget.type === 'wall') {
           addOpeningToWall(mouseDownTarget.id, tool, e);
+        } else if (tool === 'select' || tool === 'furniture') {
+          selected = { type: mouseDownTarget.type, id: mouseDownTarget.id };
+          render();
+          showProperties();
         }
       }
     }
@@ -1247,6 +1429,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
       commitFurnitureRotation();
+    }
+
+    if (interactionMode === 'dragging_furniture') {
+      commitFurnitureDrag();
     }
 
     // If we were panning but barely moved, treat as deselect click
@@ -1725,6 +1911,46 @@ export function sketcherHtml(sketchId: string): string {
     var inverse = { type: 'move_furniture', furniture_id: item.id, rotation: mouseDownTarget.originalRotation };
     pushUndo([change], [inverse]);
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(change));
+    render();
+    showProperties();
+  }
+
+  function beginFurnitureDrag(furnitureId, e) {
+    var item = plan.furniture.find(function(f) { return f.id === furnitureId; });
+    if (!item) return;
+    var grabPt = svgPointRaw({ clientX: mouseDownPoint.x, clientY: mouseDownPoint.y });
+    furnitureDragState = {
+      furnitureId: furnitureId,
+      originalPos: { x: item.position.x, y: item.position.y },
+      grabOffset: { x: grabPt.x - item.position.x, y: grabPt.y - item.position.y }
+    };
+  }
+
+  function updateFurnitureDrag(e) {
+    if (!furnitureDragState || !plan) return;
+    var item = plan.furniture.find(function(f) { return f.id === furnitureDragState.furnitureId; });
+    if (!item) return;
+    var rawPt = svgPointRaw(e);
+    // Subtract grab offset so item stays under cursor
+    var x = rawPt.x - furnitureDragState.grabOffset.x;
+    var y = rawPt.y - furnitureDragState.grabOffset.y;
+    // Grid snap (10cm)
+    x = Math.round(x / 10) * 10;
+    y = Math.round(y / 10) * 10;
+    item.position.x = x;
+    item.position.y = y;
+    render();
+  }
+
+  function commitFurnitureDrag() {
+    if (!furnitureDragState || !plan) return;
+    var item = plan.furniture.find(function(f) { return f.id === furnitureDragState.furnitureId; });
+    if (!item) { furnitureDragState = null; return; }
+    var change = { type: 'move_furniture', furniture_id: item.id, position: { x: item.position.x, y: item.position.y } };
+    var inverse = { type: 'move_furniture', furniture_id: item.id, position: { x: furnitureDragState.originalPos.x, y: furnitureDragState.originalPos.y } };
+    pushUndo([change], [inverse]);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(change));
+    furnitureDragState = null;
     render();
     showProperties();
   }

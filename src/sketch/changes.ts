@@ -58,6 +58,22 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
         break;
       }
 
+      case 'update_opening': {
+        const wall = result.walls.find(w => w.id === change.wall_id);
+        if (!wall) break;
+        const opening = wall.openings.find(o => o.id === change.opening_id);
+        if (!opening) break;
+        if (change.offset !== undefined) opening.offset = change.offset;
+        if (change.width !== undefined) opening.width = change.width;
+        if (change.properties) {
+          if (change.properties.swingDirection !== undefined) opening.properties.swingDirection = change.properties.swingDirection;
+          if (change.properties.swingAngle !== undefined) opening.properties.swingAngle = change.properties.swingAngle;
+          if (change.properties.sillHeight !== undefined) opening.properties.sillHeight = change.properties.sillHeight;
+          if (change.properties.windowType !== undefined) opening.properties.windowType = change.properties.windowType;
+        }
+        break;
+      }
+
       case 'add_room': {
         const room = { ...change.room };
         room.area = shoelaceArea(room.polygon);

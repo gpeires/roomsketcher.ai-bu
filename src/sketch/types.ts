@@ -121,6 +121,7 @@ export const ChangeSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('update_wall'), wall_id: z.string(), thickness: z.number().optional(), wall_type: z.enum(['exterior', 'interior', 'divider']).optional() }),
   z.object({ type: z.literal('add_opening'), wall_id: z.string(), opening: OpeningSchema }),
   z.object({ type: z.literal('remove_opening'), wall_id: z.string(), opening_id: z.string() }),
+  z.object({ type: z.literal('update_opening'), wall_id: z.string(), opening_id: z.string(), offset: z.number().optional(), width: z.number().optional(), properties: z.object({ swingDirection: z.enum(['left', 'right']).optional(), swingAngle: z.number().optional(), sillHeight: z.number().optional(), windowType: z.enum(['single', 'double', 'sliding', 'bay']).optional() }).optional() }),
   z.object({ type: z.literal('add_room'), room: RoomSchema }),
   z.object({ type: z.literal('rename_room'), room_id: z.string(), label: z.string(), room_type: RoomTypeSchema.optional() }),
   z.object({ type: z.literal('remove_room'), room_id: z.string() }),
