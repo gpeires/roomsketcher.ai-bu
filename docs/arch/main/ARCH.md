@@ -174,6 +174,7 @@ FloorPlan
 | `add_room` | room object |
 | `rename_room` | room_id, label, room_type? (updates color when type changes) |
 | `remove_room` | room_id |
+| `update_room` | room_id, polygon?, area? |
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
@@ -485,14 +486,70 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
-**Tools:** Select, Wall, Door, Window, Room
-**Features:** Snap-to-grid (15px radius), pan/zoom, keyboard shortcuts (W/S/Delete/Cmd+S/Esc), real-time WebSocket sync, properties panel for selected elements, furniture rendered with architectural symbols
-**State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`
+**Tools:** Select, Wall, Door, Window, Room, Furniture
+**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, room polygon propagation, furniture rotation handles
+**State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `undoStack`, `redoStack`, `interactionMode`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 
-**Client-side change handling:** The SPA implements all 12 change types in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
+**Client-side change handling:** The SPA implements all 13 change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
 
 **URL strategy:** All API calls use relative paths (`/api/sketches/...`, `/ws/...`) for proxy transparency. No hardcoded origins.
+
+### Interaction State Machine
+
+The sketcher uses an `interactionMode` variable to manage input state:
+
+| Mode | Trigger | Behavior |
+|------|---------|----------|
+| `idle` | Default | No active interaction |
+| `selecting` | mousedown on element/handle | Waiting for click vs drag threshold (3px) |
+| `dragging_endpoint` | Drag past threshold on handle | Wall endpoint drag in progress |
+| `rotating_furniture` | Drag on rotation handle | Furniture rotation in progress |
+| `panning` | Drag on empty canvas | ViewBox translation |
+
+### Wall Endpoint Dragging
+
+Drag handles (teal circles, r=6 desktop / r=14 mobile) appear at wall endpoints when a wall is selected. Dragging an endpoint:
+
+1. **Grab offset** — On drag start, stores the offset between cursor position and endpoint position. The endpoint stays under the finger/cursor throughout the drag (no jump on first frame).
+2. **Connected wall auto-follow** — `findConnectedEndpoints()` finds walls sharing a point (1cm threshold). Connected walls move together. Hold Alt/Option to detach and move independently.
+3. **Multi-snap system** — During drag, `computeSnap()` tests snap targets in priority order: endpoint (15px) > perpendicular (10px) > alignment (10px) > midpoint (10px) > grid (always). Snap guide lines render as an SVG overlay.
+4. **Direct DOM update** — During drag, only `setAttribute()` calls on wall `<line>` and handle `<circle>` elements (no full `render()`). WebSocket broadcast throttled to 10fps via `sendWsThrottled()`.
+5. **Commit on mouseup** — `commitEndpointDrag()` builds change + inverse-change arrays for the undo stack, propagates room polygons, clears snap guides, and does a full `render()`.
+
+### Room Polygon Propagation
+
+When wall endpoints move, room polygon vertices must follow. The system uses a two-pass approach:
+
+1. **Delta-based propagation** — Room polygon vertices within `maxWallThickness + 5` cm of the original drag point are moved by the same delta (dx, dy) as the wall endpoint. This preserves the inward offset (room vertices are inset from wall endpoints by half the wall thickness).
+2. **Drift repair** — After delta propagation, a second pass checks every room's polygon vertices against the room's wall endpoints. If any vertex drifted too far from all wall endpoints (e.g., after disconnect/reconnect), it is snapped to the nearest wall endpoint with the proper inward offset direction preserved.
+
+Both passes generate `update_room` changes for the undo stack.
+
+### Undo/Redo System
+
+- Stack-based: `undoStack` and `redoStack` (max 50 entries)
+- Each entry stores `{ changes[], inverseChanges[] }` — a batch of changes that form one logical operation
+- A single endpoint drag affecting N walls + room polygons = 1 undo step
+- Keyboard shortcuts: Cmd+Z (undo), Cmd+Shift+Z (redo)
+- Toolbar buttons on desktop (right side); mobile undo/redo buttons in bottom sheet actions
+- `pushUndo()` clears the redo stack (standard undo/redo behavior)
+
+### Visual Filter Dimming
+
+Each tool mode highlights its relevant layer and dims the rest at 20% opacity with `pointer-events: none`:
+
+| Tool | Highlighted | Dimmed |
+|------|-------------|--------|
+| Select | All | None |
+| Wall | Walls + openings | Rooms, furniture |
+| Door/Window | Walls + openings | Rooms, furniture |
+| Room | Rooms | Walls, furniture |
+| Furniture | Furniture | Walls, rooms |
+
+### Furniture Rotation Handle
+
+Selected furniture shows a "lollipop" rotation handle (teal circle on a stem above the selection). Dragging it rotates the furniture with 15-degree snap increments. Rotation is computed from the angle between cursor and furniture center, quantized to the nearest 15 degrees.
 
 ### Mobile-Responsive Design
 
@@ -634,6 +691,11 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 | Bottom sheet peek = 100px | Includes handle + Save/SVG buttons fully visible above mobile browser chrome |
 | `@cf-wasm/resvg` for rasterization | CF Workers-optimized wrapper handles WASM init pitfalls; adds ~1MB gzip to bundle (total ~1.4MB, under 3MB free tier) |
 | `preview_sketch` as separate tool | Agent chooses when to verify visually; doesn't bloat every generate/update response |
+| Direct DOM updates during drag | `setAttribute()` on wall lines + handle circles avoids full innerHTML rebuild; full `render()` only on mouseup for performance |
+| Grab offset on drag start | Stores cursor-to-endpoint offset at mousedown; prevents handle jump when drawer/sheet changes SVG layout |
+| Delta-based room polygon propagation | Applies drag delta to room vertices (not snap-to-endpoint) to preserve inward thickness offset |
+| Batch undo for multi-wall drags | Single endpoint drag that moves N connected walls + room polygons = 1 undo step |
+| `interactionMode` state machine | Clean separation of click, drag, pan, rotate states; prevents mode conflicts |
 
 ---
 
@@ -645,16 +707,25 @@ When Claude updates a sketch via MCP while a browser has it open, the SketchSync
 ### Floating-point coordinates
 Door positions on vertical walls produce scientific notation coordinates (e.g., `6.12e-15` instead of `0`). Cosmetic only — rendering is correct.
 
+### Window/opening editing limitations
+Windows and doors on walls are rendered and visible, but cannot yet be directly edited (moved, resized, or property-changed) via the browser sketcher UI. Openings can be added by clicking a wall when Door or Window tool is active, and removed via the properties panel delete button, but repositioning or resizing requires MCP `update_sketch` changes.
+
+### Room polygon drift on complex multi-drag sequences
+The delta-based room polygon propagation works well for single drags and undo/redo, but after many successive drags that disconnect and reconnect walls, polygon vertices can accumulate small offsets. The drift repair pass catches most cases but may not handle all edge cases with non-rectangular room geometries.
+
 ---
 
 ## Future Work
 
 These are identified extensions from the original build plan, ready for implementation:
 
-### V2 — Furniture & Annotations
-- **Furniture icons** — current symbols are proportional SVG shapes; future work could add photorealistic or isometric icons; link to RoomSketcher product catalog via `catalogId`; material/color variants per item; drag-and-drop placement in browser sketcher
+### Phase 2 — Furniture Editing & Opening Properties
+- **Furniture drag-and-drop** — drag furniture items to reposition (currently can only rotate via handle); drag from a catalog palette to add new items
+- **Opening CRUD polish** — full property editing for doors/windows (reposition along wall, resize, change swing direction, edit sill height)
+- **Furniture catalog browser** — in-sketcher panel to browse and place furniture by category
 - **Annotations** — dimension lines, text labels, symbols, arrows
 - **Material finishes** — floor/wall/ceiling textures per room
+- **Furniture icons** — photorealistic or isometric alternatives to current proportional SVG shapes; link to RoomSketcher product catalog via `catalogId`; material/color variants
 
 ### V2 — Export & Rendering
 - **PDF export** — high-fidelity PDF via a proper SVG→PDF pipeline (pdf-lib attempted and reverted due to missing path fidelity for door arcs; consider Puppeteer/wkhtmltopdf or client-side jsPDF)
@@ -667,8 +738,8 @@ These are identified extensions from the original build plan, ready for implemen
 - **Sharing** — public/private sketch URLs with access control
 
 ### V2 — Smarter AI
-- **Room detection** — auto-detect rooms from wall topology (currently manual)
-- **Snap improvements** — wall-to-wall snapping, angle constraints (45/90)
+- **Room detection** — auto-detect rooms from wall topology (currently manual polygon definition)
+- **Angle constraints** — constrain wall angles to 45/90 degree increments
 - **AI layout suggestions** — use room type + area to suggest furniture placement
 - **Building code validation** — minimum door widths, egress requirements
 
