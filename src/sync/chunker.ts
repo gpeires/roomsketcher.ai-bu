@@ -1,6 +1,6 @@
 import { htmlToText } from './html-to-text';
 
-const MIN_CHUNK_LENGTH = 5;
+const MIN_CHUNK_LENGTH = 150;
 
 export interface ArticleChunk {
   id: string;

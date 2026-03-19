@@ -21,7 +21,7 @@ describe('chunkArticle', () => {
   });
 
   it('splits by H2 headers', () => {
-    const html = '<h2>Section A</h2><p>Content A</p><h2>Section B</h2><p>Content B here with enough text to pass the minimum length threshold for chunking</p>';
+    const html = '<h2>Section A</h2><p>Content A describes bathroom fixture placement rules including toilet positioning, sink clearance requirements, and shower dimensions that professionals follow when designing residential bathrooms for optimal comfort.</p><h2>Section B</h2><p>Content B covers kitchen layout patterns including the work triangle between stove, sink, and refrigerator, plus counter depth standards and cabinet placement guidelines for efficient meal preparation.</p>';
     const chunks = chunkArticle(100, 'Test Article', html);
     expect(chunks).toHaveLength(2);
     expect(chunks[0].heading).toBe('Section A');
@@ -30,7 +30,7 @@ describe('chunkArticle', () => {
   });
 
   it('splits by H3 headers', () => {
-    const html = '<h3>Sub A</h3><p>Content A is long enough to be a real chunk on its own</p><h3>Sub B</h3><p>Content B is also long enough to be a standalone chunk</p>';
+    const html = '<h3>Sub A</h3><p>Content A describes the minimum clearance requirements for bathroom fixtures including the standard 60cm gap in front of toilets and 70cm clearance at sinks that building codes typically require for residential properties.</p><h3>Sub B</h3><p>Content B covers the recommended aisle widths for galley kitchens and U-shaped layouts, noting that 120cm minimum between parallel counters allows two people to work comfortably without collision.</p>';
     const chunks = chunkArticle(200, 'Test', html);
     expect(chunks).toHaveLength(2);
   });
@@ -43,7 +43,7 @@ describe('chunkArticle', () => {
   });
 
   it('merges short chunks with the next chunk', () => {
-    const html = '<h2>Short</h2><p>Hi</p><h2>Long Section</h2><p>This section has plenty of content to stand on its own as a meaningful knowledge chunk.</p>';
+    const html = '<h2>Short</h2><p>Hi</p><h2>Long Section</h2><p>This section has plenty of content to stand on its own as a meaningful knowledge chunk because it describes detailed bathroom fixture placement rules including minimum clearance distances and proper toilet offset positioning relative to doors.</p>';
     const chunks = chunkArticle(400, 'Test', html);
     expect(chunks).toHaveLength(1); // "Short" merged into "Long Section"
     expect(chunks[0].content).toContain('Hi');
@@ -51,7 +51,7 @@ describe('chunkArticle', () => {
   });
 
   it('deduplicates same-heading by appending index', () => {
-    const html = '<h2>FAQ</h2><p>First FAQ section with enough content to be a real chunk on its own in isolation.</p><h2>FAQ</h2><p>Second FAQ section also with enough content to be its own standalone chunk here.</p>';
+    const html = '<h2>FAQ</h2><p>First FAQ section with enough content to be a real chunk on its own in isolation because it covers bathroom fixture placement rules including toilet positioning and sink clearance requirements for residential bathrooms.</p><h2>FAQ</h2><p>Second FAQ section also with enough content to be its own standalone chunk here because it covers kitchen layout patterns including the work triangle and counter depth standards for efficient cooking.</p>';
     const chunks = chunkArticle(500, 'Test', html);
     // Both should exist with unique IDs
     const ids = chunks.map(c => c.id);
