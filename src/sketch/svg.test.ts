@@ -107,7 +107,7 @@ describe('floorPlanToSvg', () => {
     expect(svg).toContain('viewBox="50 50 500 400"');
   });
 
-  it('renders furniture as labeled rectangles', () => {
+  it('renders furniture as architectural symbols', () => {
     const plan = makePlan({
       walls: [
         { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
@@ -118,8 +118,8 @@ describe('floorPlanToSvg', () => {
     ];
     const svg = floorPlanToSvg(plan);
     expect(svg).toContain('id="furniture"');
-    expect(svg).toContain('Bed');
     expect(svg).toContain('data-id="f1"');
+    expect(svg).toContain('translate(100, 100)');
   });
 
   it('renders furniture between rooms and walls in z-order', () => {

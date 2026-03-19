@@ -1,5 +1,6 @@
 import type { FloorPlan, Wall, Opening, Room, Point } from './types';
 import { shoelaceArea, centroid, boundingBox } from './geometry';
+import { furnitureSymbol } from './furniture-symbols';
 
 function wallLength(wall: Wall): number {
   const dx = wall.end.x - wall.start.x;
@@ -145,10 +146,10 @@ function renderFurniture(furniture: FloorPlan['furniture']): string {
     const transform = item.rotation
       ? ` transform="rotate(${item.rotation}, ${cx}, ${cy})"`
       : '';
-    const rect = `<rect x="${item.position.x}" y="${item.position.y}" width="${item.width}" height="${item.depth}" ` +
-      `fill="#F5F5F5" stroke="#BDBDBD" stroke-width="1"${transform} data-id="${item.id}"/>`;
-    const label = `<text x="${cx}" y="${cy + 4}" text-anchor="middle" font-size="10" font-family="sans-serif" fill="#757575"${transform ? ` transform="rotate(${item.rotation}, ${cx}, ${cy})"` : ''}>${item.label ?? item.type}</text>`;
-    return rect + '\n    ' + label;
+    const inner = furnitureSymbol(item.type, item.width, item.depth);
+    return `<g${transform} data-id="${item.id}">` +
+      `<g transform="translate(${item.position.x}, ${item.position.y})">${inner}</g>` +
+      `</g>`;
   }).join('\n    ');
 }
 
