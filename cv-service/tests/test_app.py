@@ -32,3 +32,31 @@ async def test_analyze_rejects_invalid_image():
             "image": "not-valid-base64!@#$",
         })
     assert resp.status_code == 422 or resp.status_code == 400
+
+
+@pytest.mark.anyio
+async def test_sweep_endpoint(b64_simple_image):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/sweep", json={
+            "image": b64_simple_image,
+            "name": "Sweep Test",
+        })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "image_size" in data
+    assert "strategies" in data
+    assert len(data["strategies"]) == 8
+    # Each strategy has required fields
+    for s in data["strategies"]:
+        assert "strategy" in s
+        assert "time_ms" in s
+        assert "meta" in s
+
+
+@pytest.mark.anyio
+async def test_sweep_rejects_missing_image():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/sweep", json={"name": "No Image"})
+    assert resp.status_code == 400

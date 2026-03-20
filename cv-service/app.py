@@ -5,7 +5,7 @@ import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from cv.pipeline import analyze_image
+from cv.pipeline import analyze_image, sweep_strategies
 
 app = FastAPI(title="Floor Plan CV Service")
 log = logging.getLogger(__name__)
@@ -43,6 +43,26 @@ class AnalyzeResponse(BaseModel):
     adjacency: list[dict] = []
     meta: MetaOutput
 
+class SweepRequest(BaseModel):
+    image: str | None = Field(default=None, description="Base64-encoded PNG/JPG image")
+    image_url: str | None = Field(default=None, description="URL to fetch the image from")
+    name: str = Field(default="Extracted Floor Plan")
+
+class StrategyResultOutput(BaseModel):
+    strategy: str
+    name: str
+    rooms: list[dict] = []
+    openings: list[dict] = []
+    adjacency: list[dict] = []
+    meta: dict = {}
+    debug_binary: str = ""
+    time_ms: int = 0
+    error: str | None = None
+
+class SweepResponse(BaseModel):
+    image_size: tuple[int, int]
+    strategies: list[StrategyResultOutput]
+
 @app.get("/health")
 def health() -> HealthResponse:
     return HealthResponse(status="ok")
@@ -77,3 +97,34 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
         log.exception("CV pipeline failed")
         raise HTTPException(500, f"Analysis failed: {e}")
     return AnalyzeResponse(**result)
+
+@app.post("/sweep")
+def sweep(req: SweepRequest) -> SweepResponse:
+    if req.image:
+        try:
+            raw = base64.b64decode(req.image)
+        except Exception:
+            raise HTTPException(400, "Invalid base64 image data")
+    elif req.image_url:
+        try:
+            resp = httpx.get(req.image_url, follow_redirects=True, timeout=15.0)
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(400, f"Failed to fetch image from URL: {e}")
+        content_type = resp.headers.get("content-type", "")
+        if not content_type.startswith("image/"):
+            raise HTTPException(400, f"URL did not return an image (content-type: {content_type})")
+        raw = resp.content
+    else:
+        raise HTTPException(400, "Provide either 'image' (base64) or 'image_url'")
+
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(400, "Could not decode image (not a valid PNG/JPG)")
+    try:
+        result = sweep_strategies(image, plan_name=req.name)
+    except Exception as e:
+        log.exception("Sweep failed")
+        raise HTTPException(500, f"Sweep failed: {e}")
+    return result
