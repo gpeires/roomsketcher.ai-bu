@@ -18,6 +18,13 @@ class AnalyzeRequest(BaseModel):
     image_url: str | None = Field(default=None, description="URL to fetch the image from")
     name: str = Field(default="Extracted Floor Plan")
 
+class PreprocessingMeta(BaseModel):
+    raw_rooms: int
+    enhanced_rooms: int
+    raw_walls: int
+    enhanced_walls: int
+    strategy_used: str
+
 class MetaOutput(BaseModel):
     image_size: tuple[int, int]
     scale_cm_per_px: float
@@ -25,6 +32,7 @@ class MetaOutput(BaseModel):
     rooms_detected: int
     text_regions: int
     openings_detected: int = 0
+    preprocessing: PreprocessingMeta | None = None
 
 class AnalyzeResponse(BaseModel):
     """Response allows rooms in both rect and polygon formats, and
