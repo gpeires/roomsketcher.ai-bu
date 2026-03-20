@@ -1,7 +1,11 @@
 """Main pipeline: image → SimpleFloorPlanInput JSON."""
+import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
+
 import cv2
 import numpy as np
+
 from cv.preprocess import prepare, find_floor_plan_bbox
 from cv.walls import detect_walls
 from cv.rooms import detect_rooms
@@ -10,6 +14,11 @@ from cv.dimensions import parse_dimension
 from cv.openings import detect_openings
 from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
+import cv.enhance as _enhance_mod
+from cv.enhance import pick_winner
+
+log = logging.getLogger(__name__)
+
 
 def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> dict:
     image = cv2.imread(image_path)
@@ -17,7 +26,50 @@ def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> d
         raise ValueError(f"Could not load image: {image_path}")
     return analyze_image(image, name=name)
 
+
 def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict:
+    """Run raw and enhanced pipelines in parallel, return the better result."""
+
+    def _run_enhanced():
+        try:
+            # .copy() ensures thread safety — raw and enhanced branches
+            # never share the same numpy array in memory
+            enhanced_img = _enhance_mod.enhance(image.copy(), preset="standard")
+            return _run_pipeline(enhanced_img, name)
+        except Exception as e:
+            log.warning(f"Enhancement failed, skipping: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        raw_future = pool.submit(_run_pipeline, image, name)
+        enhanced_future = pool.submit(_run_enhanced)
+
+        raw_result = raw_future.result()
+        enhanced_result = enhanced_future.result()
+
+    if enhanced_result is None:
+        winner, strategy = raw_result, "raw"
+    else:
+        winner, strategy = pick_winner(raw_result, enhanced_result)
+
+    winner["meta"]["preprocessing"] = {
+        "raw_rooms": raw_result["meta"]["rooms_detected"],
+        "enhanced_rooms": enhanced_result["meta"]["rooms_detected"] if enhanced_result else 0,
+        "raw_walls": raw_result["meta"]["walls_detected"],
+        "enhanced_walls": enhanced_result["meta"]["walls_detected"] if enhanced_result else 0,
+        "strategy_used": strategy,
+    }
+    log.info(
+        "Preprocessing: strategy=%s, raw_rooms=%d, enhanced_rooms=%d",
+        strategy,
+        raw_result["meta"]["rooms_detected"],
+        enhanced_result["meta"]["rooms_detected"] if enhanced_result else 0,
+    )
+    return winner
+
+
+def _run_pipeline(image: np.ndarray, name: str) -> dict:
+    """Run the full CV pipeline on a single image. Pure function, no side effects."""
     h, w = image.shape[:2]
     binary = prepare(image)
     fp_bbox = find_floor_plan_bbox(binary)
@@ -44,6 +96,7 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     }
     return result
 
+
 def _calibrate_scale(walls, text_regions, image_shape):
     """Match dimension labels to their nearest parallel wall and compute scale.
 
@@ -61,7 +114,6 @@ def _calibrate_scale(walls, text_regions, image_shape):
             continue
         tx, ty = tr["center"]
         tw, th = tr["bbox"][2], tr["bbox"][3]
-        # Infer label orientation from its bounding box aspect ratio
         label_horizontal = tw >= th
 
         best_wall = None
@@ -71,25 +123,20 @@ def _calibrate_scale(walls, text_regions, image_shape):
             ex, ey = wall["end"]
             wall_horizontal = abs(ey - sy) < abs(ex - sx)
 
-            # Only match parallel walls (horizontal dim → horizontal wall)
             if wall_horizontal != label_horizontal:
                 continue
 
             if wall_horizontal:
-                # Perpendicular distance = vertical distance from text to wall
                 wall_y = (sy + ey) / 2
                 perp_dist = abs(ty - wall_y)
-                # Check text is within the wall's horizontal span (with margin)
                 wall_min_x = min(sx, ex)
                 wall_max_x = max(sx, ex)
                 margin = (wall_max_x - wall_min_x) * 0.2
                 if tx < wall_min_x - margin or tx > wall_max_x + margin:
                     continue
             else:
-                # Perpendicular distance = horizontal distance from text to wall
                 wall_x = (sx + ex) / 2
                 perp_dist = abs(tx - wall_x)
-                # Check text is within the wall's vertical span
                 wall_min_y = min(sy, ey)
                 wall_max_y = max(sy, ey)
                 margin = (wall_max_y - wall_min_y) * 0.2
@@ -100,7 +147,7 @@ def _calibrate_scale(walls, text_regions, image_shape):
                 best_dist = perp_dist
                 best_wall = wall
 
-        max_dist = max(image_shape) * 0.15  # Tighter threshold than before
+        max_dist = max(image_shape) * 0.15
         if best_wall is not None and best_dist < max_dist:
             sx, sy = best_wall["start"]
             ex, ey = best_wall["end"]
