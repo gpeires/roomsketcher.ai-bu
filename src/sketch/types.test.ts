@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { FloorPlanSchema, ChangeSchema } from './types';
+import { FloorPlanSchema, ChangeSchema, SimpleFloorPlanInputSchema } from './types';
 
 describe('FloorPlanSchema', () => {
   it('validates a minimal valid floor plan', () => {
@@ -230,5 +230,69 @@ describe('ChangeSchema', () => {
     const change = { type: 'fly_away' };
     const result = ChangeSchema.safeParse(change);
     expect(result.success).toBe(false);
+  });
+});
+
+describe('SimpleFloorPlanInputSchema', () => {
+  it('accepts a minimal rectangle room', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Kitchen', x: 0, y: 0, width: 300, depth: 250 }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('accepts a polygon room', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Living', polygon: [{ x: 0, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 300 }, { x: 400, y: 300 }, { x: 400, y: 500 }, { x: 0, y: 500 }] }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('accepts openings between rooms', () => {
+    const input = {
+      name: 'Test',
+      rooms: [
+        { label: 'Kitchen', x: 0, y: 0, width: 300, depth: 250 },
+        { label: 'Living', x: 310, y: 0, width: 400, depth: 300 },
+      ],
+      openings: [{ type: 'door', between: ['Kitchen', 'Living'] }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('accepts exterior openings with wall direction', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Kitchen', x: 0, y: 0, width: 300, depth: 250 }],
+      openings: [{ type: 'window', room: 'Kitchen', wall: 'north' }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('accepts room-relative furniture', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Bedroom', x: 0, y: 0, width: 400, depth: 350 }],
+      furniture: [{ type: 'bed-double', room: 'Bedroom', x: 20, y: 20, width: 160, depth: 200 }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('accepts optional type field on room', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Den', type: 'office', x: 0, y: 0, width: 300, depth: 250 }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it('rejects room with neither rect nor polygon', () => {
+    const input = {
+      name: 'Test',
+      rooms: [{ label: 'Bad' }],
+    };
+    expect(SimpleFloorPlanInputSchema.safeParse(input).success).toBe(false);
   });
 });

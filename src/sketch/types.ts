@@ -190,6 +190,66 @@ export const FloorPlanInputSchema = z.object({
 });
 export type FloorPlanInput = z.infer<typeof FloorPlanInputSchema>;
 
+// ─── Room-first input schemas (simple, for LLM-friendly generation) ─────
+
+export const SimpleRectRoomSchema = z.object({
+  label: z.string(),
+  type: RoomTypeSchema.optional(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number().positive(),
+  depth: z.number().positive(),
+  color: z.string().optional(),
+});
+
+export const SimplePolygonRoomSchema = z.object({
+  label: z.string(),
+  type: RoomTypeSchema.optional(),
+  polygon: z.array(PointSchema).min(3),
+  color: z.string().optional(),
+});
+
+export const SimpleRoomInputSchema = z.union([
+  SimpleRectRoomSchema,
+  SimplePolygonRoomSchema,
+]);
+export type SimpleRoomInput = z.infer<typeof SimpleRoomInputSchema>;
+
+export const SimpleOpeningInputSchema = z.object({
+  type: z.enum(['door', 'window', 'opening']),
+  between: z.tuple([z.string(), z.string()]).optional(),
+  room: z.string().optional(),
+  wall: z.enum(['north', 'south', 'east', 'west']).optional(),
+  width: z.number().optional(),
+  position: z.number().min(0).max(1).optional(), // 0-1 along wall, default 0.5
+  properties: z.object({
+    swingDirection: z.enum(['left', 'right']).optional(),
+    windowType: z.enum(['single', 'double', 'sliding', 'bay']).optional(),
+  }).optional(),
+});
+export type SimpleOpeningInput = z.infer<typeof SimpleOpeningInputSchema>;
+
+export const SimpleFurnitureInputSchema = z.object({
+  type: z.string(),
+  room: z.string(),
+  x: z.number(),
+  y: z.number(),
+  width: z.number(),
+  depth: z.number(),
+  rotation: z.number().optional(),
+  label: z.string().optional(),
+});
+export type SimpleFurnitureInput = z.infer<typeof SimpleFurnitureInputSchema>;
+
+export const SimpleFloorPlanInputSchema = z.object({
+  name: z.string(),
+  units: z.enum(['metric', 'imperial']).optional(),
+  rooms: z.array(SimpleRoomInputSchema).min(1),
+  openings: z.array(SimpleOpeningInputSchema).optional(),
+  furniture: z.array(SimpleFurnitureInputSchema).optional(),
+});
+export type SimpleFloorPlanInput = z.infer<typeof SimpleFloorPlanInputSchema>;
+
 // ─── WebSocket protocol ────────────────────────────────────────────────────
 
 export type ClientMessage =
