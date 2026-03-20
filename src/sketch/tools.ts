@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
-import { FloorPlanInputSchema, ChangeSchema } from './types';
+import { FloorPlanInputSchema, SimpleFloorPlanInputSchema, ChangeSchema } from './types';
 import type { FloorPlan, Change } from './types';
+import { compileLayout } from './compile-layout';
 import { floorPlanToSvg } from './svg';
 import { shoelaceArea, pointInPolygon, totalArea } from './geometry';
 import { loadSketch, saveSketch } from './persistence';
@@ -61,15 +62,22 @@ export async function handleGenerateFloorPlan(
   plan: unknown,
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  // Phase 1: Validate against relaxed input schema
-  const parsed = FloorPlanInputSchema.safeParse(plan);
-  if (!parsed.success) {
-    const errors = parsed.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('\n');
-    return { content: [{ type: 'text' as const, text: `Invalid floor plan:\n${errors}` }] };
-  }
+  let floorPlan: FloorPlan;
 
-  // Phase 2: Apply defaults → strict FloorPlan
-  const floorPlan = applyDefaults(parsed.data);
+  // Try full schema first (more specific — has version, walls, etc.)
+  const fullResult = FloorPlanInputSchema.safeParse(plan);
+  if (fullResult.success) {
+    floorPlan = applyDefaults(fullResult.data);
+  } else {
+    // Try room-first simple schema
+    const simpleResult = SimpleFloorPlanInputSchema.safeParse(plan);
+    if (simpleResult.success) {
+      floorPlan = compileLayout(simpleResult.data);
+    } else {
+      const errors = fullResult.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('\n');
+      return { content: [{ type: 'text' as const, text: `Invalid floor plan:\n${errors}` }] };
+    }
+  }
 
   // Assign ID + timestamps
   floorPlan.id = nanoid();

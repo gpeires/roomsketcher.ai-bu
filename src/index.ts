@@ -9,7 +9,7 @@ import { listArticles, getArticle, getArticleByUrl } from './tools/articles';
 import { searchDesignKnowledge, logInsight } from './tools/knowledge';
 import { syncFromZendesk } from './sync/ingest';
 import type { Env, SketchSession, SessionCTAState } from './types';
-import { FloorPlanSchema, FloorPlanInputSchema, ChangeSchema } from './sketch/types';
+import { FloorPlanSchema, SimpleFloorPlanInputSchema, ChangeSchema } from './sketch/types';
 import type { FloorPlan } from './sketch/types';
 import { totalArea } from './sketch/geometry';
 import type { ClientMessage, Change } from './sketch/types';
@@ -405,7 +405,7 @@ The system fills defaults for wall thickness, height, room colors, canvas size, 
 VISUAL FEEDBACK LOOP (required):
 After generating, call preview_sketch to verify. Check for overlapping walls, misplaced furniture, missing doors/windows, rooms that look wrong. Fix with update_sketch and preview again. Do NOT show the user a plan you haven't visually verified. Max 3 iterations.`,
         inputSchema: {
-          plan: FloorPlanInputSchema.describe('The complete FloorPlan JSON object'),
+          plan: SimpleFloorPlanInputSchema.describe('Room-first floor plan input (recommended). Also accepts full FloorPlanInput with version/walls/rooms.'),
         },
       },
       async ({ plan }) => {
