@@ -20,13 +20,13 @@ export const ROOM_COLORS: Record<string, string> = {
   other: '#FAFAFA',
 };
 
-const WALL_THICKNESS: Record<string, number> = {
+export const WALL_THICKNESS: Record<string, number> = {
   exterior: 20,
   interior: 10,
   divider: 5,
 };
 
-const DEFAULT_HEIGHT = 250;
+export const DEFAULT_HEIGHT = 250;
 
 export function applyDefaults(input: FloorPlanInput): FloorPlan {
   const now = new Date().toISOString();

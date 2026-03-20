@@ -3,14 +3,11 @@ import type {
   FloorPlan, Wall, Room, Point, FurnitureItem, Opening,
   SimpleFloorPlanInput, SimpleRoomInput, RoomType,
 } from './types';
-import { ROOM_COLORS } from './defaults';
-import { shoelaceArea } from './geometry';
+import { ROOM_COLORS, WALL_THICKNESS, DEFAULT_HEIGHT } from './defaults';
+import { shoelaceArea, boundingBox, wallLength } from './geometry';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const EXTERIOR_THICKNESS = 20;
-const INTERIOR_THICKNESS = 10;
-const WALL_HEIGHT = 250;
 const SNAP_GRID = 10;
 const SNAP_TOLERANCE = 20;
 
@@ -124,13 +121,13 @@ function getRoomEdges(rect: Rect, idx: number): Edge[] {
 
 // ─── Shared edge detection ─────────────────────────────────────────────────
 
-function findSharedEdges(rects: Rect[]): SharedEdge[] {
+function findSharedEdges(rects: Rect[], allEdges: Edge[][]): SharedEdge[] {
   const shared: SharedEdge[] = [];
 
   for (let i = 0; i < rects.length; i++) {
-    const edgesI = getRoomEdges(rects[i], i);
+    const edgesI = allEdges[i];
     for (let j = i + 1; j < rects.length; j++) {
-      const edgesJ = getRoomEdges(rects[j], j);
+      const edgesJ = allEdges[j];
 
       for (const ei of edgesI) {
         for (const ej of edgesJ) {
@@ -179,18 +176,11 @@ function makeWall(
     id: nanoid(),
     start,
     end,
-    thickness: type === 'exterior' ? EXTERIOR_THICKNESS : type === 'interior' ? INTERIOR_THICKNESS : 5,
-    height: WALL_HEIGHT,
+    thickness: WALL_THICKNESS[type] ?? 10,
+    height: DEFAULT_HEIGHT,
     type,
     openings: [],
   };
-}
-
-interface WallSegment {
-  axis: 'x' | 'y';
-  pos: number;
-  start: number;
-  end: number;
 }
 
 function subtractSegments(
@@ -213,7 +203,7 @@ function subtractSegments(
   return result;
 }
 
-function generateWalls(rects: Rect[], sharedEdges: SharedEdge[]): Wall[] {
+function generateWalls(rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[][]): Wall[] {
   const walls: Wall[] = [];
 
   // Interior walls from shared edges
@@ -233,7 +223,7 @@ function generateWalls(rects: Rect[], sharedEdges: SharedEdge[]): Wall[] {
 
   // Exterior walls: each room edge minus shared edge coverage
   for (let i = 0; i < rects.length; i++) {
-    const edges = getRoomEdges(rects[i], i);
+    const edges = allEdges[i];
     for (const edge of edges) {
       // Find shared edges that cover parts of this edge
       const coveredHoles: { start: number; end: number }[] = [];
@@ -297,17 +287,12 @@ function generateRoom(rect: Rect, input: SimpleRoomInput): Room {
 
 // ─── Opening placement ─────────────────────────────────────────────────────
 
-function wallLength(wall: Wall): number {
-  const dx = wall.end.x - wall.start.x;
-  const dy = wall.end.y - wall.start.y;
-  return Math.sqrt(dx * dx + dy * dy);
-}
-
 function placeOpenings(
   walls: Wall[],
   openings: SimpleFloorPlanInput['openings'],
   rects: Rect[],
   sharedEdges: SharedEdge[],
+  rectByLabel: Map<string, number>,
 ): void {
   if (!openings) return;
 
@@ -320,8 +305,8 @@ function placeOpenings(
     if (o.between) {
       // Find interior wall between two rooms
       const [labelA, labelB] = o.between;
-      const idxA = rects.findIndex(r => r.label === labelA);
-      const idxB = rects.findIndex(r => r.label === labelB);
+      const idxA = rectByLabel.get(labelA) ?? -1;
+      const idxB = rectByLabel.get(labelB) ?? -1;
       if (idxA < 0 || idxB < 0) continue;
 
       // Find the shared edge
@@ -344,7 +329,7 @@ function placeOpenings(
       });
     } else if (o.room && o.wall) {
       // Find exterior wall on the given side of the room
-      const rectIdx = rects.findIndex(r => r.label === o.room);
+      const rectIdx = rectByLabel.get(o.room) ?? -1;
       if (rectIdx < 0) continue;
       const rect = rects[rectIdx];
 
@@ -394,11 +379,13 @@ function placeOpenings(
 function convertFurniture(
   furniture: SimpleFloorPlanInput['furniture'],
   rects: Rect[],
+  rectByLabel: Map<string, number>,
 ): FurnitureItem[] {
   if (!furniture) return [];
 
   return furniture.map(f => {
-    const rect = rects.find(r => r.label === f.room);
+    const idx = rectByLabel.get(f.room);
+    const rect = idx !== undefined ? rects[idx] : undefined;
     const roomX = rect?.x ?? 0;
     const roomY = rect?.y ?? 0;
 
@@ -419,45 +406,36 @@ function convertFurniture(
 export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
   // 1. Snap & normalize rooms
   const rects = input.rooms.map(r => roomToRect(r));
+  const allEdges = rects.map((r, i) => getRoomEdges(r, i));
+  const rectByLabel = new Map(rects.map((r, i) => [r.label, i]));
 
   // 2. Find shared edges
-  const sharedEdges = findSharedEdges(rects);
+  const sharedEdges = findSharedEdges(rects, allEdges);
 
   // 3. Generate walls
-  const walls = generateWalls(rects, sharedEdges);
+  const walls = generateWalls(rects, sharedEdges, allEdges);
 
   // 4. Generate room polygons
   const rooms = rects.map((rect, i) => generateRoom(rect, input.rooms[i]));
 
   // 5. Place openings
-  placeOpenings(walls, input.openings, rects, sharedEdges);
+  placeOpenings(walls, input.openings, rects, sharedEdges, rectByLabel);
 
   // 6. Convert furniture
-  const furniture = convertFurniture(input.furniture, rects);
+  const furniture = convertFurniture(input.furniture, rects, rectByLabel);
 
   // 7. Compute canvas from bounding box
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const w of walls) {
-    for (const p of [w.start, w.end]) {
-      if (p.x < minX) minX = p.x;
-      if (p.y < minY) minY = p.y;
-      if (p.x > maxX) maxX = p.x;
-      if (p.y > maxY) maxY = p.y;
-    }
-  }
-  if (!isFinite(minX)) { minX = 0; minY = 0; maxX = 400; maxY = 400; }
+  const bb = boundingBox(walls);
   const pad = 100;
-
-  const now = new Date().toISOString();
 
   return {
     version: 1,
-    id: nanoid(),
+    id: '',
     name: input.name,
     units: input.units ?? 'metric',
     canvas: {
-      width: Math.max(maxX - minX + pad * 2, 400),
-      height: Math.max(maxY - minY + pad * 2, 400),
+      width: Math.max(bb.maxX - bb.minX + pad * 2, 400),
+      height: Math.max(bb.maxY - bb.minY + pad * 2, 400),
       gridSize: 10,
     },
     walls,
@@ -465,8 +443,8 @@ export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
     furniture,
     annotations: [],
     metadata: {
-      created_at: now,
-      updated_at: now,
+      created_at: '',
+      updated_at: '',
       source: 'ai',
     },
   };

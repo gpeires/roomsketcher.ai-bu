@@ -1,6 +1,15 @@
 import type { Point, Wall, Room } from './types';
 
 /**
+ * Euclidean length of a wall segment.
+ */
+export function wallLength(wall: Wall): number {
+  const dx = wall.end.x - wall.start.x;
+  const dy = wall.end.y - wall.start.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
  * Shoelace formula for polygon area.
  * Input: polygon vertices in cm. Output: area in m².
  */

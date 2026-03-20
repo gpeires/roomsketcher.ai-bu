@@ -1,12 +1,6 @@
 import type { FloorPlan, Wall, Opening, Room, Point } from './types';
-import { shoelaceArea, centroid, boundingBox } from './geometry';
+import { shoelaceArea, centroid, boundingBox, wallLength } from './geometry';
 import { furnitureSymbol } from './furniture-symbols';
-
-function wallLength(wall: Wall): number {
-  const dx = wall.end.x - wall.start.x;
-  const dy = wall.end.y - wall.start.y;
-  return Math.sqrt(dx * dx + dy * dy);
-}
 
 function wallAngle(wall: Wall): number {
   return Math.atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x);
