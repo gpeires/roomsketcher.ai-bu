@@ -65,6 +65,45 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 
 ---
 
+## Development
+
+### Commands
+
+```bash
+# Worker (Cloudflare)
+npm run dev                    # Local dev server (wrangler dev)
+npm test                       # Run vitest tests
+bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
+
+# DB migrations
+npm run db:migrate             # Apply schema locally
+npm run db:migrate:remote      # Apply schema to production D1
+
+# CV service (Hetzner)
+cd cv-service && pytest        # Run CV pipeline tests
+cd cv-service && docker compose up --build   # Run locally
+bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
+```
+
+### Deploy rules
+
+- **Always use `bash deploy.sh`** for the Worker — it loads `.env` credentials, ensures the D1 database exists, runs schema migrations, deploys, triggers a Zendesk sync, and runs a health check. Running `wrangler deploy` directly will fail (no `CLOUDFLARE_API_TOKEN` in shell).
+- **CV service:** `bash cv-service/deploy-hetzner.sh <ip>` — rsyncs code, builds Docker image on server, restarts container, verifies health.
+
+### Environment
+
+The `.env` file (not committed) must contain:
+```
+CLOUDFLARE_API_TOKEN=...
+CLOUDFLARE_ACCOUNT_ID=...
+```
+
+`wrangler.toml` contains non-secret config:
+- `WORKER_URL` — public domain (`https://roomsketcher.kworq.com`)
+- `CV_SERVICE_URL` — CV service endpoint (`http://cv.kworq.com:8100`)
+
+---
+
 ## File Structure
 
 ```
