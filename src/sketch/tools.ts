@@ -369,7 +369,12 @@ export async function handlePreviewSketch(
 
   const svg = floorPlanToSvg(plan);
   const pngBytes = await svgToPng(svg, 1200);
-  const base64 = Buffer.from(pngBytes).toString('base64');
+  const pngArr = new Uint8Array(pngBytes);
+  const pngChunks: string[] = [];
+  for (let i = 0; i < pngArr.length; i += 8192) {
+    pngChunks.push(String.fromCharCode(...pngArr.subarray(i, i + 8192)));
+  }
+  const base64 = btoa(pngChunks.join(''));
 
   const text = [
     `**${plan.name}** preview`,
@@ -383,4 +388,82 @@ export async function handlePreviewSketch(
       { type: 'text' as const, text },
     ],
   };
+}
+
+export async function handleAnalyzeImage(
+  input: { image?: string; image_url?: string },
+  name: string,
+  cvServiceUrl: string,
+): Promise<ToolResult> {
+  if (!input.image && !input.image_url) {
+    return { content: [{ type: 'text' as const, text: 'Provide either image (base64) or image_url.' }] };
+  }
+
+  // Fetch the source image so we can return it as a visual content block
+  let imageBase64: string | undefined;
+  let imageMime: 'image/png' | 'image/jpeg' = 'image/png';
+  if (input.image) {
+    imageBase64 = input.image;
+  } else if (input.image_url) {
+    try {
+      const imgResp = await fetch(input.image_url, { signal: AbortSignal.timeout(15_000) });
+      if (imgResp.ok) {
+        const ct = imgResp.headers.get('content-type') || '';
+        imageMime = ct.includes('jpeg') || ct.includes('jpg') ? 'image/jpeg' as const : 'image/png' as const;
+        const buf = await imgResp.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const chunks: string[] = [];
+        for (let i = 0; i < bytes.length; i += 8192) {
+          chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+        }
+        imageBase64 = btoa(chunks.join(''));
+      }
+    } catch { /* non-fatal — we'll still return the CV results */ }
+  }
+
+  // Pass through to CV service — it handles URL fetching directly
+  const body: Record<string, string> = { name };
+  if (input.image) {
+    body.image = input.image;
+  } else {
+    body.image_url = input.image_url!;
+  }
+
+  const resp = await fetch(`${cvServiceUrl}/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    return { content: [{ type: 'text' as const, text: `CV analysis failed: ${err}` }] };
+  }
+
+  const result = await resp.json() as {
+    name: string;
+    rooms: Array<{ label: string; x: number; y: number; width: number; depth: number }>;
+    meta: { walls_detected: number; rooms_detected: number; text_regions: number; scale_cm_per_px: number };
+  };
+
+  const summary = [
+    `**CV Analysis Complete** — ${result.rooms.length} rooms detected`,
+    `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px`,
+    `Walls: ${result.meta.walls_detected}, Text regions: ${result.meta.text_regions}`,
+    '',
+    '```json',
+    JSON.stringify(result, null, 2),
+    '```',
+    '',
+    'Review the source image above against the CV output. Fix any misdetected labels or dimensions before passing to generate_floor_plan.',
+  ].join('\n');
+
+  const content: ContentBlock[] = [];
+  if (imageBase64) {
+    content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
+  }
+  content.push({ type: 'text' as const, text: summary });
+
+  return { content };
 }

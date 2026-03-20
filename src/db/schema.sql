@@ -150,3 +150,11 @@ CREATE TRIGGER IF NOT EXISTS agent_insights_au AFTER UPDATE ON agent_insights BE
   INSERT INTO agent_insights_fts(rowid, content, context)
   VALUES (new.id, new.content, COALESCE(new.context, ''));
 END;
+
+-- Temporary image uploads for CV analysis
+CREATE TABLE IF NOT EXISTS uploaded_images (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  content_type TEXT NOT NULL DEFAULT 'image/png',
+  created_at TEXT DEFAULT (datetime('now'))
+);

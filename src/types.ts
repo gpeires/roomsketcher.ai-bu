@@ -101,6 +101,7 @@ export interface Env {
   SKETCH_SYNC: DurableObjectNamespace;
   WORKER_URL: string;
   CTA_VARIANT?: string;
+  CV_SERVICE_URL?: string;
 }
 
 import type { FloorPlan } from './sketch/types';

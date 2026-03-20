@@ -13,7 +13,7 @@ import { FloorPlanSchema, SimpleFloorPlanInputSchema, ChangeSchema } from './ske
 import type { FloorPlan } from './sketch/types';
 import { totalArea } from './sketch/geometry';
 import type { ClientMessage, Change } from './sketch/types';
-import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch, handlePreviewSketch } from './sketch/tools';
+import { handleGenerateFloorPlan, handleGetSketch, handleOpenSketcher, handleUpdateSketch, handleSuggestImprovements, handleExportSketch, handlePreviewSketch, handleAnalyzeImage } from './sketch/tools';
 import type { ToolContext } from './sketch/tools';
 import { cleanupExpiredSketches, loadSketch, saveSketch } from './sketch/persistence';
 import { applyChanges } from './sketch/changes';
@@ -21,6 +21,7 @@ import { floorPlanToSvg } from './sketch/svg';
 import { sketcherHtml } from './sketcher/html';
 import { setupHtml } from './setup/html';
 import { homeHtml } from './setup/home';
+import { uploadHtml } from './setup/upload';
 import studioTpl from './sketch/templates/studio.json';
 import onebrTpl from './sketch/templates/1br-apartment.json';
 import twobrTpl from './sketch/templates/2br-apartment.json';
@@ -341,16 +342,11 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-Step 1 — EXTRACT DIMENSIONS:
-Read every dimension label. Convert to cm (ft×30.48, in×2.54). List each room with label, width, depth. Derive missing dimensions by subtraction from the overall footprint or by calibrating from a known object (door=80cm, toilet=40cm). Write your dimension table ONCE — do NOT recalculate.
+Step 1 — ANALYZE IMAGE:
+Call analyze_floor_plan_image with image_url (preferred) or image (base64). Just pass the URL directly — the CV service fetches it server-side. If the user uploaded an image, use the /api/images/ URL returned by the upload page. The CV service extracts room geometries, labels, and dimensions automatically. Review the returned JSON — fix any misdetected labels or dimensions before proceeding.
 
-Step 2 — POSITION ROOMS:
-Place rooms as rectangles with {label, x, y, width, depth}. Start the first room at x=0, y=0. Place adjacent rooms by adding width (horizontal neighbor) or depth (vertical neighbor). Rooms that touch at the same coordinate get an interior wall automatically. No gaps needed — the system handles wall thickness.
-
-Rules:
-- Open-plan spaces (kitchen/living/dining with no wall) = ONE room, not separate rooms
-- L-shaped rooms: use polygon override instead of x/y/width/depth
-- Round to nearest 10cm. Do NOT recalculate if numbers don't sum perfectly.
+Step 2 — REVIEW & ADJUST:
+Check the CV output against the source image. Fix room labels, merge rooms that should be open-plan (kitchen/living/dining with no wall = ONE room), adjust dimensions if the CV missed scale markers. Round to nearest 10cm.
 
 Step 3 — ADD OPENINGS:
 Use {type, between: [room1, room2]} for interior doors. Use {type, room, wall: "north"|"south"|"east"|"west"} for exterior doors/windows. Default position is centered; set position: 0.0-1.0 to shift along the wall.
@@ -359,7 +355,7 @@ Step 4 — ADD FURNITURE:
 Positions are RELATIVE to the room's top-left corner: {type, room: "Bedroom", x: 20, y: 30, width, depth}. Place ONLY furniture visible in the reference image.
 
 Step 5 — GENERATE:
-Call generate_floor_plan with {name, rooms, openings, furniture}. The system generates all walls, room polygons, colors, and canvas automatically. Then call preview_sketch to verify.
+Call generate_floor_plan with the adjusted rooms, openings, and furniture. The system generates all walls, room polygons, colors, and canvas automatically. Then call preview_sketch to verify.
 
 WORKED EXAMPLE — 2 rooms side by side:
 Input: {name: "Test", rooms: [{label: "Kitchen", x: 0, y: 0, width: 300, depth: 250}, {label: "Living", x: 300, y: 0, width: 400, depth: 300}], openings: [{type: "door", between: ["Kitchen", "Living"]}, {type: "window", room: "Kitchen", wall: "north"}]}
@@ -459,6 +455,22 @@ After generating, call preview_sketch to verify. Check for overlapping walls, mi
       },
       async ({ sketch_id }) => {
         return handleOpenSketcher(sketch_id, this.getWorkerUrl());
+      },
+    );
+
+    this.server.registerTool(
+      'analyze_floor_plan_image',
+      {
+        description: 'Analyze a floor plan image using computer vision to extract room geometries. Returns structured JSON with room positions, dimensions, and labels that can be passed to generate_floor_plan. Use this BEFORE generate_floor_plan when the user provides a floor plan image to copy. Pass image_url directly — the CV service fetches it server-side (no need to download or convert the image yourself). Alternatively pass image as base64.',
+        inputSchema: {
+          image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG)'),
+          image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
+          name: z.string().optional().describe('Name for the floor plan'),
+        },
+      },
+      async ({ image, image_url, name }) => {
+        const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
+        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl);
       },
     );
 
@@ -786,6 +798,46 @@ export default {
     if (url.pathname === '/setup') {
       const workerUrl = env.WORKER_URL || url.origin;
       return new Response(setupHtml(`${workerUrl}/mcp`), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // Upload page — use actual origin so fetch stays same-origin
+    if (url.pathname === '/upload') {
+      return new Response(uploadHtml(url.origin), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // Upload image API — stores temporarily for CV analysis
+    if (url.pathname === '/api/upload-image' && request.method === 'POST') {
+      const contentType = request.headers.get('Content-Type') || '';
+      if (contentType !== 'image/png' && contentType !== 'image/jpeg') {
+        return Response.json({ error: 'Content-Type must be image/png or image/jpeg' }, { status: 400 });
+      }
+      const buf = await request.arrayBuffer();
+      if (buf.byteLength > 10 * 1024 * 1024) {
+        return Response.json({ error: 'Image too large (max 10 MB)' }, { status: 413 });
+      }
+      const id = crypto.randomUUID();
+      const bytes = new Uint8Array(buf);
+      const chunks: string[] = [];
+      for (let i = 0; i < bytes.length; i += 8192) {
+        chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+      }
+      const base64 = btoa(chunks.join(''));
+      await env.DB.prepare(
+        'INSERT INTO uploaded_images (id, data, content_type, created_at) VALUES (?, ?, ?, ?)'
+      ).bind(id, base64, contentType, new Date().toISOString()).run();
+      const imageUrl = `${url.origin}/api/images/${id}`;
+      return Response.json({ url: imageUrl, id });
+    }
+
+    // Serve uploaded image
+    const imgMatch = url.pathname.match(/^\/api\/images\/([A-Za-z0-9_-]+)$/);
+    if (imgMatch && request.method === 'GET') {
+      const row = await env.DB.prepare('SELECT data, content_type FROM uploaded_images WHERE id = ?').bind(imgMatch[1]).first<{ data: string; content_type: string }>();
+      if (!row) return Response.json({ error: 'Not found' }, { status: 404 });
+      const bytes = Uint8Array.from(atob(row.data), c => c.charCodeAt(0));
+      return new Response(bytes, {
+        headers: { 'Content-Type': row.content_type, 'Cache-Control': 'public, max-age=3600' },
+      });
     }
 
     // Health check

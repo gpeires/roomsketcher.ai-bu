@@ -5,6 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 WORKER_URL = "https://roomsketcher.kworq.com"
+CV_SERVICE_URL = "http://cv.kworq.com:8100"
 
 [triggers]
 crons = ["0 */6 * * *"]
