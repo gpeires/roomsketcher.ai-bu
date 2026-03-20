@@ -18,24 +18,21 @@ class AnalyzeRequest(BaseModel):
     image_url: str | None = Field(default=None, description="URL to fetch the image from")
     name: str = Field(default="Extracted Floor Plan")
 
-class RoomOutput(BaseModel):
-    label: str
-    x: int
-    y: int
-    width: int
-    depth: int
-
 class MetaOutput(BaseModel):
     image_size: tuple[int, int]
     scale_cm_per_px: float
     walls_detected: int
     rooms_detected: int
     text_regions: int
+    openings_detected: int = 0
 
 class AnalyzeResponse(BaseModel):
+    """Response allows rooms in both rect and polygon formats, and
+    includes detected openings and adjacency data."""
     name: str
-    rooms: list[RoomOutput]
+    rooms: list[dict]
     openings: list[dict] = []
+    adjacency: list[dict] = []
     meta: MetaOutput
 
 @app.get("/health")

@@ -20,6 +20,16 @@ _DIM_LIKE = re.compile(
 )
 
 
+def _to_cm_grid(px: float, scale: float, grid: int = 10) -> int:
+    """Convert pixel value to cm, rounded to nearest grid step."""
+    return round(px * scale / grid) * grid
+
+
+def _room_label(rooms: list[dict], idx: int) -> str:
+    """Get room label by index with fallback to 'Room N'."""
+    return rooms[idx].get("label", f"Room {idx + 1}")
+
+
 def build_floor_plan_input(
     rooms: list[dict],
     text_regions: list[dict],
@@ -27,6 +37,8 @@ def build_floor_plan_input(
     scale_cm_per_px: float,
     name: str = "Extracted Floor Plan",
     floor_plan_bbox: tuple[int, int, int, int] | None = None,
+    openings: list[dict] | None = None,
+    adjacency: list[dict] | None = None,
 ) -> dict:
     labels = []
     for tr in text_regions:
@@ -49,18 +61,137 @@ def build_floor_plan_input(
 
     labeled_rooms = _assign_labels(rooms, labels)
 
+    # Normalize coordinates relative to the floor plan bounding box origin
+    # so that rooms start near (0,0) instead of at arbitrary image offsets.
+    origin_x = floor_plan_bbox[0] if floor_plan_bbox else 0
+    origin_y = floor_plan_bbox[1] if floor_plan_bbox else 0
+
     output_rooms = []
     for room in labeled_rooms:
         bx, by, bw, bh = room["bbox"]
-        output_rooms.append({
-            "label": room.get("label", f"Room {len(output_rooms) + 1}"),
-            "x": round(bx * scale_cm_per_px / 10) * 10,
-            "y": round(by * scale_cm_per_px / 10) * 10,
-            "width": round(bw * scale_cm_per_px / 10) * 10,
-            "depth": round(bh * scale_cm_per_px / 10) * 10,
-        })
+        label = room.get("label", f"Room {len(output_rooms) + 1}")
+        polygon = room.get("polygon", [])
 
-    return {"name": name, "rooms": output_rooms}
+        # Decide whether to use polygon or rect format.
+        # If the room's actual pixel area is significantly less than its
+        # bounding box area, it's non-rectangular (L-shape, etc.).
+        bbox_area = max(bw * bh, 1)
+        is_non_rect = len(polygon) > 4 and room["area_px"] / bbox_area < 0.85
+
+        if is_non_rect and polygon:
+            # Emit polygon format, normalized to origin
+            scaled_poly = [
+                {"x": _to_cm_grid(px - origin_x, scale_cm_per_px),
+                 "y": _to_cm_grid(py - origin_y, scale_cm_per_px)}
+                for px, py in polygon
+            ]
+            output_rooms.append({"label": label, "polygon": scaled_poly})
+        else:
+            # Emit standard rect format
+            output_rooms.append({
+                "label": label,
+                "x": _to_cm_grid(bx - origin_x, scale_cm_per_px),
+                "y": _to_cm_grid(by - origin_y, scale_cm_per_px),
+                "width": _to_cm_grid(bw, scale_cm_per_px),
+                "depth": _to_cm_grid(bh, scale_cm_per_px),
+            })
+
+    output_openings = _convert_openings(
+        openings or [], labeled_rooms, scale_cm_per_px
+    )
+
+    result = {"name": name, "rooms": output_rooms}
+    if output_openings:
+        result["openings"] = output_openings
+    if adjacency:
+        result["adjacency"] = _convert_adjacency(
+            adjacency, labeled_rooms, scale_cm_per_px
+        )
+    return result
+
+
+def _convert_openings(
+    openings: list[dict],
+    labeled_rooms: list[dict],
+    scale_cm_per_px: float,
+) -> list[dict]:
+    """Convert detected openings to SimpleOpeningInput format."""
+    output = []
+    for o in openings:
+        width_cm = max(60, min(_to_cm_grid(o["width_px"], scale_cm_per_px), 250))
+
+        if o["type"] == "door":
+            room_a = o.get("room_a_idx")
+            room_b = o.get("room_b_idx")
+            if room_a is not None and room_b is not None:
+                output.append({
+                    "type": "door",
+                    "between": [_room_label(labeled_rooms, room_a),
+                                _room_label(labeled_rooms, room_b)],
+                    "width": width_cm,
+                })
+            elif room_a is not None:
+                wall_side = _opening_wall_side(o, labeled_rooms[room_a])
+                if wall_side:
+                    output.append({
+                        "type": "door",
+                        "room": _room_label(labeled_rooms, room_a),
+                        "wall": wall_side,
+                        "width": width_cm,
+                    })
+        elif o["type"] == "window":
+            room_idx = o.get("room_a_idx")
+            if room_idx is not None:
+                wall_side = _opening_wall_side(o, labeled_rooms[room_idx])
+                if wall_side:
+                    output.append({
+                        "type": "window",
+                        "room": _room_label(labeled_rooms, room_idx),
+                        "wall": wall_side,
+                        "width": width_cm,
+                    })
+    return output
+
+
+def _opening_wall_side(opening: dict, room: dict) -> str | None:
+    """Determine which wall side (north/south/east/west) an opening is on."""
+    ox, oy = opening["position_px"]
+    bx, by, bw, bh = room["bbox"]
+    cx, cy = bx + bw // 2, by + bh // 2
+
+    if opening["orientation"] == "horizontal":
+        # Opening is on a horizontal wall — north or south
+        if oy < cy:
+            return "north"
+        else:
+            return "south"
+    else:
+        # Opening is on a vertical wall — east or west
+        if ox < cx:
+            return "west"
+        else:
+            return "east"
+
+
+def _convert_adjacency(
+    adjacency: list[dict],
+    labeled_rooms: list[dict],
+    scale_cm_per_px: float,
+) -> list[dict]:
+    """Convert adjacency data to output format with room labels."""
+    output = []
+    for adj in adjacency:
+        a = adj["room_a_idx"]
+        b = adj["room_b_idx"]
+        if a >= len(labeled_rooms) or b >= len(labeled_rooms):
+            continue
+        length_cm = _to_cm_grid(adj["shared_length_px"], scale_cm_per_px)
+        output.append({
+            "rooms": [_room_label(labeled_rooms, a), _room_label(labeled_rooms, b)],
+            "shared_edge": adj["orientation"],
+            "length_cm": length_cm,
+        })
+    return output
 
 
 def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:

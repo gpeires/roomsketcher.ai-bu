@@ -159,17 +159,27 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 ├── app.py                      # FastAPI entry — /health, /analyze endpoints
 ├── cv/
 │   ├── __init__.py
-│   ├── pipeline.py             # Orchestrator — image → rooms/walls/text → output JSON
+│   ├── pipeline.py             # Orchestrator — image → rooms/walls/text/openings/topology → output
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
 │   ├── walls.py                # Wall line detection via morphological extraction
-│   ├── rooms.py                # Room detection via door-gap closing + connected components
-│   ├── ocr.py                  # Tesseract OCR — extract room labels and dimensions
-│   ├── dimensions.py           # Parse metric/imperial dimension strings to cm
-│   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON
+│   ├── rooms.py                # Room detection + polygon extraction + closed mask export
+│   ├── openings.py             # Door detection (wall-gap scanning) + window detection (exterior breaks)
+│   ├── topology.py             # Room adjacency via mask dilation overlap
+│   ├── ocr.py                  # Tesseract OCR + merge_nearby_text() for split dimension reassembly
+│   ├── dimensions.py           # Parse metric/imperial/compound dimensions to cm
+│   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon)
 ├── tests/
-│   ├── conftest.py             # Synthetic floor plan image fixtures
+│   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped)
 │   ├── test_app.py             # FastAPI endpoint tests
-│   └── test_pipeline.py        # Pipeline integration tests
+│   ├── test_pipeline.py        # Pipeline integration tests
+│   ├── test_rooms.py           # Room detection + polygon extraction tests
+│   ├── test_openings.py        # Door/window detection tests
+│   ├── test_topology.py        # Adjacency detection tests
+│   ├── test_dimensions.py      # Dimension parsing tests (metric, imperial, compound)
+│   ├── test_ocr.py             # OCR + text merging tests
+│   ├── test_output.py          # Output formatting tests
+│   ├── test_preprocess.py      # Wall mask extraction tests
+│   └── test_walls.py           # Wall segment tests
 ├── Dockerfile                  # Python 3.11 + Tesseract + OpenCV
 ├── docker-compose.yml          # Single-service compose for local/prod
 ├── deploy-hetzner.sh           # One-command deploy: rsync + docker compose up
@@ -343,12 +353,42 @@ Agent calls analyze_floor_plan_image → Worker fetches image from D1
 analyze_image(image)
   ├── prepare(image)              → binary wall mask (walls=255, rooms=0)
   ├── find_floor_plan_bbox(binary) → crop region excluding headers/legends
-  ├── detect_walls(binary)        → wall segments [{start, end, ...}]
-  ├── detect_rooms(binary)        → room regions [{bbox, centroid, mask, ...}]
-  ├── extract_text_regions(image) → OCR results [{text, center, ...}]
+  ├── detect_walls(binary)        → wall segments [{start, end, thickness}]
+  ├── detect_rooms(binary)        → (rooms [{bbox, centroid, mask, polygon}], closed_binary)
+  ├── extract_text_regions(image) → OCR results [{text, center}] (with text merging)
   ├── _calibrate_scale(walls, text_regions) → cm-per-pixel scale factor
-  └── build_floor_plan_input(rooms, text_regions, scale) → SimpleFloorPlanInput JSON
+  ├── detect_openings(binary, closed, rooms, walls, scale) → [{type, position, width, rooms}]
+  ├── detect_adjacency(rooms, binary)  → [{room_a, room_b, orientation, length}]
+  └── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
 ```
+
+**Output JSON structure:**
+```json
+{
+  "name": "Extracted Floor Plan",
+  "rooms": [
+    {"label": "Kitchen", "x": 0, "y": 0, "width": 300, "depth": 250},
+    {"label": "Living", "polygon": [{"x": 300, "y": 0}, ...]}
+  ],
+  "openings": [
+    {"type": "door", "between": ["Kitchen", "Living"], "width": 80},
+    {"type": "window", "room": "Bedroom", "wall": "north", "width": 120}
+  ],
+  "adjacency": [
+    {"rooms": ["Kitchen", "Living"], "shared_edge": "vertical", "length_cm": 300}
+  ],
+  "meta": {
+    "image_size": [1200, 800],
+    "scale_cm_per_px": 1.25,
+    "walls_detected": 12,
+    "rooms_detected": 5,
+    "text_regions": 15,
+    "openings_detected": 4
+  }
+}
+```
+
+Rooms are emitted as **rect** (`{x, y, width, depth}`) when the room is rectangular (mask area / bbox area ≥ 0.85) or **polygon** (`{polygon: [{x,y}...]}`) for L-shaped/irregular rooms. Both formats are accepted by `SimpleFloorPlanInputSchema` in `compile-layout.ts`. Coordinates are normalized to the floor plan bbox origin so rooms start near (0,0).
 
 ### Preprocessing (`cv-service/cv/preprocess.py`)
 
@@ -370,10 +410,29 @@ Two-pass wall mask extraction:
 
 ### Room Detection (`cv-service/cv/rooms.py`)
 
-1. **Close door gaps** — morphological close with a kernel sized to span realistic door openings (15–80px, capped at image_dim/10). Previous kernel was image_dim/3 which merged entire rooms.
+1. **Close door gaps** — morphological close with a kernel sized to span realistic door openings (15–80px, capped at image_dim/10). Returns `(rooms, closed_binary)` — the closed mask is reused by opening detection.
 2. **Invert** — rooms become white regions
 3. **Connected components** — each region with area > 1% of image area becomes a room
-4. **Output** — bbox, centroid, area, and binary mask per room
+4. **Polygon extraction** — `cv2.findContours` + `cv2.approxPolyDP` (epsilon = 1.5% of perimeter) extracts a simplified polygon from each room's mask. Vertices are snapped to a 5px grid and corrected to rectilinear (90-degree angles) via a two-pass snap that aligns near-horizontal/vertical edges. This captures L-shapes, T-shapes, and irregular rooms that a bounding box would miss.
+5. **Output** — bbox, centroid, area, binary mask, and polygon per room
+
+### Opening Detection (`cv-service/cv/openings.py`)
+
+**Door detection** — scans wall segments detected from the closed mask (which has door gaps bridged) against the original binary mask. Breaks in the original where the closed mask has wall pixels are door candidates. For each gap:
+- Filter by size (8px minimum, max 1/3 image width)
+- Look 30-120px perpendicular to the gap to find rooms on both sides
+- Only emit as a door if it connects two distinct rooms
+
+**Window detection** — scans exterior wall segments for gaps in the binary mask. A wall is classified as exterior if it's near the image edge or has a room on only one side. Gaps in exterior walls are window candidates, filtered by reasonable size (40-300cm). Each window is assigned to the nearest room and given a wall side (north/south/east/west).
+
+### Room Adjacency (`cv-service/cv/topology.py`)
+
+For each pair of rooms, dilates both masks by wall thickness (15px) and checks for overlap. If the dilated masks overlap:
+- The overlap region's shape determines orientation (wider = horizontal shared wall, taller = vertical)
+- Shared wall length and center are extracted
+- Output includes room indices, orientation, length, and center position
+
+This tells the agent which rooms share walls and how the layout connects — critical for reconstructing the floor plan's perimeter topology.
 
 ### Label Assignment (`cv-service/cv/output.py`)
 
@@ -381,13 +440,33 @@ Two-pass wall mask extraction:
 2. **Assign to rooms** — primary: check if label center falls inside room's binary mask. Fallback: check if label center is inside room's bounding box.
 3. **Room-name filtering** — a word list (~40 common room names like "bedroom", "kitchen", "foyer") filters OCR noise. Title-case alphabetic words of 4+ chars are also accepted.
 
-### Scale Calibration
+### OCR Text Merging (`cv-service/cv/ocr.py`)
 
-Matches dimension text labels to nearby walls:
-- For each OCR text region that parses as a valid dimension (metric or imperial)
-- Find the nearest wall where the label is positioned perpendicular to the wall
+After Tesseract extraction, `merge_nearby_text()` reassembles text regions that were split across multiple detections. Tesseract PSM 11 (sparse text mode) often splits dimension strings like `10' - 8"` into separate regions (`10'`, `-`, `8"`). The merger combines horizontally-adjacent regions whose vertical centers are within 60% of average text height and whose horizontal gap is less than 1.5× average height.
+
+### Dimension Parsing (`cv-service/cv/dimensions.py`)
+
+Parses dimension strings into centimeters. Supported formats:
+
+| Format | Example | Result |
+|--------|---------|--------|
+| Metric with unit | `3.30m` | 330 cm |
+| Metric bare | `3.30` (two decimal places) | 330 cm |
+| Imperial ft-in | `10'-8"`, `10'- 8"`, `10' 8"` | 325 cm |
+| Imperial ft-only | `10'` | 305 cm |
+| Unicode quotes | `10\u2019- 8\u201d` | 325 cm |
+| Compound | `10'-8" x 8'-1"` | parses both (325, 246) |
+
+`parse_dimension()` returns the first valid dimension. `parse_all_dimensions()` returns all dimensions from compound strings (useful for room-size labels like `10'-8" x 8'-1"`). Area strings (`m²`, `sq ft`) are explicitly rejected.
+
+### Scale Calibration (`cv-service/cv/pipeline.py`)
+
+Matches dimension text labels to their nearest **parallel** wall using perpendicular distance:
+- A horizontal dimension label (wider than tall) matches only horizontal walls
+- The text must fall within the wall's span along the parallel axis (±20% margin)
+- Maximum perpendicular distance: 15% of image dimension (tighter than the previous 30%)
 - Compute `cm / wall_pixel_length` for each match
-- Use the median as the scale factor
+- Use the median as the scale factor to reject outliers
 - Fallback: `1000 / image_width` (assumes 10m-wide floor plan)
 
 ### Deployment
@@ -406,7 +485,7 @@ The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-se
 | `/health` | GET | Health check |
 | `/analyze` | POST | Accept `{image, image_url, name}`, run CV pipeline, return rooms + meta |
 
-The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], meta}`.
+The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms may be rect or polygon format. Openings include detected doors (with `between` room pairs) and windows (with `room` + `wall` side). Adjacency lists which rooms share walls.
 
 ---
 
@@ -453,16 +532,23 @@ When a user provides a floor plan image to replicate:
 
 ```
 Step 1 — ANALYZE IMAGE
-  analyze_floor_plan_image(image_url) → CV extracts rooms + dimensions
+  analyze_floor_plan_image(image_url) → CV extracts:
+    - rooms (rect or polygon format, coords normalized to origin)
+    - openings (doors between rooms, windows on exterior walls)
+    - adjacency (which rooms share walls, with orientation + length)
+    - meta (scale, counts)
   Agent sees: source image (inline) + CV JSON
 
 Step 2 — REVIEW & ADJUST
   Agent compares CV output against source image visually
   Fixes: misdetected labels, merged open-plan rooms, scale errors
+  Uses adjacency data to verify room connectivity
+  Uses polygon rooms for L-shaped/irregular spaces
   Rounds dimensions to nearest 10cm
 
-Step 3 — ADD OPENINGS
-  Agent adds doors/windows based on source image
+Step 3 — REFINE OPENINGS
+  CV now provides detected doors/windows — agent verifies and adjusts
+  Adds any missed openings based on source image
   Interior: {type, between: [room1, room2]}
   Exterior: {type, room, wall: "north"|...}
 

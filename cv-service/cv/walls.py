@@ -20,16 +20,16 @@ def detect_walls(binary: np.ndarray) -> list[dict]:
 
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(w // 10, 30), 1))
     h_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, h_kernel)
-    walls.extend(_extract_segments(h_lines, orientation="horizontal"))
+    walls.extend(extract_segments(h_lines, orientation="horizontal"))
 
     v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(h // 10, 30)))
     v_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, v_kernel)
-    walls.extend(_extract_segments(v_lines, orientation="vertical"))
+    walls.extend(extract_segments(v_lines, orientation="vertical"))
 
     return walls
 
 
-def _extract_segments(mask: np.ndarray, orientation: str) -> list[dict]:
+def extract_segments(mask: np.ndarray, orientation: str) -> list[dict]:
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     segments = []
     for cnt in contours:
