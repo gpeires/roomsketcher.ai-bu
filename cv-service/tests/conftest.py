@@ -31,3 +31,17 @@ def simple_2room_path(simple_2room_image: np.ndarray, tmp_path: Path) -> Path:
     path = tmp_path / "simple-2room.png"
     cv2.imwrite(str(path), simple_2room_image)
     return path
+
+@pytest.fixture
+def low_contrast_2room_image() -> np.ndarray:
+    """Same layout as simple_2room_image but with faded, low-contrast walls.
+    Walls are light gray (180) on slightly-off-white background (240).
+    This simulates real-world scanned/photographed floor plans."""
+    img = np.ones((400, 600, 3), dtype=np.uint8) * 240
+    gray = (180, 180, 180)
+    cv2.rectangle(img, (0, 0), (599, 399), gray, 20)
+    cv2.line(img, (300, 10), (300, 180), gray, 10)
+    cv2.line(img, (300, 220), (300, 390), gray, 10)
+    cv2.putText(img, "Kitchen", (100, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+    cv2.putText(img, "Living", (370, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
+    return img
