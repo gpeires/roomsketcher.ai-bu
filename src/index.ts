@@ -332,11 +332,51 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
     this.server.registerTool(
       'generate_floor_plan',
       {
-        description: `Generate a complete floor plan from a description. Returns a furnished plan with SVG preview.
+        description: `Generate a complete floor plan. Returns a furnished plan with SVG preview.
 
 IMPORTANT: If a sketch already exists in this conversation (the user already has a sketch_id), do NOT call this tool. Use update_sketch instead to modify the existing plan. Only use generate_floor_plan when creating a brand-new floor plan from scratch.
 
-WORKFLOW: Always start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. Never generate coordinates from a blank canvas. For best results, call search_design_knowledge with relevant room types first to apply professional clearance rules and layout patterns.
+CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
+
+═══ COPY MODE (user provided a reference floor plan image) ═══
+When the user shares a floor plan image/screenshot they want converted, your job is REPLICATION, not design. Do NOT call list_templates, get_template, or search_design_knowledge. Build from the image alone.
+
+Step 1 — EXTRACT DIMENSIONS (before writing any JSON):
+- Scan for ALL labeled dimensions in the image. Convert to cm immediately (feet×30.48, inches×2.54).
+- Look for: overall building footprint, per-room dimensions, wall-segment dimension chains.
+- Derive missing dimensions by subtraction: if overall width is known and 2 of 3 segments are labeled, compute the third.
+- If NO dimensions are labeled, pick a calibration anchor (a door is ~80cm, a toilet is ~40cm wide) and derive all other dimensions proportionally.
+- Write out your dimension table before proceeding. Cross-check: room widths must sum to overall width (minus wall thicknesses).
+
+Step 2 — ENUMERATE ROOMS:
+- List every room visible in the image with its label, mapped type, and adjacencies.
+- Map non-standard names: "Dressing Area"→closet, "Powder Room"→bathroom, "Great Room"→living, "Den"→office, "W/D"→laundry.
+- Count rooms. Your generated plan MUST have the same number of rooms.
+
+Step 3 — COMPUTE COORDINATES (arithmetic, not eyeballing):
+- Anchor the top-left exterior corner at (100, 100).
+- Trace the exterior boundary clockwise using extracted dimensions. For a rectangle: 4 corners. For an L-shape: 6 corners.
+- Place interior walls by subdividing: if kitchen is 350cm wide from the left wall, vertical interior wall at x = 100 + 350.
+- Account for wall thickness: interior face of a 20cm exterior wall starts at x=120.
+- Snap all coordinates to 10cm grid.
+- Build room polygons from wall intersections (clockwise, at interior wall faces).
+
+Step 4 — PLACE OPENINGS:
+- Identify every door (quarter-circle arc) and window (parallel lines) from the image.
+- Place on the correct wall with computed offset (distance from wall start in cm).
+- Use standard widths: doors 80cm (front 90cm, bathroom 70cm), windows 100-150cm.
+
+Step 5 — PLACE FURNITURE:
+- Place ONLY furniture visible in the reference image. Do NOT add items that aren't shown.
+- Do NOT "improve" placement. If the bed is off-center in the reference, place it off-center.
+
+Step 6 — GENERATE AND VERIFY:
+- Call generate_floor_plan with computed JSON. Then call preview_sketch.
+- Compare against reference: room count, room topology, proportions, openings, furniture positions.
+- Fix issues with update_sketch (max 2 rounds).
+
+═══ DESIGN MODE (user described a floor plan in words) ═══
+Start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. For best results, call search_design_knowledge with relevant room types first.
 
 STANDARD DIMENSIONS (cm):
 - Exterior walls: 20 thick. Interior: 10. Divider: 5.
@@ -346,24 +386,24 @@ STANDARD DIMENSIONS (cm):
 - Doors: standard 80, bathroom 70, front 90
 - Windows: standard 120, kitchen 100, bathroom 60
 
+DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
+
+FURNITURE: Place essential furniture in every room using the furniture catalog items. Arrange along walls with 60cm walking clearance between items. Use catalog dimensions (width/depth in cm).
+
+═══ SHARED RULES (both modes) ═══
+
 COLOR PALETTE (hex by room type):
 living: #E8F5E9  bedroom: #E3F2FD  kitchen: #FFF3E0  bathroom: #E0F7FA
 hallway: #F5F5F5  office: #F3E5F5  dining: #FFF8E1  garage: #EFEBE9
 closet: #ECEFF1  laundry: #E8EAF6  balcony: #F1F8E9  terrace: #F1F8E9
 storage: #ECEFF1  utility: #ECEFF1  other: #FAFAFA
 
-DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
-
-FURNITURE: Place essential furniture in every room using the furniture catalog items. Arrange along walls with 60cm walking clearance between items. Use catalog dimensions (width/depth in cm).
-
 COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10cm grid.
 
-Provide a name and description. The system will fill in defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.
+The system fills defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.
 
 VISUAL FEEDBACK LOOP (required):
-After generating, call preview_sketch to see what you actually built. Inspect the image for overlapping walls, misplaced furniture, missing doors/windows, rooms that look wrong. If you see issues, fix them with update_sketch and preview again. Iterate until the plan looks correct — do NOT show the user a plan you haven't visually verified.
-
-How many iterations: If the user provided a reference image or detailed measurements, 1 preview check is usually enough. If building from a vague description ("make me a 2BR apartment"), expect 1-2 rounds of fixes. Keep it under 3 iterations total — the user shouldn't wait more than ~30 seconds for the feedback loop.`,
+After generating, call preview_sketch to verify. Check for overlapping walls, misplaced furniture, missing doors/windows, rooms that look wrong. Fix with update_sketch and preview again. Do NOT show the user a plan you haven't visually verified. Max 3 iterations.`,
         inputSchema: {
           plan: FloorPlanInputSchema.describe('The complete FloorPlan JSON object'),
         },

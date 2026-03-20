@@ -136,7 +136,7 @@ describe('floorPlanToSvg', () => {
     const furnitureIdx = svg.indexOf('id="furniture"');
     const wallsIdx = svg.indexOf('id="walls"');
     expect(furnitureIdx).toBeGreaterThan(roomsIdx);
-    expect(furnitureIdx).toBeLessThan(wallsIdx);
+    expect(furnitureIdx).toBeGreaterThan(wallsIdx);
   });
 
   it('applies rotation transform to furniture', () => {

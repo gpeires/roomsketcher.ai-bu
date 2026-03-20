@@ -190,6 +190,18 @@ export function floorPlanToSvg(plan: FloorPlan): string {
     }
   }
 
+  // Expand bounding box to include furniture
+  for (const item of plan.furniture) {
+    const x1 = item.position.x;
+    const y1 = item.position.y;
+    const x2 = x1 + item.width;
+    const y2 = y1 + item.depth;
+    if (x1 < bb.minX) bb.minX = x1;
+    if (y1 < bb.minY) bb.minY = y1;
+    if (x2 > bb.maxX) bb.maxX = x2;
+    if (y2 > bb.maxY) bb.maxY = y2;
+  }
+
   const pad = 50;
   const vbX = bb.minX - pad;
   const vbY = bb.minY - pad;
@@ -206,21 +218,21 @@ export function floorPlanToSvg(plan: FloorPlan): string {
   <g id="rooms">
     ${renderRooms(plan.rooms, plan.units)}
   </g>
-  <g id="furniture">
-    ${renderFurniture(plan.furniture)}
-  </g>
   <g id="walls">
     ${renderWalls(plan.walls)}
   </g>
   <g id="openings">
     ${renderOpenings(plan.walls)}
   </g>
+  <g id="furniture">
+    ${renderFurniture(plan.furniture)}
+  </g>
   <g id="dimensions">
     ${renderDimensions(plan.walls, plan.units)}
   </g>
   <g id="labels"></g>
   <g id="watermark">
-    ${hasWalls ? renderWatermark(bb.maxX, bb.maxY) : `<text x="${plan.canvas.width - 10}" y="${plan.canvas.height - 10}" text-anchor="end" font-size="10" font-family="sans-serif" fill="#ccc">Powered by RoomSketcher</text>`}
+    ${renderWatermark(vbX + vbW, vbY + vbH)}
   </g>
 </svg>`;
 }
