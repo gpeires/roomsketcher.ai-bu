@@ -28,3 +28,6 @@ new_sqlite_classes = ["RoomSketcherHelpMCP"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["SketchSync"]
+
+[ai]
+binding = "AI"

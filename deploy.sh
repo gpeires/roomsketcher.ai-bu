@@ -119,6 +119,41 @@ else
   echo "    Found:   $DB_ID"
 fi
 
+# ─── Step 1b: Ensure AI Gateway exists ───────────────────────────────────────
+echo "--- Checking AI Gateway..."
+AI_GW_API="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai-gateway/gateways"
+AI_GW_ID="roomsketcher-ai"
+
+AI_GW_EXISTS=$(curl -s "${AI_GW_API}/${AI_GW_ID}" "${CF_HEADERS[@]}" \
+  | node -e "
+    let buf=''; process.stdin.on('data',d=>buf+=d);
+    process.stdin.on('end',()=>{
+      const r=JSON.parse(buf);
+      if(r.success && r.result && r.result.id) process.stdout.write('yes');
+    })
+  ")
+
+if [[ "$AI_GW_EXISTS" == "yes" ]]; then
+  echo "    Found: AI Gateway '${AI_GW_ID}'"
+else
+  echo "    Creating AI Gateway '${AI_GW_ID}'..."
+  CREATE_GW_RESP=$(curl -s -X POST "$AI_GW_API" "${CF_HEADERS[@]}" \
+    --data "{\"id\":\"${AI_GW_ID}\",\"name\":\"RoomSketcher AI Gateway\",\"cache_invalidate_on_update\":true,\"cache_ttl\":86400,\"collect_logs\":true,\"rate_limiting_interval\":60,\"rate_limiting_limit\":100}")
+  GW_SUCCESS=$(echo "$CREATE_GW_RESP" | node -e "
+    let buf=''; process.stdin.on('data',d=>buf+=d);
+    process.stdin.on('end',()=>{
+      const r=JSON.parse(buf);
+      process.stdout.write(r.success ? 'yes' : 'no');
+    })
+  ")
+  if [[ "$GW_SUCCESS" == "yes" ]]; then
+    echo "    Created: AI Gateway '${AI_GW_ID}'"
+  else
+    echo "    Warning: Could not create AI Gateway. AI enrichment will be unavailable."
+    echo "    Response: $CREATE_GW_RESP"
+  fi
+fi
+
 # ─── Step 2: Patch wrangler.toml with real database_id ───────────────────────
 echo "--- Updating wrangler.toml with database_id..."
 if [[ "$(uname)" == "Darwin" ]]; then

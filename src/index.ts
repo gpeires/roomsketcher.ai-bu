@@ -470,7 +470,7 @@ After generating, call preview_sketch to verify. Check for overlapping walls, mi
       },
       async ({ image, image_url, name }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
-        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl);
+        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB);
       },
     );
 

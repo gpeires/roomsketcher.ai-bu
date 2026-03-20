@@ -151,6 +151,13 @@ CREATE TRIGGER IF NOT EXISTS agent_insights_au AFTER UPDATE ON agent_insights BE
   VALUES (new.id, new.content, COALESCE(new.context, ''));
 END;
 
+-- AI neuron usage tracking (daily budget)
+CREATE TABLE IF NOT EXISTS ai_neuron_usage (
+  date TEXT PRIMARY KEY,  -- YYYY-MM-DD
+  neurons_used INTEGER DEFAULT 0,
+  last_updated TEXT DEFAULT (datetime('now'))
+);
+
 -- Temporary image uploads for CV analysis
 CREATE TABLE IF NOT EXISTS uploaded_images (
   id TEXT PRIMARY KEY,

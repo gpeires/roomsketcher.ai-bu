@@ -102,6 +102,7 @@ export interface Env {
   WORKER_URL: string;
   CTA_VARIANT?: string;
   CV_SERVICE_URL?: string;
+  AI?: Ai;  // Workers AI binding — optional for graceful degradation
 }
 
 import type { FloorPlan } from './sketch/types';

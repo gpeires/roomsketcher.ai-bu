@@ -394,12 +394,14 @@ export async function handleAnalyzeImage(
   input: { image?: string; image_url?: string },
   name: string,
   cvServiceUrl: string,
+  ai?: Ai,
+  db?: D1Database,
 ): Promise<ToolResult> {
   if (!input.image && !input.image_url) {
     return { content: [{ type: 'text' as const, text: 'Provide either image (base64) or image_url.' }] };
   }
 
-  // Fetch the source image so we can return it as a visual content block
+  // Fetch the source image for visual feedback
   let imageBase64: string | undefined;
   let imageMime: 'image/png' | 'image/jpeg' = 'image/png';
   if (input.image) {
@@ -418,16 +420,54 @@ export async function handleAnalyzeImage(
         }
         imageBase64 = btoa(chunks.join(''));
       }
-    } catch { /* non-fatal — we'll still return the CV results */ }
+    } catch { /* non-fatal */ }
   }
 
-  // Pass through to CV service — it handles URL fetching directly
-  const body: Record<string, string> = { name };
-  if (input.image) {
-    body.image = input.image;
-  } else {
-    body.image_url = input.image_url!;
+  // If AI binding available, use the full pipeline; otherwise CV-only fallback
+  if (ai && db) {
+    try {
+      const { runPipeline } = await import('../ai/orchestrator');
+      const { DEFAULT_CONFIG } = await import('../ai/types');
+      const result = await runPipeline(input, name, {
+        ai,
+        db,
+        cvServiceUrl,
+        ...DEFAULT_CONFIG,
+      });
+
+      const pipelineLabel = result.meta.pipeline_version === '1.0-cv-only'
+        ? 'CV Analysis Complete (AI budget exhausted)'
+        : `AI-Enhanced Analysis Complete (pipeline v${result.meta.pipeline_version})`;
+
+      const summary = [
+        `**${pipelineLabel}** — ${result.rooms.length} rooms detected`,
+        `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px | Walls: ${result.meta.walls_detected}`,
+        `AI specialists: ${result.meta.specialists_succeeded.length} succeeded, ${result.meta.specialists_failed.length} failed`,
+        `Validation: ${result.meta.validation_passes} pass(es), ${result.meta.ai_corrections} correction(s)`,
+        '',
+        '```json',
+        JSON.stringify(result, null, 2),
+        '```',
+        '',
+        'Review the source image above against the AI-enhanced output. The confidence scores indicate how certain each room detection is.',
+      ].join('\n');
+
+      const content: ContentBlock[] = [];
+      if (imageBase64) {
+        content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
+      }
+      content.push({ type: 'text' as const, text: summary });
+      return { content };
+    } catch (err) {
+      // Pipeline failed — fall through to CV-only
+      console.error('AI pipeline failed, falling back to CV-only:', err);
+    }
   }
+
+  // CV-only fallback (same as original)
+  const body: Record<string, string> = { name };
+  if (input.image) body.image = input.image;
+  else body.image_url = input.image_url!;
 
   const resp = await fetch(`${cvServiceUrl}/analyze`, {
     method: 'POST',
@@ -448,7 +488,7 @@ export async function handleAnalyzeImage(
   };
 
   const summary = [
-    `**CV Analysis Complete** — ${result.rooms.length} rooms detected`,
+    `**CV Analysis Complete** (no AI enhancement) — ${result.rooms.length} rooms detected`,
     `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px`,
     `Walls: ${result.meta.walls_detected}, Text regions: ${result.meta.text_regions}`,
     '',
@@ -464,6 +504,5 @@ export async function handleAnalyzeImage(
     content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
   }
   content.push({ type: 'text' as const, text: summary });
-
   return { content };
 }
