@@ -1,0 +1,9 @@
+services:
+  cv-service:
+    build: .
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./fixtures:/app/fixtures
+    environment:
+      - LOG_LEVEL=debug
