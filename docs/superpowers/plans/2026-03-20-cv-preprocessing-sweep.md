@@ -17,20 +17,57 @@
 ### System overview
 
 This project is a floor plan analysis pipeline deployed as:
-- **Cloudflare Worker** (`src/`) — main MCP server, hosts API routes, orchestrates AI specialists via Workers AI
-- **Python CV service** (`cv-service/`) — FastAPI app running on `cv.kworq.com:8100`, does OpenCV-based image analysis (wall detection, room detection, OCR, scale calibration)
-- The Worker calls the CV service's `/analyze` endpoint, then runs 4 AI specialists (Room Namer, Layout Describer, Symbol Spotter, Dimension Reader) in parallel, then merges everything
+- **Cloudflare Worker** (`src/`) — main MCP server, hosts API routes, orchestrates AI specialists via Workers AI. Deployed via `bash deploy.sh` to `https://roomsketcher-help-mcp.10ecb923-workers.workers.dev`
+- **Python CV service** (`cv-service/`) — FastAPI app running on `cv.kworq.com:8100`, does OpenCV-based image analysis (wall detection, room detection, OCR, scale calibration). Deployed by SSH'ing to the server and restarting the service.
+- The Worker calls the CV service's `/analyze` endpoint, then runs 4 AI specialists (Room Namer, Layout Describer, Symbol Spotter, Dimension Reader) in parallel, then merges everything in `src/ai/merge.ts`
+
+### What we already changed today (before this plan)
+
+Earlier in this session we added raw CV data visibility to the pipeline output. These changes are already committed and deployed:
+
+- **`src/ai/types.ts`** — Added `cv_rooms_raw`, `cv_rooms_detected`, `cv_preprocessing` to `PipelineOutput.meta`
+- **`src/ai/orchestrator.ts`** — Updated `buildPipelineOutput()` to forward `cv.rooms`, `cv.meta.rooms_detected`, `cv.meta.preprocessing`, and pass through `cv.openings`/`cv.adjacency` instead of hardcoding `[]`
+- **`src/ai/__tests__/orchestrator.test.ts`** — Updated with assertions for new fields
+
+This visibility work is what exposed the data below and motivated the sweep endpoint.
+
+### The audit findings — CV vs AI on real images
+
+We tested the full pipeline against two real floor plan images. The raw CV data now visible in the output reveals a stark picture:
+
+**Plan 1: 547 W 47th St (image `44e71e4b-e100-4572-aed1-674193c78785`)**
+- CV found 4 rooms (labeled `Room 1`, `Room 2`, `Foyer`, `Room 4`) with polygon data and 1 door opening
+- CV preprocessing: raw strategy won (raw: 4 rooms/60 walls vs enhanced: 0 rooms/25 walls)
+- AI specialists all succeeded: Room Namer found 7 labels, Dimension Reader parsed 5 dimensions perfectly
+- Merge produced 6 rooms with proper labels (Bedroom, Living & Dining, Foyer, Bathroom, Primary Bedroom, Dressing Area)
+- **Problem:** Dimension Reader correctly read Living & Dining as 21'-1"x11'-8" (643x356cm) but merge gave it 110x150cm — dimension data is used only for confidence boost, not sizing
+- **Problem:** Primary Bedroom placed at y=-54 (negative coordinate)
+
+**Plan 2: 520 W 23rd St (image `5f8ac591-f5f1-4bb1-a655-36ee1012c092`)**
+- **CV found 0 rooms** — complete failure. Only 7 walls detected. `cv_rooms_raw: []`
+- CV preprocessing: raw won by default (raw: 0 rooms/7 walls, enhanced: 0 rooms/5 walls)
+- AI specialists all succeeded: Room Namer found 8 labels, Dimension Reader parsed 8 dimensions perfectly, Layout Describer found 9 rooms
+- Merge produced 9 rooms but all positioned from Layout Describer's 3x3 grid — no real geometry
+- **This is the image that matters most** — CV preprocessing completely failed on it
+
+### The bigger picture
+
+The sweep endpoint is step 1 of a larger improvement arc:
+1. **Sweep** (this plan) — discover which preprocessing strategies find rooms on images where current approach fails
+2. **Dimension Reader sizing** (future) — parse dimension text into cm, override grid-estimated sizes with actual measurements
+3. **Phase 3 merge fallback** (future) — when CV=0 rooms, construct rooms from Room Namer labels + Dimension Reader sizes
+4. **Smarter strategy selection** (future) — based on sweep data, run top 2-3 strategies in production instead of raw+enhanced
 
 ### The preprocessing problem
 
 The CV pipeline converts floor plan images to binary wall masks (walls=255, background=0) using `prepare()` in `cv/preprocess.py`. This binarization is the critical first step — if walls aren't detected here, no rooms get found downstream.
 
-Currently the pipeline runs 2 strategies in parallel (raw + "standard" enhanced) and picks the winner by room count. Testing against real floor plans revealed:
+`prepare()` has a two-pass approach:
+1. **Pass 1 (threshold):** Strict threshold (gray < 50) + adaptive Gaussian — works for clean, dark-walled plans
+2. **Pass 2 (edge fallback):** If < 1% wall pixels found, falls back to Otsu + Canny edges — for medium-gray walls
+3. **Finalization:** Morphological close + connected-component filtering (`_filter_components`) to remove noise
 
-- **Plan 1** (547 W 47th St, `44e71e4b`): Raw found 4 rooms/60 walls, enhanced found 0 rooms/25 walls → raw won
-- **Plan 2** (520 W 23rd St, `5f8ac591`): Raw found 0 rooms/7 walls, enhanced found 0 rooms/5 walls → **both failed**
-
-The "standard" enhanced preset (CLAHE + bilateral + unsharp) has never beaten raw on any test image. We need to try fundamentally different approaches to binarization, not just contrast tweaks.
+Currently the pipeline runs 2 strategies in parallel (raw + "standard" enhanced) and picks the winner by room count. The "standard" enhanced preset (CLAHE clipLimit=3.0 on LAB L-channel + bilateral d=9 sigma=75 + unsharp 1.5x-0.5x) has **never beaten raw on any test image**. The enhanced path consistently finds fewer walls and zero rooms. We need fundamentally different approaches to binarization, not just contrast tweaks.
 
 ### Why a sweep endpoint (not production changes)
 
@@ -39,11 +76,20 @@ We don't know which strategies work on which image types yet. The sweep endpoint
 ### Key codebase patterns to follow
 
 - **Deploy Worker:** Always via `bash deploy.sh` (never wrangler directly)
+- **Deploy CV service:** SSH to the server hosting `cv.kworq.com:8100` and restart. The CV service is a standard FastAPI/uvicorn app.
 - **Git commits:** Use `-c commit.gpgsign=false` flag (GPG signing not configured)
-- **Test fixtures:** `cv-service/tests/conftest.py` defines `simple_2room_image` (BGR, 600x400, black walls on white, 2 rooms with door gap + dimension text) and `low_contrast_2room_image` (same layout, gray walls on off-white)
-- **FastAPI tests:** Use `ASGITransport` + `AsyncClient` with `@pytest.mark.anyio` (see `test_app.py` for pattern)
-- **Worker routes:** Inline in `src/index.ts` fetch handler (no router — just `if/else` on `url.pathname`)
-- **CV pipeline:** `_run_pipeline()` in `pipeline.py` is the core detection pipeline. `analyze_image()` orchestrates parallel raw+enhanced. New functions go after `_calibrate_scale()`.
+- **Test fixtures:** `cv-service/tests/conftest.py` defines `simple_2room_image` (BGR, 600x400, black walls on white, 2 rooms with door gap + dimension text) and `low_contrast_2room_image` (same layout, gray walls on off-white). The `simple_2room_path` fixture writes it to a temp file.
+- **FastAPI tests:** Use `ASGITransport` + `AsyncClient` with `@pytest.mark.anyio`. The `b64_simple_image` fixture in `test_app.py` creates a base64-encoded PNG from `simple_2room_image`. See existing tests in `test_app.py` for the exact pattern.
+- **Worker routes:** Inline in `src/index.ts` fetch handler (no router — just `if/else` on `url.pathname`). The sweep proxy goes after the `/api/images/:id` block (line ~841) and before the `// Health check` block.
+- **CV pipeline:** `_run_pipeline()` in `pipeline.py` is the core detection pipeline. `analyze_image()` orchestrates parallel raw+enhanced via `ThreadPoolExecutor(max_workers=2)` (already imported). New functions go at the end of the file, after `_calibrate_scale()`.
+- **Python test runner:** `cd cv-service && python -m pytest` (not `pytest` directly — module path matters for `cv.` imports)
+- **Worker test runner:** `npx vitest run` from the project root
+
+### Test images for manual validation
+
+These are already uploaded and accessible:
+- `https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/images/44e71e4b-e100-4572-aed1-674193c78785` — 547 W 47th St. Baseline: raw finds 4 rooms/60 walls. Good test for "do strategies at least match raw?"
+- `https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/images/5f8ac591-f5f1-4bb1-a655-36ee1012c092` — 520 W 23rd St. Baseline: raw finds 0 rooms/7 walls. **This is the key image** — any strategy that finds > 0 rooms here is a breakthrough.
 
 ### The 8 strategies and their rationale
 
@@ -723,14 +769,14 @@ Expected: All pass.
 
 - [ ] **Step 3: Deploy CV service**
 
-The CV service runs on `cv.kworq.com:8100`. Deploy per your usual process (likely restart the service on the server).
+The CV service runs on `cv.kworq.com:8100` as a FastAPI/uvicorn app. You need to get the updated code to that server and restart the service. This is a manual step — ask the user if you're unsure how they deploy the CV service. The Worker proxy won't work until the CV service has the `/sweep` endpoint live.
 
 - [ ] **Step 4: Deploy Worker**
 
 Run: `bash deploy.sh`
-Expected: Deployment succeeds.
+Expected: Deployment succeeds. The deploy script handles wrangler deployment, D1 schema migration, dependency install, and health check. Never use wrangler directly.
 
-- [ ] **Step 5: Smoke test — run sweep against test image via curl**
+- [ ] **Step 5: Smoke test — run sweep against Plan 1 (the image where raw finds 4 rooms)**
 
 ```bash
 curl -s -X POST https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/cv/sweep \
@@ -739,9 +785,9 @@ curl -s -X POST https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/c
   | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{s[\"strategy\"]:20s} rooms={s[\"meta\"][\"rooms_detected\"]:2d}  walls={s[\"meta\"][\"walls_detected\"]:3d}  time={s[\"time_ms\"]}ms') for s in d['strategies']]"
 ```
 
-Expected: 8 rows, one per strategy, with varying room/wall counts.
+Expected: 8 rows, one per strategy. The `raw` strategy should show rooms=4, walls=60 (matching our known baseline). Other strategies will vary — we want to see which ones also find rooms and how wall counts differ.
 
-- [ ] **Step 6: Run sweep against second test image**
+- [ ] **Step 6: Smoke test — run sweep against Plan 2 (the image where raw finds 0 rooms — this is the key test)**
 
 ```bash
 curl -s -X POST https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/cv/sweep \
@@ -750,7 +796,7 @@ curl -s -X POST https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/c
   | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{s[\"strategy\"]:20s} rooms={s[\"meta\"][\"rooms_detected\"]:2d}  walls={s[\"meta\"][\"walls_detected\"]:3d}  time={s[\"time_ms\"]}ms') for s in d['strategies']]"
 ```
 
-Expected: 8 rows. This is the image where raw found 0 rooms — we're looking for any strategy that finds > 0.
+Expected: 8 rows. Baseline is raw=0 rooms/7 walls. **Any strategy that finds > 0 rooms here is a significant finding** — this is a 2BR/2BA apartment with 9 labeled rooms that CV completely failed on. Report the full results back to the user.
 
 - [ ] **Step 7: Commit any final fixes**
 
