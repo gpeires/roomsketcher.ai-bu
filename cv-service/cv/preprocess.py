@@ -36,7 +36,7 @@ def prepare(image: np.ndarray) -> np.ndarray:
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     # Remove noise blobs while keeping interior wall segments.
-    binary = _filter_components(binary, total_pixels)
+    binary = filter_components(binary, total_pixels)
 
     return binary
 
@@ -85,7 +85,7 @@ def _edge_pass(gray: np.ndarray) -> np.ndarray:
     return combined
 
 
-def _filter_components(binary: np.ndarray, total_pixels: int) -> np.ndarray:
+def filter_components(binary: np.ndarray, total_pixels: int) -> np.ndarray:
     """Remove noise blobs, keeping large or elongated (wall-like) components."""
     min_noise_area = max(50, int(total_pixels * 0.0003))
     min_wall_area = int(total_pixels * 0.003)
