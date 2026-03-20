@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 
 
-def detect_rooms(binary: np.ndarray, min_room_ratio: float = 0.02) -> list[dict]:
+def detect_rooms(binary: np.ndarray, min_room_ratio: float = 0.01) -> list[dict]:
     """Detect room regions from a binary wall mask (walls=255, rooms=0).
 
     Strategy:
@@ -30,9 +30,10 @@ def detect_rooms(binary: np.ndarray, min_room_ratio: float = 0.02) -> list[dict]
     min_area = int(h * w * min_room_ratio)
 
     # Close door gaps in interior walls so each room is a separate component.
-    # A vertical kernel bridges gaps in vertical interior walls (doors) and
-    # a horizontal kernel does the same for horizontal interior walls.
-    gap_size = max(h, w) // 3  # large enough to span any realistic door
+    # Door openings are typically 60-90cm, which at common floor plan scales
+    # maps to roughly 20-60 pixels.  The old value (image_dim / 3) was far
+    # too large and bridged entire walls, merging rooms together.
+    gap_size = max(15, min(80, max(h, w) // 10))
     v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, gap_size))
     closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, v_kernel, iterations=1)
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (gap_size, 1))

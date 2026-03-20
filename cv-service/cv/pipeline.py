@@ -2,7 +2,7 @@
 import math
 import cv2
 import numpy as np
-from cv.preprocess import prepare
+from cv.preprocess import prepare, find_floor_plan_bbox
 from cv.walls import detect_walls
 from cv.rooms import detect_rooms
 from cv.ocr import extract_text_regions
@@ -18,6 +18,7 @@ def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> d
 def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict:
     h, w = image.shape[:2]
     binary = prepare(image)
+    fp_bbox = find_floor_plan_bbox(binary)
     walls = detect_walls(binary)
     rooms = detect_rooms(binary)
     text_regions = extract_text_regions(image)
@@ -25,6 +26,7 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     result = build_floor_plan_input(
         rooms=rooms, text_regions=text_regions,
         image_shape=(h, w), scale_cm_per_px=scale, name=name,
+        floor_plan_bbox=fp_bbox,
     )
     result["meta"] = {
         "image_size": (w, h),

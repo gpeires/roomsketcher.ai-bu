@@ -1,6 +1,7 @@
 import base64
 import logging
 import cv2
+import httpx
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -13,7 +14,8 @@ class HealthResponse(BaseModel):
     status: str
 
 class AnalyzeRequest(BaseModel):
-    image: str = Field(description="Base64-encoded PNG/JPG image")
+    image: str | None = Field(default=None, description="Base64-encoded PNG/JPG image")
+    image_url: str | None = Field(default=None, description="URL to fetch the image from")
     name: str = Field(default="Extracted Floor Plan")
 
 class RoomOutput(BaseModel):
@@ -42,10 +44,24 @@ def health() -> HealthResponse:
 
 @app.post("/analyze")
 def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
-    try:
-        raw = base64.b64decode(req.image)
-    except Exception:
-        raise HTTPException(400, "Invalid base64 image data")
+    if req.image:
+        try:
+            raw = base64.b64decode(req.image)
+        except Exception:
+            raise HTTPException(400, "Invalid base64 image data")
+    elif req.image_url:
+        try:
+            resp = httpx.get(req.image_url, follow_redirects=True, timeout=15.0)
+            resp.raise_for_status()
+        except httpx.HTTPError as e:
+            raise HTTPException(400, f"Failed to fetch image from URL: {e}")
+        content_type = resp.headers.get("content-type", "")
+        if not content_type.startswith("image/"):
+            raise HTTPException(400, f"URL did not return an image (content-type: {content_type})")
+        raw = resp.content
+    else:
+        raise HTTPException(400, "Provide either 'image' (base64) or 'image_url'")
+
     arr = np.frombuffer(raw, dtype=np.uint8)
     image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if image is None:
