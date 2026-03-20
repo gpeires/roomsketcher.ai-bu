@@ -76,6 +76,13 @@ export interface CVResult {
     image_size?: [number, number];   // [width, height] from CV service
     image_width?: number;            // legacy / tests
     image_height?: number;           // legacy / tests
+    preprocessing?: {
+      raw_rooms: number;
+      enhanced_rooms: number;
+      raw_walls: number;
+      enhanced_walls: number;
+      strategy_used: string;
+    };
   };
 }
 
