@@ -1,6 +1,8 @@
 """Main pipeline: image → SimpleFloorPlanInput JSON."""
+import base64
 import logging
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import cv2
@@ -159,3 +161,123 @@ def _calibrate_scale(walls, text_regions, image_shape):
         matches.sort()
         return matches[len(matches) // 2]
     return 1000.0 / image_shape[1]
+
+
+def run_single_strategy(
+    image: np.ndarray,
+    plan_name: str,
+    strategy_name: str,
+    strategy_fn,
+) -> dict:
+    """Run one preprocessing strategy through the full CV pipeline.
+
+    Returns the standard pipeline result dict plus:
+    - strategy: name of the strategy used
+    - debug_binary: base64-encoded PNG of the binary wall mask
+    - time_ms: wall-clock time in milliseconds
+    """
+    from cv.strategies import StrategyResult
+
+    start = time.monotonic()
+    try:
+        h, w = image.shape[:2]
+        sr: StrategyResult = strategy_fn(image.copy())
+
+        if sr.is_binary:
+            binary = sr.image
+        else:
+            binary = prepare(sr.image)
+
+        # Capture binary mask as debug PNG
+        _, png_buf = cv2.imencode(".png", binary)
+        debug_binary = base64.b64encode(png_buf.tobytes()).decode()
+
+        fp_bbox = find_floor_plan_bbox(binary)
+        walls = detect_walls(binary)
+        rooms, closed_binary = detect_rooms(binary)
+        # OCR needs the original color image, not the preprocessed one
+        text_regions = extract_text_regions(image)
+        scale = _calibrate_scale(walls, text_regions, image_shape=(h, w))
+        openings = detect_openings(binary, closed_binary, rooms, walls, scale)
+        adjacency = detect_adjacency(rooms, binary)
+
+        result = build_floor_plan_input(
+            rooms=rooms, text_regions=text_regions,
+            image_shape=(h, w), scale_cm_per_px=scale, name=plan_name,
+            floor_plan_bbox=fp_bbox,
+            openings=openings,
+            adjacency=adjacency,
+        )
+        result["meta"] = {
+            "image_size": (w, h),
+            "scale_cm_per_px": scale,
+            "walls_detected": len(walls),
+            "rooms_detected": len(rooms),
+            "text_regions": len(text_regions),
+            "openings_detected": len(openings),
+        }
+        result["strategy"] = strategy_name
+        result["debug_binary"] = debug_binary
+        result["time_ms"] = int((time.monotonic() - start) * 1000)
+        return result
+
+    except Exception as e:
+        elapsed = int((time.monotonic() - start) * 1000)
+        log.warning("Strategy %s failed: %s", strategy_name, e)
+        return {
+            "strategy": strategy_name,
+            "name": plan_name,
+            "rooms": [],
+            "openings": [],
+            "adjacency": [],
+            "meta": {
+                "image_size": (image.shape[1], image.shape[0]),
+                "scale_cm_per_px": 0.0,
+                "walls_detected": 0,
+                "rooms_detected": 0,
+                "text_regions": 0,
+                "openings_detected": 0,
+            },
+            "debug_binary": "",
+            "time_ms": elapsed,
+            "error": str(e),
+        }
+
+
+def sweep_strategies(image: np.ndarray, plan_name: str) -> dict:
+    """Run all registered strategies in parallel, return all results."""
+    from cv.strategies import STRATEGIES
+
+    h, w = image.shape[:2]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            name: pool.submit(run_single_strategy, image, plan_name, name, fn)
+            for name, fn in STRATEGIES.items()
+        }
+        results = []
+        for name, future in futures.items():
+            try:
+                results.append(future.result(timeout=10))
+            except Exception as e:
+                log.warning("Strategy %s timed out or crashed: %s", name, e)
+                results.append({
+                    "strategy": name,
+                    "name": plan_name,
+                    "rooms": [],
+                    "openings": [],
+                    "adjacency": [],
+                    "meta": {
+                        "image_size": (w, h),
+                        "scale_cm_per_px": 0.0,
+                        "walls_detected": 0,
+                        "rooms_detected": 0,
+                        "text_regions": 0,
+                        "openings_detected": 0,
+                    },
+                    "debug_binary": "",
+                    "time_ms": 0,
+                    "error": f"Timed out or crashed: {e}",
+                })
+
+    return {"image_size": (w, h), "strategies": results}
