@@ -459,8 +459,32 @@ export async function handleAnalyzeImage(
       content.push({ type: 'text' as const, text: summary });
       return { content };
     } catch (err) {
-      // Pipeline failed — fall through to CV-only
-      console.error('AI pipeline failed, falling back to CV-only:', err);
+      // Pipeline failed — fall through to CV-only, but surface the error
+      const errMsg = err instanceof Error ? err.message : String(err);
+      console.error('AI pipeline failed, falling back to CV-only:', errMsg);
+      // Include pipeline error in CV-only response so we can debug
+      const content: ContentBlock[] = [];
+      if (imageBase64) {
+        content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
+      }
+      content.push({ type: 'text' as const, text: `**AI Pipeline Error** (falling back to CV-only): \`${errMsg}\`` });
+      // Still do CV-only below, but prepend the error
+      try {
+        const cvBody: Record<string, string> = { name };
+        if (input.image) cvBody.image = input.image;
+        else cvBody.image_url = input.image_url!;
+        const cvResp = await fetch(`${cvServiceUrl}/analyze`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cvBody),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (cvResp.ok) {
+          const cvResult = await cvResp.json() as Record<string, unknown>;
+          content.push({ type: 'text' as const, text: `\n\n**CV Fallback Result:**\n\`\`\`json\n${JSON.stringify(cvResult, null, 2)}\n\`\`\`` });
+        }
+      } catch { /* CV also failed, just show pipeline error */ }
+      return { content };
     }
   }
 

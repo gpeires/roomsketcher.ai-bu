@@ -62,6 +62,7 @@ export interface CVRoom {
   y: number;
   width: number;
   depth: number;
+  polygon?: Array<{ x: number; y: number }>;
 }
 
 export interface CVResult {
@@ -72,8 +73,9 @@ export interface CVResult {
     rooms_detected: number;
     text_regions: number;
     scale_cm_per_px: number;
-    image_width?: number;
-    image_height?: number;
+    image_size?: [number, number];   // [width, height] from CV service
+    image_width?: number;            // legacy / tests
+    image_height?: number;           // legacy / tests
   };
 }
 
@@ -146,6 +148,8 @@ export interface PipelineOutput {
     pipeline_version: string;
     specialists_succeeded: string[];
     specialists_failed: string[];
+    specialist_errors?: Record<string, string>;
+    specialist_data?: Record<string, unknown>;  // parsed specialist outputs for debugging
   };
 }
 
@@ -170,6 +174,6 @@ export const DEFAULT_CONFIG = {
   aiTimeoutMs: 15_000,
   cvTimeoutMs: 30_000,
   maxValidationPasses: 2,
-  neuronBudget: 10_000,
-  neuronBudgetBuffer: 2_000,
+  neuronBudget: 50_000,
+  neuronBudgetBuffer: 5_000,
 } as const;

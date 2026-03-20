@@ -31,3 +31,4 @@ new_sqlite_classes = ["SketchSync"]
 
 [ai]
 binding = "AI"
+gateway = { id = "roomsketcher-ai", cache_ttl = 3600 }

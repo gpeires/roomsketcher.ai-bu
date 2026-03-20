@@ -88,38 +88,53 @@ export async function gatherSpecialists(
   input: { image?: string; image_url?: string },
   name: string,
   config: PipelineConfig,
-): Promise<GatherResults> {
+): Promise<GatherResults & { _errors?: Record<string, string> }> {
   const fail = (specialist: string, error: string): SpecialistFailure => ({
     ok: false, specialist, error,
   });
+
+  const errors: Record<string, string> = {};
+  const catchAndLog = (specialist: string) => (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors[specialist] = msg;
+    console.error(`[AI] ${specialist} failed:`, msg);
+    return null;
+  };
 
   const [cvResult, roomNamerRaw, layoutDescriberRaw, symbolSpotterRaw, dimensionReaderRaw] =
     await Promise.all([
       callCvService(input, name, config.cvServiceUrl, config.cvTimeoutMs),
       callVisionSpecialist(config.ai, config.model, ROOM_NAMER_PROMPT, imageBytes, config.aiTimeoutMs)
-        .catch(() => null),
+        .catch(catchAndLog('roomNamer')),
       callVisionSpecialist(config.ai, config.model, LAYOUT_DESCRIBER_PROMPT, imageBytes, config.aiTimeoutMs)
-        .catch(() => null),
+        .catch(catchAndLog('layoutDescriber')),
       callVisionSpecialist(config.ai, config.model, SYMBOL_SPOTTER_PROMPT, imageBytes, config.aiTimeoutMs)
-        .catch(() => null),
+        .catch(catchAndLog('symbolSpotter')),
       callVisionSpecialist(config.ai, config.model, DIMENSION_READER_PROMPT, imageBytes, config.aiTimeoutMs)
-        .catch(() => null),
+        .catch(catchAndLog('dimensionReader')),
     ]);
+
+  // Parse results, capturing failures with raw response for debugging
+  const parseOrFail = <T>(
+    raw: string | null,
+    specialist: string,
+    parser: (s: string) => T | SpecialistFailure,
+  ): T | SpecialistFailure => {
+    if (!raw) return fail(specialist, errors[specialist] || 'Call returned null');
+    const parsed = parser(raw);
+    if (parsed && typeof parsed === 'object' && 'ok' in parsed && !parsed.ok) {
+      errors[specialist] = `Parse failed. Raw (first 300): ${raw.slice(0, 300)}`;
+    }
+    return parsed;
+  };
 
   return {
     cv: cvResult,
-    roomNamer: roomNamerRaw
-      ? parseRoomNamerResponse(roomNamerRaw)
-      : fail('room_namer', 'Call failed'),
-    layoutDescriber: layoutDescriberRaw
-      ? parseLayoutDescriberResponse(layoutDescriberRaw)
-      : fail('layout_describer', 'Call failed'),
-    symbolSpotter: symbolSpotterRaw
-      ? parseSymbolSpotterResponse(symbolSpotterRaw)
-      : fail('symbol_spotter', 'Call failed'),
-    dimensionReader: dimensionReaderRaw
-      ? parseDimensionReaderResponse(dimensionReaderRaw)
-      : fail('dimension_reader', 'Call failed'),
+    roomNamer: parseOrFail(roomNamerRaw, 'roomNamer', parseRoomNamerResponse),
+    layoutDescriber: parseOrFail(layoutDescriberRaw, 'layoutDescriber', parseLayoutDescriberResponse),
+    symbolSpotter: parseOrFail(symbolSpotterRaw, 'symbolSpotter', parseSymbolSpotterResponse),
+    dimensionReader: parseOrFail(dimensionReaderRaw, 'dimensionReader', parseDimensionReaderResponse),
+    _errors: Object.keys(errors).length > 0 ? errors : undefined,
   };
 }
 
@@ -129,7 +144,7 @@ export function buildPipelineOutput(
   name: string,
   rooms: MergedRoom[],
   cv: CVResult,
-  stats: { corrections: number; passes: number; neuronsUsed: number; succeeded: string[]; failed: string[] },
+  stats: { corrections: number; passes: number; neuronsUsed: number; succeeded: string[]; failed: string[]; errors?: Record<string, string>; specialistData?: Record<string, unknown> },
 ): PipelineOutput {
   return {
     name,
@@ -137,7 +152,7 @@ export function buildPipelineOutput(
     openings: [],
     adjacency: [],
     meta: {
-      image_size: [cv.meta.image_width ?? 0, cv.meta.image_height ?? 0],
+      image_size: [cv.meta.image_size?.[0] ?? cv.meta.image_width ?? 0, cv.meta.image_size?.[1] ?? cv.meta.image_height ?? 0],
       scale_cm_per_px: cv.meta.scale_cm_per_px,
       walls_detected: cv.meta.walls_detected,
       rooms_detected: rooms.length,
@@ -147,6 +162,8 @@ export function buildPipelineOutput(
       pipeline_version: stats.failed.includes('budget_exhausted') ? '1.0-cv-only' : '2.0',
       specialists_succeeded: stats.succeeded,
       specialists_failed: stats.failed,
+      ...(stats.errors && Object.keys(stats.errors).length > 0 && { specialist_errors: stats.errors }),
+      ...(stats.specialistData && Object.keys(stats.specialistData).length > 0 && { specialist_data: stats.specialistData }),
     },
   };
 }
@@ -232,11 +249,20 @@ export async function runPipeline(
   const estimatedNeurons = (succeeded.length + passes) * 500; // updated after Task 0 measurement
   await recordNeuronUsage(config.db, estimatedNeurons);
 
+  // Collect parsed specialist data for debugging
+  const specialistData: Record<string, unknown> = {};
+  if (gather.roomNamer.ok) specialistData.roomNamer = gather.roomNamer;
+  if (gather.layoutDescriber.ok) specialistData.layoutDescriber = gather.layoutDescriber;
+  if (gather.symbolSpotter.ok) specialistData.symbolSpotter = gather.symbolSpotter;
+  if (gather.dimensionReader.ok) specialistData.dimensionReader = gather.dimensionReader;
+
   return buildPipelineOutput(name, validated, gather.cv, {
     corrections: totalCorrections,
     passes,
     neuronsUsed: estimatedNeurons,
     succeeded,
     failed,
+    errors: gather._errors,
+    specialistData,
   });
 }

@@ -13,16 +13,16 @@ import type {
 // ─── Prompts ─────────────────────────────────────────────────────────────────
 
 export const ROOM_NAMER_PROMPT =
-  'List every room label visible in this floor plan image. Return as a JSON array of strings. Use only these standard names where applicable: Bedroom, Bathroom, Kitchen, Living Room, Dining Room, Foyer, Hall, Corridor, Walk-In Closet, Dressing Room, Laundry Room, Utility Room, Storage, Balcony, Terrace, Office, Garage, WC, Half Bath, Pantry, Family room, Primary Bedroom, Guestroom, Childrens room.';
+  'You are a JSON API. Analyze this floor plan image and list every room label visible. Use standard names: Bedroom, Bathroom, Kitchen, Living Room, Dining Room, Foyer, Hall, Corridor, Walk-In Closet, Dressing Room, Laundry Room, Utility Room, Storage, Balcony, Terrace, Office, Garage, WC, Half Bath, Pantry, Family room, Primary Bedroom, Guestroom, Childrens room. Respond with ONLY a JSON array, no other text. Example: ["Kitchen", "Bedroom", "Bathroom"]';
 
 export const LAYOUT_DESCRIBER_PROMPT =
-  'How many separate rooms are in this floor plan? For each room, describe its position (top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right) and approximate relative size (small, medium, large). Return as JSON: {"room_count": N, "rooms": [{"name": "...", "position": "...", "size": "..."}]}';
+  'You are a JSON API. Count the rooms in this floor plan and describe each room\'s position and size. Positions: top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right. Sizes: small, medium, large. Respond with ONLY JSON, no other text. Example: {"room_count": 3, "rooms": [{"name": "Kitchen", "position": "top-left", "size": "medium"}]}';
 
 export const SYMBOL_SPOTTER_PROMPT =
-  'List every fixture and symbol visible in this floor plan. Look for: Toilet, Sink, Bathtub, Shower, Fridge, Stove/Range, Dishwasher, Oven, Washer/Dryer, Kitchen Island, Bed, Sofa, Dining Table, Desk, Closet rod, Fireplace. For each, give the type and approximate position (top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right). Return as JSON array: [{"type": "...", "position": "..."}]';
+  'You are a JSON API. List every fixture and symbol in this floor plan. Look for: Toilet, Sink, Bathtub, Shower, Fridge, Stove/Range, Dishwasher, Oven, Washer/Dryer, Kitchen Island, Bed, Sofa, Dining Table, Desk, Closet rod, Fireplace. Respond with ONLY a JSON array, no other text. Example: [{"type": "Toilet", "position": "top-right"}, {"type": "Bed", "position": "center-left"}]';
 
 export const DIMENSION_READER_PROMPT =
-  'List every dimension measurement visible in this floor plan. Include the text exactly as shown and which room or area it refers to. Return as JSON array: [{"text": "...", "room_or_area": "..."}]';
+  'You are a JSON API. List every dimension measurement visible in this floor plan. Include the text exactly as shown and which room it refers to. Respond with ONLY a JSON array, no other text. Example: [{"text": "12\'-6\\" x 10\'-3\\"", "room_or_area": "Bedroom"}]';
 
 export function buildValidatorPrompt(rooms: MergedRoom[]): string {
   const roomList = rooms
@@ -125,6 +125,16 @@ export function parseValidatorResponse(raw: string): ValidatorResult | Specialis
   };
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function uint8ArrayToBase64DataUri(bytes: Uint8Array, mime = 'image/png'): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return `data:${mime};base64,${btoa(binary)}`;
+}
+
 // ─── AI call wrapper ─────────────────────────────────────────────────────────
 
 export async function callVisionSpecialist(
@@ -134,18 +144,31 @@ export async function callVisionSpecialist(
   imageBytes: Uint8Array,
   timeoutMs: number,
 ): Promise<string> {
-  // Race the AI call against a timeout — AbortSignal.timeout is cleaner
-  // than manual AbortController and is supported in Workers runtime
+  const dataUri = uint8ArrayToBase64DataUri(imageBytes);
+
   const result = await Promise.race([
     ai.run(model as any, {
-      messages: [{ role: 'user', content: prompt }],
-      image: [...imageBytes],
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUri } },
+          ],
+        },
+      ],
     }),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`AI call timed out after ${timeoutMs}ms`)), timeoutMs),
     ),
   ]);
-  return typeof result === 'string'
-    ? result
-    : (result as { response?: string }).response ?? JSON.stringify(result);
+  // Workers AI returns { response: string | object, tool_calls, usage }
+  // For chat models with JSON output, response can be a string, object, or array
+  if (typeof result === 'string') return result;
+  const obj = result as Record<string, unknown>;
+  if (obj.response !== undefined && obj.response !== null) {
+    // Extract .response — stringify if it's already parsed JSON (object/array)
+    return typeof obj.response === 'string' ? obj.response : JSON.stringify(obj.response);
+  }
+  return JSON.stringify(result);
 }
