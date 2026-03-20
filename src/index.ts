@@ -840,6 +840,20 @@ export default {
       });
     }
 
+    // Sweep endpoint — proxy to CV service for preprocessing strategy comparison
+    if (url.pathname === '/api/cv/sweep' && request.method === 'POST') {
+      const cvUrl = env.CV_SERVICE_URL || 'http://localhost:8100';
+      const resp = await fetch(`${cvUrl}/sweep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: request.body,
+      });
+      return new Response(resp.body, {
+        status: resp.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     // Health check
     if (url.pathname === '/health') {
       const meta = await env.DB.prepare("SELECT value FROM sync_meta WHERE key = 'last_sync'").first<{ value: string }>();
