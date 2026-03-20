@@ -339,71 +339,52 @@ IMPORTANT: If a sketch already exists in this conversation (the user already has
 CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 
 ═══ COPY MODE (user provided a reference floor plan image) ═══
-When the user shares a floor plan image/screenshot they want converted, your job is REPLICATION, not design. Do NOT call list_templates, get_template, or search_design_knowledge. Build from the image alone.
+Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-Step 1 — EXTRACT DIMENSIONS (before writing any JSON):
-- Scan for ALL labeled dimensions in the image. Convert to cm immediately (feet×30.48, inches×2.54).
-- Look for: overall building footprint, per-room dimensions, wall-segment dimension chains.
-- Derive missing dimensions by subtraction: if overall width is known and 2 of 3 segments are labeled, compute the third.
-- If NO dimensions are labeled, pick a calibration anchor (a door is ~80cm, a toilet is ~40cm wide) and derive all other dimensions proportionally.
-- Write out your dimension table before proceeding. Cross-check: room widths must sum to overall width (minus wall thicknesses).
+Step 1 — EXTRACT DIMENSIONS:
+Read every dimension label. Convert to cm (ft×30.48, in×2.54). List each room with label, width, depth. Derive missing dimensions by subtraction from the overall footprint or by calibrating from a known object (door=80cm, toilet=40cm). Write your dimension table ONCE — do NOT recalculate.
 
-Step 2 — ENUMERATE ROOMS:
-- List every room visible in the image with its label, mapped type, and adjacencies.
-- Map non-standard names: "Dressing Area"→closet, "Powder Room"→bathroom, "Great Room"→living, "Den"→office, "W/D"→laundry.
-- Count rooms. Your generated plan MUST have the same number of rooms.
+Step 2 — POSITION ROOMS:
+Place rooms as rectangles with {label, x, y, width, depth}. Start the first room at x=0, y=0. Place adjacent rooms by adding width (horizontal neighbor) or depth (vertical neighbor). Rooms that touch at the same coordinate get an interior wall automatically. No gaps needed — the system handles wall thickness.
 
-Step 3 — COMPUTE COORDINATES (arithmetic, not eyeballing):
-- Anchor the top-left exterior corner at (100, 100).
-- Trace the exterior boundary clockwise using extracted dimensions. For a rectangle: 4 corners. For an L-shape: 6 corners.
-- Place interior walls by subdividing: if kitchen is 350cm wide from the left wall, vertical interior wall at x = 100 + 350.
-- Account for wall thickness: interior face of a 20cm exterior wall starts at x=120.
-- Snap all coordinates to 10cm grid.
-- Build room polygons from wall intersections (clockwise, at interior wall faces).
+Rules:
+- Open-plan spaces (kitchen/living/dining with no wall) = ONE room, not separate rooms
+- L-shaped rooms: use polygon override instead of x/y/width/depth
+- Round to nearest 10cm. Do NOT recalculate if numbers don't sum perfectly.
 
-Step 4 — PLACE OPENINGS:
-- Identify every door (quarter-circle arc) and window (parallel lines) from the image.
-- Place on the correct wall with computed offset (distance from wall start in cm).
-- Use standard widths: doors 80cm (front 90cm, bathroom 70cm), windows 100-150cm.
+Step 3 — ADD OPENINGS:
+Use {type, between: [room1, room2]} for interior doors. Use {type, room, wall: "north"|"south"|"east"|"west"} for exterior doors/windows. Default position is centered; set position: 0.0-1.0 to shift along the wall.
 
-Step 5 — PLACE FURNITURE:
-- Place ONLY furniture visible in the reference image. Do NOT add items that aren't shown.
-- Do NOT "improve" placement. If the bed is off-center in the reference, place it off-center.
+Step 4 — ADD FURNITURE:
+Positions are RELATIVE to the room's top-left corner: {type, room: "Bedroom", x: 20, y: 30, width, depth}. Place ONLY furniture visible in the reference image.
 
-Step 6 — GENERATE AND VERIFY:
-- Call generate_floor_plan with computed JSON. Then call preview_sketch.
-- Compare against reference: room count, room topology, proportions, openings, furniture positions.
-- Fix issues with update_sketch (max 2 rounds).
+Step 5 — GENERATE:
+Call generate_floor_plan with {name, rooms, openings, furniture}. The system generates all walls, room polygons, colors, and canvas automatically. Then call preview_sketch to verify.
+
+WORKED EXAMPLE — 2 rooms side by side:
+Input: {name: "Test", rooms: [{label: "Kitchen", x: 0, y: 0, width: 300, depth: 250}, {label: "Living", x: 300, y: 0, width: 400, depth: 300}], openings: [{type: "door", between: ["Kitchen", "Living"]}, {type: "window", room: "Kitchen", wall: "north"}]}
+Result: Interior wall at x=300 between the rooms, exterior walls around the perimeter, door centered on shared wall, window centered on Kitchen's north wall.
 
 ═══ DESIGN MODE (user described a floor plan in words) ═══
-Start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. For best results, call search_design_knowledge with relevant room types first.
+Start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. You can use either the room-first format (recommended) or the full schema with explicit walls/polygons. For best results, call search_design_knowledge first.
 
 STANDARD DIMENSIONS (cm):
-- Exterior walls: 20 thick. Interior: 10. Divider: 5.
-- Ceiling height: 250
-- Min room sizes: bedroom 9sqm, bathroom 4sqm, kitchen 6sqm, living 15sqm
-- Hallway min width: 100
 - Doors: standard 80, bathroom 70, front 90
 - Windows: standard 120, kitchen 100, bathroom 60
+- Min room sizes: bedroom 9sqm, bathroom 4sqm, kitchen 6sqm, living 15sqm
 
 DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
 
-FURNITURE: Place essential furniture in every room using the furniture catalog items. Arrange along walls with 60cm walking clearance between items. Use catalog dimensions (width/depth in cm).
+FURNITURE: Place essential furniture in every room. Arrange along walls with 60cm clearance. Use catalog dimensions.
 
 ═══ SHARED RULES (both modes) ═══
 
-COLOR PALETTE (hex by room type):
-living: #E8F5E9  bedroom: #E3F2FD  kitchen: #FFF3E0  bathroom: #E0F7FA
-hallway: #F5F5F5  office: #F3E5F5  dining: #FFF8E1  garage: #EFEBE9
-closet: #ECEFF1  laundry: #E8EAF6  balcony: #F1F8E9  terrace: #F1F8E9
-storage: #ECEFF1  utility: #ECEFF1  other: #FAFAFA
-
 COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10cm grid.
 
-The system fills defaults for wall thickness, height, room colors, canvas size, and metadata if omitted.
+The system auto-generates: walls (exterior=20cm, interior=10cm), room polygons, room colors (by label keyword), canvas size, and metadata.
 
 VISUAL FEEDBACK LOOP (required):
-After generating, call preview_sketch to verify. Check for overlapping walls, misplaced furniture, missing doors/windows, rooms that look wrong. Fix with update_sketch and preview again. Do NOT show the user a plan you haven't visually verified. Max 3 iterations.`,
+After generating, call preview_sketch to verify. Check for overlapping walls, misplaced furniture, missing doors/windows. Fix with update_sketch. Max 3 iterations.`,
         inputSchema: {
           plan: SimpleFloorPlanInputSchema.describe('Room-first floor plan input (recommended). Also accepts full FloorPlanInput with version/walls/rooms.'),
         },
