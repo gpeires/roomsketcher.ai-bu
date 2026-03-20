@@ -1,6 +1,6 @@
 import type { FloorPlan, Wall, Opening, Room, Point } from './types';
 import { shoelaceArea, centroid, boundingBox, wallLength } from './geometry';
-import { furnitureSymbol } from './furniture-symbols';
+import { furnitureSymbol, escXml } from './furniture-symbols';
 
 function wallAngle(wall: Wall): number {
   return Math.atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x);
@@ -105,7 +105,7 @@ function renderRooms(rooms: Room[], units: 'metric' | 'imperial'): string {
     const c = centroid(room.polygon);
 
     const poly = `<polygon points="${points}" fill="${room.color}" fill-opacity="0.5" stroke="none" data-id="${room.id}"/>`;
-    const label = `<text x="${c.x}" y="${c.y - 8}" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">${room.label}</text>`;
+    const label = `<text x="${c.x}" y="${c.y - 8}" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">${escXml(room.label)}</text>`;
     const areaText = `<text x="${c.x}" y="${c.y + 10}" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">${areaLabel}</text>`;
     return [poly, label, areaText].join('\n    ');
   }).join('\n    ');

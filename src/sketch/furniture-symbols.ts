@@ -325,10 +325,14 @@ function coatHook(w: number, h: number): string {
 
 // ── Fallback ─────────────────────────────────────────────
 
+export function escXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 function fallbackRect(w: number, h: number, type: string): string {
   return [
     `<rect x="0" y="0" width="${w}" height="${h}" fill="#F5F5F5" stroke="#BDBDBD" ${NS}/>`,
-    `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#999" ${NS}>${type}</text>`,
+    `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#999" ${NS}>${escXml(type)}</text>`,
   ].join('')
 }
 

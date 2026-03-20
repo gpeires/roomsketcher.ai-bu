@@ -3,6 +3,14 @@ import type {
   FloorPlan, Wall, Room, Point, FurnitureItem, Opening,
   SimpleFloorPlanInput, SimpleRoomInput, RoomType,
 } from './types';
+import type { z } from 'zod';
+import type { SimpleRectRoomSchema, SimplePolygonRoomSchema } from './types';
+
+type RectRoom = z.infer<typeof SimpleRectRoomSchema>;
+
+function isRectRoom(room: SimpleRoomInput): room is RectRoom {
+  return 'x' in room && 'width' in room;
+}
 import { ROOM_COLORS, WALL_THICKNESS, DEFAULT_HEIGHT } from './defaults';
 import { shoelaceArea, boundingBox, wallLength } from './geometry';
 
@@ -57,8 +65,8 @@ interface Rect {
 }
 
 function roomToRect(room: SimpleRoomInput): Rect {
-  if ('polygon' in room && room.polygon) {
-    // Compute bounding box
+  if (!isRectRoom(room)) {
+    // Polygon room: compute bounding box
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const p of room.polygon) {
       if (p.x < minX) minX = p.x;
