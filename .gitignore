@@ -5,3 +5,9 @@ dist/
 .env
 .worktrees/
 .superpowers/brainstorm/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
