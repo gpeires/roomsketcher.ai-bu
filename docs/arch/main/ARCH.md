@@ -4,11 +4,12 @@
 
 ## Overview
 
-A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
+A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a computer vision pipeline on Hetzner. It combines:
 
 1. **Help documentation MCP** — Zendesk articles synced to D1, searchable via MCP tools
 2. **AI floor plan sketcher** — Claude generates floor plans from natural language, users edit in a browser SPA, changes sync in real-time via WebSocket
 3. **Design knowledge system** — Articles chunked, tagged, and indexed for AI-driven design recommendations
+4. **CV floor plan extraction** — OpenCV + Tesseract pipeline on Hetzner that analyzes floor plan images and extracts room geometries, labels, and dimensions
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -16,7 +17,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
 │  │  MCP Tools   │   │  REST API    │   │  Browser Sketcher   │  │
-│  │  (17 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
+│  │  (18 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
 │  └──────┬───────┘   └──────┬───────┘   └────────┬────────────┘  │
 │         │                  │                     │               │
 │  ┌──────▼──────────────────▼─────────────────────▼───────────┐  │
@@ -24,7 +25,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │  │                                                           │  │
 │  │  RoomSketcherHelpMCP (McpAgent)                           │  │
 │  │   ├─ MCP protocol (/mcp)                                 │  │
-│  │   ├─ 17 registered tools (6 help + 9 sketch + 2 knowledge)│  │
+│  │   ├─ 18 registered tools (6 help + 10 sketch + 2 knowledge)│
 │  │   └─ Routes sketch ops to SketchSync DO                  │  │
 │  │                                                           │  │
 │  │  SketchSync (Agent)                                       │  │
@@ -41,12 +42,25 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers. It combines:
 │       │   ├─ categories    │  chunk +  │                       │
 │       │   ├─ sections      │  tag +    │                       │
 │       │   ├─ sketches      │  cleanup  │                       │
+│       │   ├─ uploaded_images           │                       │
 │       │   ├─ design_knowledge          │                       │
 │       │   ├─ design_knowledge_fts      │                       │
 │       │   ├─ agent_insights            │                       │
 │       │   └─ agent_insights_fts        │                       │
 │       └────────────────────┴───────────┘                       │
-└─────────────────────────────────────────────────────────────────┘
+└─────────────────────────────┬───────────────────────────────────┘
+                              │ HTTP (cv.kworq.com:8100)
+                              ▼
+                 ┌────────────────────────┐
+                 │   Hetzner Server       │
+                 │   (Docker)             │
+                 │                        │
+                 │   FastAPI CV Service   │
+                 │   ├─ /health           │
+                 │   ├─ /analyze          │
+                 │   ├─ OpenCV pipeline   │
+                 │   └─ Tesseract OCR     │
+                 └────────────────────────┘
 ```
 
 ---
@@ -59,11 +73,12 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
+│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls)
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
 │   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer
-│   ├── tools.ts                # 6 MCP tool handlers for sketch ops
+│   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
 │   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types)
 │   ├── rasterize.ts            # svgToPng() via @cf-wasm/resvg (WASM) for preview_sketch
@@ -81,7 +96,8 @@ src/
 │   └── html.ts                 # Browser SPA (single-file HTML+CSS+JS)
 ├── setup/
 │   ├── home.ts                 # Home/landing page HTML (feature overview, platform logos)
-│   └── html.ts                 # Setup/onboarding page HTML (per-platform MCP install guides)
+│   ├── html.ts                 # Setup/onboarding page HTML (per-platform MCP install guides)
+│   └── upload.ts               # Image upload page HTML (drag-drop, paste, URL output for CV)
 ├── tools/
 │   ├── search.ts               # FTS5 full-text search (articles)
 │   ├── browse.ts               # Category/section navigation
@@ -98,7 +114,27 @@ src/
 │   ├── tagger.ts               # Keyword-based room type + design aspect tagging
 │   └── tagger.test.ts
 └── db/
-    └── schema.sql              # D1 schema (articles, FTS, sketches, knowledge, insights)
+    └── schema.sql              # D1 schema (articles, FTS, sketches, knowledge, insights, uploaded_images)
+
+cv-service/                     # Python CV pipeline (deployed to Hetzner via Docker)
+├── app.py                      # FastAPI entry — /health, /analyze endpoints
+├── cv/
+│   ├── __init__.py
+│   ├── pipeline.py             # Orchestrator — image → rooms/walls/text → output JSON
+│   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
+│   ├── walls.py                # Wall line detection via morphological extraction
+│   ├── rooms.py                # Room detection via door-gap closing + connected components
+│   ├── ocr.py                  # Tesseract OCR — extract room labels and dimensions
+│   ├── dimensions.py           # Parse metric/imperial dimension strings to cm
+│   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON
+├── tests/
+│   ├── conftest.py             # Synthetic floor plan image fixtures
+│   ├── test_app.py             # FastAPI endpoint tests
+│   └── test_pipeline.py        # Pipeline integration tests
+├── Dockerfile                  # Python 3.11 + Tesseract + OpenCV
+├── docker-compose.yml          # Single-service compose for local/prod
+├── deploy-hetzner.sh           # One-command deploy: rsync + docker compose up
+└── requirements.txt            # FastAPI, OpenCV, pytesseract, httpx
 ```
 
 ---
@@ -197,7 +233,7 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 
 ---
 
-## MCP Tools (17)
+## MCP Tools (18)
 
 ### Help Tools (6)
 
@@ -210,11 +246,12 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 | `get_article` | Full article by ID |
 | `get_article_by_url` | Full article by Zendesk URL |
 
-### Sketch Tools (9)
+### Sketch Tools (10)
 
 | Tool | Purpose |
 |------|---------|
 | `generate_floor_plan` | Validate + store + render a FloorPlan JSON (description enforces: don't use if sketch exists) |
+| `analyze_floor_plan_image` | Send image to CV service, return source image + extracted room JSON as MCP content blocks |
 | `get_sketch` | Retrieve plan summary (walls, rooms, areas) |
 | `open_sketcher` | Return browser sketcher URL |
 | `update_sketch` | Apply changes + broadcast to browsers (description enforces: prefer over generate_floor_plan) |
@@ -230,6 +267,208 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 |------|---------|
 | `search_design_knowledge` | Search chunked articles + agent insights by query, room type, design aspect |
 | `log_insight` | Store agent-discovered design patterns with source chunk references + confidence |
+
+---
+
+## CV Floor Plan Extraction
+
+### Architecture
+
+The CV pipeline runs as a **FastAPI service on a Hetzner VPS**, deployed via Docker. The Cloudflare Worker calls it over HTTP.
+
+```
+User uploads image → /upload page → stored in D1 (uploaded_images)
+                                       ↓
+Agent calls analyze_floor_plan_image → Worker fetches image from D1
+                                       ↓
+                                     Worker POSTs to cv.kworq.com:8100/analyze
+                                       ↓
+                                     CV service fetches image_url (or accepts base64)
+                                       ↓
+                                     OpenCV pipeline → rooms, walls, text regions
+                                       ↓
+                                     JSON response → Worker formats result
+                                       ↓
+                                     Returns: source image (MCP image block) + CV JSON (text block)
+```
+
+**Why Hetzner, not Cloudflare Workers?** OpenCV and Tesseract require native binaries (~200MB) that can't run in Workers. The CV service needs a real Linux environment with apt-get packages.
+
+**Why a domain, not a bare IP?** Cloudflare Workers cannot `fetch()` to raw IP addresses (error 1003). The Hetzner box is exposed via a DNS A record (`cv.kworq.com` → server IP, DNS-only / grey cloud). Port 8100 works fine with a domain — the restriction is on IPs, not ports.
+
+**Why return the image inline?** Claude Desktop and other MCP clients can't always fetch arbitrary URLs. By returning the source image as an MCP `image` content block alongside the CV JSON, the agent can visually verify the extraction without needing to download the image separately.
+
+### CV Pipeline (`cv-service/cv/pipeline.py`)
+
+```
+analyze_image(image)
+  ├── prepare(image)              → binary wall mask (walls=255, rooms=0)
+  ├── find_floor_plan_bbox(binary) → crop region excluding headers/legends
+  ├── detect_walls(binary)        → wall segments [{start, end, ...}]
+  ├── detect_rooms(binary)        → room regions [{bbox, centroid, mask, ...}]
+  ├── extract_text_regions(image) → OCR results [{text, center, ...}]
+  ├── _calibrate_scale(walls, text_regions) → cm-per-pixel scale factor
+  └── build_floor_plan_input(rooms, text_regions, scale) → SimpleFloorPlanInput JSON
+```
+
+### Preprocessing (`cv-service/cv/preprocess.py`)
+
+Two-pass wall mask extraction:
+
+1. **Threshold pass** (fast, for clean plans with dark walls):
+   - Strict binary threshold (< 50) for near-black pixels
+   - Adaptive threshold restricted to dark pixels (< 80) for robustness
+   - Combined with OR
+
+2. **Edge pass** (fallback when < 1% wall pixels found):
+   - Otsu's method for automatic foreground/background separation
+   - Canny edge detection + morphological thickening
+   - Combined for filled regions + reinforced boundaries
+
+3. **Component filtering** — removes noise blobs while keeping elongated wall-like segments (aspect ratio > 3)
+
+4. **Floor plan bbox** — density-based detection of the actual floor plan region, excluding header/legend areas. Uses row/column pixel density at 15% of peak threshold.
+
+### Room Detection (`cv-service/cv/rooms.py`)
+
+1. **Close door gaps** — morphological close with a kernel sized to span realistic door openings (15–80px, capped at image_dim/10). Previous kernel was image_dim/3 which merged entire rooms.
+2. **Invert** — rooms become white regions
+3. **Connected components** — each region with area > 1% of image area becomes a room
+4. **Output** — bbox, centroid, area, and binary mask per room
+
+### Label Assignment (`cv-service/cv/output.py`)
+
+1. **Filter text regions** — exclude dimension strings, single characters, and text outside the floor plan bbox
+2. **Assign to rooms** — primary: check if label center falls inside room's binary mask. Fallback: check if label center is inside room's bounding box.
+3. **Room-name filtering** — a word list (~40 common room names like "bedroom", "kitchen", "foyer") filters OCR noise. Title-case alphabetic words of 4+ chars are also accepted.
+
+### Scale Calibration
+
+Matches dimension text labels to nearby walls:
+- For each OCR text region that parses as a valid dimension (metric or imperial)
+- Find the nearest wall where the label is positioned perpendicular to the wall
+- Compute `cm / wall_pixel_length` for each match
+- Use the median as the scale factor
+- Fallback: `1000 / image_width` (assumes 10m-wide floor plan)
+
+### Deployment
+
+```bash
+# One-command deploy to Hetzner
+./cv-service/deploy-hetzner.sh <server-ip> [ssh-key-path]
+```
+
+The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-service directory, runs `docker compose up --build -d`, and verifies via health check.
+
+### FastAPI Endpoints
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/health` | GET | Health check |
+| `/analyze` | POST | Accept `{image, image_url, name}`, run CV pipeline, return rooms + meta |
+
+The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], meta}`.
+
+---
+
+## Image Upload System
+
+Users upload floor plan images via the `/upload` page, which stores them in D1 and returns a URL the agent can use with `analyze_floor_plan_image`.
+
+### Flow
+
+```
+User drags/pastes image → /upload page
+  → POST /api/upload-image (binary body, Content-Type header)
+  → Store base64 in D1 uploaded_images table (max 10MB)
+  → Return { url: "/api/images/<uuid>", id }
+
+Agent calls analyze_floor_plan_image with image_url
+  → Worker fetches image from /api/images/<id> (same-origin)
+  → Returns image as MCP image content block
+  → Worker POSTs image_url to CV service
+  → CV service fetches image, runs pipeline, returns JSON
+```
+
+### Upload Page (`src/setup/upload.ts`)
+
+Single-file HTML page at `/upload` with:
+- Drag-and-drop zone
+- Clipboard paste support
+- File picker (PNG, JPG, max 10MB)
+- Image preview
+- Copy-to-clipboard URL output
+- Hint text directing users to paste URL in Claude conversation
+
+### Image Storage
+
+Images stored as base64 text in D1 `uploaded_images` table. Served via `GET /api/images/:id` with appropriate `Content-Type` and 1-hour cache headers. UUIDs as IDs.
+
+---
+
+## Agent Workflows
+
+### Copy Mode (Reference Image → Floor Plan)
+
+When a user provides a floor plan image to replicate:
+
+```
+Step 1 — ANALYZE IMAGE
+  analyze_floor_plan_image(image_url) → CV extracts rooms + dimensions
+  Agent sees: source image (inline) + CV JSON
+
+Step 2 — REVIEW & ADJUST
+  Agent compares CV output against source image visually
+  Fixes: misdetected labels, merged open-plan rooms, scale errors
+  Rounds dimensions to nearest 10cm
+
+Step 3 — ADD OPENINGS
+  Agent adds doors/windows based on source image
+  Interior: {type, between: [room1, room2]}
+  Exterior: {type, room, wall: "north"|...}
+
+Step 4 — ADD FURNITURE
+  Agent places only furniture visible in reference image
+  Positions relative to room top-left corner
+
+Step 5 — GENERATE
+  generate_floor_plan(adjusted data) → preview_sketch → verify → fix
+```
+
+### Template Mode (Description → Floor Plan)
+
+When a user describes what they want:
+
+```
+search_design_knowledge (per room type)
+  → list_templates → pick closest match
+  → get_template → adapt dimensions/rooms/furniture
+  → generate_floor_plan → preview_sketch (visual verification)
+  → fix issues via update_sketch → preview_sketch again if needed
+  → suggest_improvements (spatial data + design knowledge)
+```
+
+### Modification Mode (Existing Sketch)
+
+When a sketch already exists, the agent must use `update_sketch` (not `generate_floor_plan`). Tool descriptions enforce this.
+
+```
+get_sketch → read current state
+  → update_sketch with incremental changes
+  → preview_sketch (required for structural changes, skippable for cosmetic)
+  → fix regressions if found
+  → suggest_improvements
+```
+
+### Visual Feedback Loop
+
+`preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block.
+
+Tool descriptions enforce the loop:
+- `generate_floor_plan` marks the loop as **required** — agents must not present a plan they haven't visually verified
+- `preview_sketch` describes itself as "your eyes" with a 5-point checklist (wall overlaps, furniture placement, missing openings, room sizing, label readability)
+- `update_sketch` requires preview after structural changes but allows skipping for cosmetic edits
+- **Iteration budget:** If the user provided a reference image or detailed measurements, 1 preview check suffices. For vague descriptions, expect 1–2 fix rounds. Max 3 iterations total to keep wait time under ~30 seconds.
 
 ---
 
@@ -323,18 +562,6 @@ Six floor plan templates agents use as starting points. The agent silently picks
 
 Each template is a complete, valid FloorPlan JSON file including fully connected walls, room polygons, doors, windows, and pre-placed furniture with architectural symbols. Templates were regenerated to v3 quality using RoomSketcher design knowledge research.
 
-**Agent workflow for new sketches:** `search_design_knowledge` (per room type) → `list_templates` → pick closest match → `get_template` → adapt dimensions/rooms/furniture → `generate_floor_plan` → `preview_sketch` (visual verification) → fix issues via `update_sketch` → `preview_sketch` again if needed → `suggest_improvements` (returns spatial data + design knowledge). Tool descriptions guide agents to search design knowledge before generating and to visually verify before presenting results.
-
-**Agent workflow for modifications:** When a sketch already exists, the agent must use `update_sketch` (not `generate_floor_plan`). The tool descriptions enforce this: `generate_floor_plan` says "do NOT call this tool if a sketch already exists", and `update_sketch` says "PREFER THIS over generate_floor_plan". The workflow is: `get_sketch` → read current state → `update_sketch` with incremental changes → `preview_sketch` (visual verification, required for structural changes, skippable for cosmetic changes like renames) → fix regressions if found → `suggest_improvements` (includes design knowledge per room type).
-
-**Visual feedback loop:** `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block. This gives agents pixel-level understanding of what they've built — the same feedback loop used during development with Playwright screenshots, but available as a tool.
-
-Tool descriptions enforce the loop with nuanced iteration guidance:
-- `generate_floor_plan` marks the loop as **required** — agents must not present a plan they haven't visually verified
-- `preview_sketch` describes itself as "your eyes" with a 5-point checklist (wall overlaps, furniture placement, missing openings, room sizing, label readability)
-- `update_sketch` requires preview after structural changes but allows skipping for cosmetic edits
-- **Iteration budget:** If the user provided a reference image or detailed measurements, 1 preview check suffices. For vague descriptions, expect 1–2 fix rounds. Max 3 iterations total to keep wait time under ~30 seconds.
-
 **Storage:** Templates are static JSON files in `src/sketch/templates/`, validated against `FloorPlanSchema` at build time.
 
 ---
@@ -369,7 +596,7 @@ Tool descriptions enforce the loop with nuanced iteration guidance:
 | Dining (3) | dining-table, dining-chair, sideboard |
 | Hallway (1) | coat-hook |
 
-**Rendering:** `furnitureDefsBlock()` generates a `<defs>` block with `<symbol>` elements for each type. Items render via `<use>` with position/rotation transforms. Uses `vector-effect="non-scaling-stroke"` for DPI-independent rendering. Unknown types fall back to a labeled rectangle.
+**Rendering:** `furnitureDefsBlock()` generates a `<defs>` block with `<symbol>` elements for each type. Items render via `<use>` with position/rotation transforms. Uses `vector-effect="non-scaling-stroke"` for DPI-independent rendering. Unknown types fall back to a labeled rectangle. All text in SVG symbols is XML-escaped via `escXml()` to prevent XSS.
 
 **Z-order:** rooms → furniture → walls → openings → dimensions → watermark. Openings must render above walls so white gap lines work correctly.
 
@@ -418,6 +645,19 @@ storage: #ECEFF1   utility: #ECEFF1    other: #FAFAFA
 
 **Impact:** Wall input drops from 7 required fields to 4 (`id`, `start`, `end`, `type`). Room input drops from 6 to 4 (`id`, `label`, `type`, `polygon`). Canvas is fully optional. All existing code (browser sketcher, `changes.ts`, `svg.ts`, `persistence.ts`) continues to work with the strict schema — no breaking changes.
 
+### Room-First Input (SimpleFloorPlanInput)
+
+For agent convenience, `compile-layout.ts` accepts a simplified format where agents specify rooms as rectangles or polygons, and the system auto-generates walls, room polygons, and canvas:
+
+```
+SimpleFloorPlanInput
+├── rooms[]: {label, x, y, width, depth} or {label, polygon: [{x,y}...]}
+├── openings[]: {type, between: [room1, room2]} or {type, room, wall: "north"|...}
+└── furniture[]: {type, room, x, y, width, depth}
+```
+
+This is the primary input format used by both template mode and copy mode (CV output maps directly to this schema).
+
 ---
 
 ## CTA System
@@ -458,7 +698,7 @@ toolCallCount: number
 
 `floorPlanToSvg(plan)` renders a complete SVG with:
 
-1. **Rooms** — colored polygons + label + area text at centroid
+1. **Rooms** — colored polygons + XML-escaped label + area text at centroid
 2. **Furniture** — architectural top-down symbols via `<defs>` / `<use>`, with position/rotation transforms; falls back to labeled rectangles for unknown types
 3. **Walls** — lines with thickness by type (exterior 4px, interior 2px, divider 1px dashed)
 4. **Openings** — door swing arcs, window parallel lines, plain gaps
@@ -478,7 +718,7 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 
 ### SVG Rasterizer (`src/sketch/rasterize.ts`)
 
-`svgToPng(svg, width?)` converts SVG strings to PNG using `@cf-wasm/resvg` (WASM, runs in-Worker). Default 1200px width, height auto-derived from viewBox. Used by `preview_sketch` MCP tool and `GET /api/sketches/:id/preview.png` HTTP endpoint.
+`svgToPng(svg, width?)` converts SVG strings to PNG using `@cf-wasm/resvg` (WASM, runs in-Worker). Default 1200px width, height auto-derived from viewBox. PNG bytes are base64-encoded via chunked `btoa()` (not Node `Buffer`, which is unavailable in Cloudflare Workers runtime). Used by `preview_sketch` MCP tool and `GET /api/sketches/:id/preview.png` HTTP endpoint.
 
 ---
 
@@ -580,9 +820,9 @@ The canvas viewBox adjusts based on the bottom sheet state to keep content visib
 - Tap detection: <10px movement + <300ms → select element or collapse sheet
 - `touch-action: none` on SVG prevents browser gesture interference
 
-### Setup & Onboarding Pages
+### Setup, Upload & Onboarding Pages
 
-Two static pages for user acquisition, served from `src/setup/`.
+Three static pages for user acquisition and image handling, served from `src/setup/`.
 
 **Home page (`/`)** — `src/setup/home.ts`
 - Landing page with hero, feature grid (Generate, Edit, Design Knowledge, Export), platform logos (Claude, ChatGPT, Gemini, Perplexity), example prompts, and CTAs
@@ -600,7 +840,13 @@ Two static pages for user acquisition, served from `src/setup/`.
 - Prerequisites noted (paid plan requirements)
 - RoomSketcher Pro CTA at bottom
 
-**URL strategy:** Internal navigation uses relative paths (`/setup`, `/health`). The MCP URL shown to users is the only absolute URL, built from `env.WORKER_URL` to ensure it shows the custom domain (`roomsketcher.kworq.com/mcp`), not the raw workers.dev URL.
+**Upload page (`/upload`)** — `src/setup/upload.ts`
+- Drag-and-drop, file picker, and clipboard paste support for floor plan images
+- Uploads to `/api/upload-image` (binary body, Content-Type header)
+- Shows copyable URL for pasting into Claude conversation
+- PNG and JPG, max 10MB
+
+**URL strategy:** Internal navigation uses relative paths (`/setup`, `/health`, `/upload`). The MCP URL shown to users is the only absolute URL, built from `env.WORKER_URL` to ensure it shows the custom domain (`roomsketcher.kworq.com/mcp`), not the raw workers.dev URL.
 
 ---
 
@@ -630,6 +876,9 @@ articles_fts(title, body_text)  -- FTS5 virtual table with auto-sync triggers
 -- Sketches
 sketches(id TEXT PK, plan_json, svg_cache, created_at, updated_at, expires_at)
 
+-- Image uploads (temporary storage for CV analysis)
+uploaded_images(id TEXT PK, data TEXT base64, content_type, created_at)
+
 -- Design knowledge (chunked articles)
 design_knowledge(id, article_id FK, article_updated_at, heading, content,
                  room_types JSON, design_aspects JSON)
@@ -654,15 +903,42 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 |-------|--------|---------|
 | `/` | GET | Home/landing page (feature overview, platform links) |
 | `/setup` | GET | MCP setup/onboarding page (per-platform install guides) |
+| `/upload` | GET | Image upload page (drag-drop, paste, URL output for CV) |
 | `/mcp` | * | MCP protocol (McpAgent) |
 | `/health` | GET | Health check + last sync time |
 | `/admin/sync` | POST | Trigger Zendesk sync |
+| `/api/upload-image` | POST | Store uploaded image in D1, return URL |
+| `/api/images/:id` | GET | Serve uploaded image by UUID |
 | `/api/sketches/:id/preview.png` | GET | Rasterized PNG preview (1200px wide) |
 | `/api/sketches/:id` | GET | Load plan + SVG from D1 |
 | `/api/sketches/:id` | PUT | Save plan to D1 |
 | `/api/sketches/:id/export.pdf` | GET | Download SVG file |
 | `/ws/:id` | GET (upgrade) | WebSocket → SketchSync DO |
 | `/sketcher/:id` | GET | Serve sketcher SPA HTML |
+
+---
+
+## Infrastructure
+
+### Cloudflare Worker
+
+- **Runtime:** Cloudflare Workers with `nodejs_compat` flag
+- **Bindings:** D1 database, 2 Durable Objects (RoomSketcherHelpMCP, SketchSync)
+- **Env vars:** `WORKER_URL` (public domain), `CV_SERVICE_URL` (CV service endpoint), `CTA_VARIANT` (optional A/B)
+- **Bundle size:** ~1.4MB gzip (mostly `@cf-wasm/resvg` WASM at ~1MB)
+- **Deploy:** `bash deploy.sh` (wraps `wrangler deploy` + sync + health check)
+
+### Hetzner VPS (CV Service)
+
+- **Runtime:** Docker container (Python 3.11 + Tesseract + OpenCV)
+- **Port:** 8100 (HTTP, no TLS — internal service)
+- **DNS:** `cv.kworq.com` A record (DNS-only, grey cloud) → server IP
+- **Deploy:** `bash cv-service/deploy-hetzner.sh <ip>` (rsync + docker compose up)
+- **No auth:** The CV service is stateless and processes only images sent to it. No secrets or user data stored.
+
+### Networking Constraint
+
+Cloudflare Workers cannot `fetch()` to bare IP addresses (error 1003). All external service URLs must use domain names. This is why `CV_SERVICE_URL` is set to `http://cv.kworq.com:8100` rather than `http://<ip>:8100`. Port 8100 works fine with DNS-only records (no Cloudflare proxy).
 
 ---
 
@@ -678,6 +954,7 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 | Nanoid for sketch IDs | URL-friendly, short, collision-safe with TTL |
 | Single-file SPA (no build) | Zero frontend tooling; served as a template literal from Workers |
 | Two-schema approach (input + strict) | Smart defaults without breaking existing code or storage schema |
+| Room-first input (SimpleFloorPlanInput) | Agents specify rooms; system generates walls, polygons, canvas |
 | Tools not Prompts for templates | Prompts are client-initiated; agents cannot call `prompts/get` mid-conversation |
 | CTA via env var (CTA_VARIANT) | Variant switching with no code redeploy — wrangler secret change only |
 | `shouldSendProtocolMessages() → false` | Prevents Agent framework's `CF_AGENT_STATE` noise on WebSocket; we use our own protocol |
@@ -685,106 +962,19 @@ Sketches auto-expire after 30 days. Cleanup runs via cron. Agent insights are au
 | Chunking in sync pipeline | Design knowledge extracted inline during Zendesk sync, not as a separate pass |
 | JSON arrays for tags | `room_types`/`design_aspects` stored as JSON, filtered via `json_each()` in FTS queries |
 | `env.WORKER_URL` for MCP URL | Setup page shows custom domain, not raw workers.dev — only place absolute URLs are needed |
-| Relative links in all pages | Home, setup, sketcher use relative paths for proxy transparency |
+| Relative links in all pages | Home, setup, upload, sketcher use relative paths for proxy transparency |
 | Tool descriptions enforce update-first | `generate_floor_plan` says "don't use if sketch exists"; `update_sketch` says "prefer this" |
 | `xMidYMin meet` when sheet expanded | Top-aligns content in SVG so floor plan stays visible above the bottom sheet |
 | Bottom sheet peek = 100px | Includes handle + Save/SVG buttons fully visible above mobile browser chrome |
 | `@cf-wasm/resvg` for rasterization | CF Workers-optimized wrapper handles WASM init pitfalls; adds ~1MB gzip to bundle (total ~1.4MB, under 3MB free tier) |
 | `preview_sketch` as separate tool | Agent chooses when to verify visually; doesn't bloat every generate/update response |
+| `analyze_floor_plan_image` returns inline image | MCP clients can't always fetch arbitrary URLs; inline image lets agent verify CV output |
+| CV on Hetzner, not Workers | OpenCV + Tesseract need native binaries; can't run in V8 isolate |
+| DNS-only A record for CV | Workers can't fetch bare IPs (error 1003); domain name on non-standard port works fine |
+| Image upload to D1 | Simple storage for temporary images; no external blob service needed |
 | Direct DOM updates during drag | `setAttribute()` on wall lines + handle circles avoids full innerHTML rebuild; full `render()` only on mouseup for performance |
 | Grab offset on drag start | Stores cursor-to-endpoint offset at mousedown; prevents handle jump when drawer/sheet changes SVG layout |
 | Delta-based room polygon propagation | Applies drag delta to room vertices (not snap-to-endpoint) to preserve inward thickness offset |
 | Batch undo for multi-wall drags | Single endpoint drag that moves N connected walls + room polygons = 1 undo step |
-| `interactionMode` state machine | Clean separation of click, drag, pan, rotate states; prevents mode conflicts |
-
----
-
-## Known Issues
-
-### State sync conflict
-When Claude updates a sketch via MCP while a browser has it open, the SketchSync DO may have stale in-memory state. The DO should reload from D1 before applying browser changes if it detects a version mismatch. Not yet implemented.
-
-### Floating-point coordinates
-Door positions on vertical walls produce scientific notation coordinates (e.g., `6.12e-15` instead of `0`). Cosmetic only — rendering is correct.
-
-### Window/opening editing limitations
-Windows and doors on walls are rendered and visible, but cannot yet be directly edited (moved, resized, or property-changed) via the browser sketcher UI. Openings can be added by clicking a wall when Door or Window tool is active, and removed via the properties panel delete button, but repositioning or resizing requires MCP `update_sketch` changes.
-
-### Room polygon drift on complex multi-drag sequences
-The delta-based room polygon propagation works well for single drags and undo/redo, but after many successive drags that disconnect and reconnect walls, polygon vertices can accumulate small offsets. The drift repair pass catches most cases but may not handle all edge cases with non-rectangular room geometries.
-
----
-
-## Future Work
-
-These are identified extensions from the original build plan, ready for implementation:
-
-### Phase 2 — Furniture Editing & Opening Properties
-- **Furniture drag-and-drop** — drag furniture items to reposition (currently can only rotate via handle); drag from a catalog palette to add new items
-- **Opening CRUD polish** — full property editing for doors/windows (reposition along wall, resize, change swing direction, edit sill height)
-- **Furniture catalog browser** — in-sketcher panel to browse and place furniture by category
-- **Annotations** — dimension lines, text labels, symbols, arrows
-- **Material finishes** — floor/wall/ceiling textures per room
-- **Furniture icons** — photorealistic or isometric alternatives to current proportional SVG shapes; link to RoomSketcher product catalog via `catalogId`; material/color variants
-
-### V2 — Export & Rendering
-- **PDF export** — high-fidelity PDF via a proper SVG→PDF pipeline (pdf-lib attempted and reverted due to missing path fidelity for door arcs; consider Puppeteer/wkhtmltopdf or client-side jsPDF)
-- **3D rendering** — Three.js or Babylon.js integration for walkthroughs; furniture items rendered as 3D models
-- **Image export** — PNG/JPG rasterization
-
-### V2 — Collaboration
-- **Multi-user editing** — SketchSync DO already tracks `sketchWsClients` set; needs conflict resolution (OT or CRDT)
-- **Version history** — store change log per sketch for undo/redo across sessions
-- **Sharing** — public/private sketch URLs with access control
-
-### V2 — Smarter AI
-- **Room detection** — auto-detect rooms from wall topology (currently manual polygon definition)
-- **Angle constraints** — constrain wall angles to 45/90 degree increments
-- **AI layout suggestions** — use room type + area to suggest furniture placement
-- **Building code validation** — minimum door widths, egress requirements
-
-### V2 — Design Knowledge Evolution
-- **Semantic embeddings** — replace keyword tagging with vector embeddings for better search relevance
-- **Insight validation** — human review workflow for agent-discovered patterns
-- **Cross-article reasoning** — link related chunks across different articles
-
-### V2 — Template Growth
-- Community-submitted templates
-- Region-specific templates (US vs. European layouts)
-- Templates with material finishes
-
-### V2 — CTA Evolution
-- External A/B test service integration
-- Per-user variant assignment
-- Conversion tracking pipeline
-- Dynamic CTA copy from a CMS
-
-### Infrastructure
-- **State sync fix** — SketchSync DO should check D1 version before applying in-memory changes
-- **Prettier formatting** — codebase should be reformatted to match `.prettierrc` (4-space indent, no semicolons, trailing commas)
-- **E2E tests** — Playwright tests for the browser sketcher
-- **Rate limiting** — protect `/admin/sync` and sketch creation endpoints
-
----
-
-## Deployment
-
-**Always deploy via `deploy.sh`** — never run `wrangler deploy` directly.
-
-The script handles the full deployment pipeline:
-
-1. Loads `.env` file (validates `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`)
-2. Ensures a `workers.dev` subdomain exists (creates one if needed)
-3. Ensures D1 database exists (creates if needed)
-4. Patches `wrangler.toml` with the real `database_id`
-5. Runs D1 schema migration (`src/db/schema.sql`)
-6. `npm ci` + `wrangler deploy`
-7. Triggers initial Zendesk sync
-8. Health check
-
-```bash
-bash deploy.sh        # uses .env
-bash deploy.sh .env.staging  # custom env file
-```
-
-**Custom domain:** The worker is proxied through `roomsketcher.kworq.com` via Cloudflare DNS. The `WORKER_URL` env var in `wrangler.toml` is set to the custom domain for URL generation.
+| `btoa()` chunked encoding for base64 | Node `Buffer` unavailable in Cloudflare Workers runtime; chunked `String.fromCharCode` + `btoa` works |
+| XML escaping in SVG text | `escXml()` prevents XSS from user-provided room labels and furniture types |
