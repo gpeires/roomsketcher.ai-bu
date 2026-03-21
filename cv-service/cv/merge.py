@@ -174,6 +174,34 @@ def cluster_rooms(
     return result
 
 
+def cluster_rooms_step(
+    strategy_room_lists: list[dict],
+    context: MergeContext,
+) -> MergeStepResult:
+    """Pipeline step wrapper around cluster_rooms that surfaces removal reasons."""
+    h, w = context.image_shape
+    max_area = h * w * 0.5
+
+    removed = []
+    for entry in strategy_room_lists:
+        for room in entry["rooms"]:
+            if room.get("area_px", 0) > max_area:
+                room_copy = dict(room)
+                room_copy["removal_reason"] = "giant_room"
+                room_copy["_strategy"] = entry["strategy"]
+                removed.append(room_copy)
+
+    rooms_in = sum(len(e["rooms"]) for e in strategy_room_lists)
+    clustered = cluster_rooms(strategy_room_lists, context.image_shape)
+
+    meta = {
+        "rooms_in": rooms_in,
+        "clusters_out": len(clustered),
+        "giant_rooms_removed": len(removed),
+    }
+    return MergeStepResult(rooms=clustered, removed=removed, meta=meta)
+
+
 def assemble_rooms(
     rooms: list[dict],
     confidence_scores: list[float],

@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
-from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox
+from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox, cluster_rooms_step
 
 
 def _make_room(centroid, bbox=None, area_px=1000):
@@ -249,6 +249,32 @@ class TestClusterRooms:
         ], image_shape=(400, 600))
         assert len(result) == 1
         assert result[0]["area_px"] == 10000
+
+
+class TestClusterRoomsStep:
+    def test_matches_existing_cluster_rooms(self):
+        rooms = [_make_room((150, 200), area_px=5000), _make_room((450, 200), area_px=5000)]
+        strategy_rooms = [
+            {"strategy": "raw", "rooms": rooms},
+            {"strategy": "otsu", "rooms": rooms},
+        ]
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
+
+        old_result = cluster_rooms(strategy_rooms, (400, 600))
+        step_result = cluster_rooms_step(strategy_rooms, ctx)
+
+        assert len(step_result.rooms) == len(old_result)
+        for old, new in zip(old_result, step_result.rooms):
+            assert old["centroid"] == new["centroid"]
+            assert old["confidence"] == new["confidence"]
+
+    def test_surfaces_giant_room_removals(self):
+        giant = _make_room((300, 200), area_px=300000)
+        normal = _make_room((150, 200), area_px=5000)
+        strategy_rooms = [{"strategy": "raw", "rooms": [giant, normal]}]
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
+        result = cluster_rooms_step(strategy_rooms, ctx)
+        assert any(r.get("removal_reason") == "giant_room" for r in result.removed)
 
 
 class TestAssembleRooms:
