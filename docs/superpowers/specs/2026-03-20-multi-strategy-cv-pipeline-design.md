@@ -19,20 +19,26 @@
 Image Input
     |
     v
-[CV Service — Phase 1]
+[CV Service — Phase 1: Wall-Level Merging]
   Run all 26 strategies in parallel (ThreadPoolExecutor)
-  Each strategy -> _run_pipeline() -> rooms, walls, openings
-  merge_strategies() -> single CVResult with confidence scores
+  Each strategy -> binary wall mask
+  merge_wall_masks() -> OR top strategy masks -> unified wall mask
+  Clean up (filter_components, morphological close)
+  Run room/wall/opening detection ONCE on merged mask
+  assemble_rooms() -> clean rectangular room specs + confidence
+  -> CVResult with confidence scores
     |
     v
 [Worker Orchestrator — existing + Phase 3 fix]
   tierRooms(cvResult) -> split into high/medium/low confidence
-  AI specialists see high+medium rooms only
+  AI specialists see: original image + high/medium rooms as structured hints
   Low-confidence rooms held as "hint bank"
     |
     v
 [AI Gather — existing, parallel]
   Room Namer, Layout Describer, Symbol Spotter, Dimension Reader
+  Each specialist SEES the original color image (vision model)
+  Each specialist RECEIVES clean room list as structured context
   (Fix: Workers AI payload format bug)
     |
     v
@@ -52,11 +58,11 @@ PipelineOutput (rooms with labels, confidence, sources)
 
 ---
 
-## Phase 1: Multi-Strategy CV Merging
+## Phase 1: Wall-Level Multi-Strategy Merging
 
 ### What changes
 
-Replace `pick_winner()` in `cv-service/cv/pipeline.py` with `merge_strategies()`.
+Replace `pick_winner()` in `cv-service/cv/pipeline.py` with wall-level merging. Instead of picking one strategy's rooms, we merge wall masks from multiple strategies, then run room detection once on the combined mask.
 
 ### Current behavior
 
@@ -64,62 +70,86 @@ Replace `pick_winner()` in `cv-service/cv/pipeline.py` with `merge_strategies()`
 
 ### New behavior
 
-`analyze_image()` runs all 26 strategies through the full pipeline (not just preprocessing — each gets wall detection, room detection, opening detection, the works). Then `merge_strategies()` unions the room detections across all strategies into a single, richer `CVResult`.
+`analyze_image()` runs all 26 strategies to produce binary wall masks, merges the best masks at the pixel level, then runs the full detection pipeline (rooms, walls, openings, OCR, scale) once on the merged result. The merge happens at the most fundamental level — walls — so combined masks can close gaps and create room enclosures that no single strategy found alone.
 
-### merge_strategies() algorithm
+### Algorithm
 
-**Input**: List of per-strategy pipeline results (each has rooms, walls, openings, meta).
+**Step 1 — Run all strategies in parallel.**
+Each strategy function returns a `StrategyResult(image, is_binary)`. For strategies with `is_binary=False`, run through `prepare()` to get a binary wall mask. Result: 26 binary wall masks.
 
-**Step 1 — Rank strategies by rooms_detected descending.**
+**Step 2 — Rank strategies.**
+Run quick room detection (`detect_rooms()`) on each individual mask to get `rooms_detected` count. Rank descending.
 
-**Step 2 — Select anchor strategy.** The strategy with the highest `rooms_detected` becomes the anchor. Its room polygons are the base output. If tied, prefer `canny_dilate` (most consistent performer across test images).
+**Step 3 — Select top N masks for merging.**
+Take the top strategies by rooms_detected. Skip strategies that found 0 rooms (they contribute only noise). The number of strategies to include is dynamic — all strategies that found >= 1 room participate in the merge.
 
-**Step 3 — Match rooms across strategies.** For each non-anchor strategy's rooms:
-- Compute centroid of each room polygon
-- Match to anchor rooms by centroid proximity (within 20% of image diagonal) AND IoU overlap > 0.3
-- Matched rooms: increment agreement count on the anchor room
-- Unmatched rooms: candidate for addition
+**Step 4 — Merge wall masks (bitwise OR).**
+OR the selected binary masks together. This unions all detected walls — strategy A's walls fill gaps in strategy B's walls.
 
-**Step 4 — Add unique rooms.** Rooms found by non-anchor strategies that don't match any anchor room:
-- Add to output with lower base confidence
-- Tag with which strategy found them
+**Step 5 — Clean the merged mask.**
+- `morphologyEx(MORPH_CLOSE)` to seal small gaps created by OR noise
+- `filter_components()` to remove noise blobs (same existing logic)
+- This is critical — raw OR of many masks will be noisy. Cleaning produces a wall mask that's more complete than any single strategy but not cluttered with artifacts.
 
-**Step 5 — Score confidence.**
-- Room found by 5+ strategies -> 0.9
-- Room found by 3-4 strategies -> 0.7
-- Room found by 2 strategies -> 0.5
-- Room found by 1 strategy only -> 0.3
+**Step 6 — Run full pipeline once on merged mask.**
+Call `_run_pipeline()` with the merged+cleaned binary mask:
+- `detect_walls()` → wall segments
+- `detect_rooms()` → room polygons
+- `detect_openings()` → doors/windows
+- `extract_text_regions()` → OCR on original color image (not the mask)
+- `_calibrate_scale()` → cm-per-pixel
+- `build_floor_plan_input()` → structured room specs
 
-**Step 6 — Select polygons.** Use the anchor strategy's polygon for matched rooms. For unique (non-anchor) rooms, use the originating strategy's polygon.
+**Step 7 — Score room confidence.**
+For each detected room in the merged result, check which individual strategy masks contributed to it:
+- For each room polygon, check overlap with each strategy's individual room detections
+- Count how many strategies independently detected a room in that area
+- Confidence scoring:
+  - Found by 5+ strategies → 0.9
+  - Found by 3-4 strategies → 0.7
+  - Found by 2 strategies → 0.5
+  - Found by 1 strategy only (exists only because of merged walls) → 0.3
 
-**Step 7 — Merge openings.** Union openings across all strategies, dedupe by proximity.
+**Step 8 — Assemble clean room output.**
+`assemble_rooms()` converts the raw room polygons into clean rectangular bounding boxes with:
+- Snapped positions (nearest 10px grid)
+- Simplified dimensions (width x depth)
+- Confidence scores
+- `found_by` list (which strategies contributed)
+- OCR-assigned labels (from centroid proximity to text regions)
 
-**Step 8 — Build CVResult.** Same shape as today, but with added fields:
+This clean output is what flows to the AI pipeline — not noisy polygons, but structured room specs the small model can reason about.
+
+**Step 9 — Build CVResult.**
+Same shape as today, with added fields:
 - `rooms[].confidence` (float 0.3-1.0)
 - `rooms[].found_by` (list of strategy names)
 - `meta.strategies_run` (count)
-- `meta.anchor_strategy` (string)
+- `meta.strategies_contributing` (count of strategies that found >= 1 room)
 - `meta.merge_stats` (rooms per confidence tier)
 
 ### Key design decisions
 
-- **Run all 26 strategies through full pipeline, not just preprocessing.** The sweep endpoint currently only runs preprocessing + room detection. The merge needs full pipeline output (rooms with polygons, walls, openings). This means calling `_run_pipeline()` per strategy, not just the strategy function.
-- **OCR runs once on the original color image.** All strategies share the same OCR output. Label-to-room assignment differs because room polygons differ, but text extraction is identical. Run OCR once, assign labels per-strategy based on centroid proximity.
-- **Openings merge separately.** Opening detection depends on wall structure, which varies by strategy. Union all detected openings, dedupe by proximity (within 10px).
+- **Merge at wall level, not room level.** Walls are the fundamental signal. ORing wall masks can create room enclosures that no single strategy found — this is the key insight. Room-level merging can only combine rooms that already exist; wall-level merging can discover new ones.
+- **Only OR strategies that found >= 1 room.** Strategies that found 0 rooms (like lab_a_channel, saturation) contribute only noise to the merged mask. Excluding them keeps the merge clean.
+- **Run detection pipeline once, not 26 times.** The full pipeline (walls, rooms, openings, OCR, scale) is expensive. Running it once on the merged mask is much cheaper than running it per-strategy. Individual strategies only need quick room detection for ranking/confidence.
+- **OCR runs on the original color image.** Text extraction doesn't depend on the binary mask — it reads labels from the source image. Run once, assign to rooms by centroid proximity.
+- **Clean assembly for AI consumption.** The AI model doesn't see raw merged wall data. It sees clean rectangular room specs derived deterministically from the merged geometry. This protects the small model from noise while giving it structured hints to validate against the original image.
 - **The output shape is still CVResult.** The AI pipeline consumes it unchanged. Confidence and found_by are new metadata fields that flow through transparently.
 
 ### New files / changes
 
-- `cv-service/cv/pipeline.py` — add `merge_strategies()`, modify `analyze_image()` to use it instead of `pick_winner()`
-- `cv-service/cv/pipeline.py` — add `_match_rooms()` helper for centroid+IoU matching
-- `cv-service/cv/pipeline.py` — refactor `_run_pipeline()` to accept a pre-processed binary image (from strategy) instead of always calling `prepare()`
-- `cv-service/tests/test_merge.py` — new test file for merge logic
-- `cv-service/tests/test_pipeline.py` — update existing pipeline tests
+- `cv-service/cv/merge.py` — NEW: `merge_wall_masks()`, `score_room_confidence()`, `assemble_rooms()`
+- `cv-service/cv/pipeline.py` — modify `analyze_image()` to use wall-level merging instead of `pick_winner()`. Refactor `_run_pipeline()` to accept a pre-processed binary mask.
+- `cv-service/tests/test_merge.py` — NEW: unit tests for wall merging logic
+- `cv-service/tests/test_pipeline.py` — update integration tests
 
 ### Performance expectations
 
-- 26 strategies x full pipeline = ~26 * 10-15s on Hetzner with ThreadPoolExecutor(max_workers=8)
-- Total wall time: ~45-60s (strategies run in parallel, 8 at a time)
+- 26 strategy preprocessing runs in parallel (ThreadPoolExecutor, max_workers=8): ~15-20s
+- 26 quick room detections for ranking: ~10s (parallel)
+- 1 full pipeline run on merged mask: ~10-15s
+- Total wall time: ~30-45s
 - This is acceptable for Phase 1 (quality first). Phase 2 optimizes.
 
 ---
@@ -210,17 +240,22 @@ After `merge.ts` runs, reconcile with the hint bank:
 ### Phase 1 tests
 
 - **Unit tests** (`test_merge.py`):
-  - Two strategies with identical rooms -> rooms get high confidence
-  - Two strategies with non-overlapping rooms -> both rooms appear, lower confidence
-  - Anchor selection (highest room count wins, canny_dilate breaks ties)
-  - IoU matching with various overlap percentages
-  - Confidence scoring at each tier boundary
-  - Opening deduplication
+  - `merge_wall_masks()`: OR of two masks contains all walls from both
+  - `merge_wall_masks()`: strategies with 0 rooms are excluded
+  - `merge_wall_masks()`: merged mask is cleaned (no tiny noise blobs)
+  - `score_room_confidence()`: room found by 5 strategies -> 0.9
+  - `score_room_confidence()`: room found by 1 strategy -> 0.3
+  - `assemble_rooms()`: polygons converted to clean rectangles
+  - `assemble_rooms()`: positions snapped to grid
 
 - **Integration tests** (`test_pipeline.py`):
-  - `analyze_image()` returns confidence scores
-  - `analyze_image()` returns found_by lists
-  - Result has more rooms than any single strategy alone
+  - `analyze_image()` returns rooms with confidence scores
+  - `analyze_image()` returns rooms with found_by lists
+  - Merged result detects >= as many rooms as any single strategy (on synthetic test image)
+
+- **Key validation** (manual, on real images):
+  - Merged wall mask visually contains more complete walls than any individual mask
+  - Rooms detected from merged mask >= rooms from best single strategy
 
 - **Smoke tests** (3 test images, deployed):
   - Plan 1 (547 W 47th): `https://roomsketcher-help-mcp.10ecb923-workers.workers.dev/api/images/44e71e4b-e100-4572-aed1-674193c78785`
