@@ -20,6 +20,7 @@ class AnalyzeRequest(BaseModel):
 
 class PreprocessingMeta(BaseModel):
     strategy_used: str
+    anchor_strategy: str | None = None
     strategies_run: int = 0
     strategies_contributing: int = 0
 
@@ -41,6 +42,7 @@ class MetaOutput(BaseModel):
     strategies_contributing: int = 0
     merge_stats: MergeStats | None = None
     merge_time_ms: int = 0
+    merge_steps: dict | None = None
 
 class AnalyzeResponse(BaseModel):
     """Response allows rooms in both rect and polygon formats, and
