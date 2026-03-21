@@ -18,8 +18,8 @@ def bgr_image():
 
 
 class TestStrategyRegistry:
-    def test_has_27_strategies(self):
-        assert len(STRATEGIES) == 27
+    def test_has_28_strategies(self):
+        assert len(STRATEGIES) == 28
 
     def test_expected_names(self):
         expected = {"raw", "enhanced", "otsu", "adaptive_large",
@@ -31,7 +31,7 @@ class TestStrategyRegistry:
                     "niblack", "wolf",
                     "lab_a_channel", "lab_b_channel", "saturation",
                     "bilateral_adaptive", "median_otsu", "hough_lines",
-                    "thick_wall_open"}
+                    "thick_wall_open", "distance_wall_fill"}
         assert set(STRATEGIES.keys()) == expected
 
 
@@ -58,6 +58,7 @@ class TestStrategyOutputs:
         "niblack", "wolf",
         "lab_a_channel", "lab_b_channel", "saturation",
         "bilateral_adaptive", "median_otsu", "hough_lines",
+        "distance_wall_fill",
     ])
     def test_binary_strategies_return_mask(self, name, bgr_image):
         result = STRATEGIES[name](bgr_image.copy())
@@ -78,3 +79,33 @@ class TestStrategyOutputs:
         for name, fn in STRATEGIES.items():
             result = fn(bgr_image.copy())
             assert result.image.shape[:2] == (h, w), f"{name} changed image dimensions"
+
+
+class TestDistanceWallFill:
+    def test_fills_thick_wall_gap(self):
+        """Two parallel wall lines 12px apart should be bridged."""
+        img = np.ones((200, 200, 3), dtype=np.uint8) * 255
+        # Two parallel horizontal walls, 12px apart
+        img[88:93, 20:180] = 0   # top wall line (5px thick)
+        img[102:107, 20:180] = 0  # bottom wall line (5px thick)
+        # Gap between them: rows 93-101 (9px) — within 8px threshold
+        result = STRATEGIES["distance_wall_fill"](img.copy())
+        assert result.is_binary is True
+        # Check that the gap region is now filled
+        gap_region = result.image[95:100, 50:150]
+        fill_ratio = np.count_nonzero(gap_region) / gap_region.size
+        assert fill_ratio > 0.8, f"Gap not filled: {fill_ratio:.2f}"
+
+    def test_preserves_room_interior(self):
+        """Room interiors (far from walls) should stay empty."""
+        img = np.ones((400, 600, 3), dtype=np.uint8) * 255
+        # Outer walls
+        img[0:10, :] = 0
+        img[390:400, :] = 0
+        img[:, 0:10] = 0
+        img[:, 590:600] = 0
+        result = STRATEGIES["distance_wall_fill"](img.copy())
+        # Center of room should be empty
+        center = result.image[180:220, 280:320]
+        empty_ratio = 1 - (np.count_nonzero(center) / center.size)
+        assert empty_ratio > 0.9, f"Room center not empty: {empty_ratio:.2f}"

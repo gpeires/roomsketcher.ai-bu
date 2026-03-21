@@ -441,6 +441,22 @@ def _thick_wall_open(image: np.ndarray) -> StrategyResult:
     return StrategyResult(opened, is_binary=True)
 
 
+def _distance_wall_fill(image: np.ndarray) -> StrategyResult:
+    """Distance-transform wall fill to bridge thick wall pairs.
+
+    Thick walls rendered as two parallel lines (10-15px apart) have a gap
+    that distance transform can fill — all pixels within 8px of a wall edge
+    become wall. Room interiors (50-200px from walls) stay clear.
+    """
+    binary = prepare(image)
+    inverted = cv2.bitwise_not(binary)
+    dist = cv2.distanceTransform(inverted, cv2.DIST_L2, 5)
+    result = (dist < 8).astype(np.uint8) * 255
+    h, w = result.shape
+    result = filter_components(result, h * w)
+    return StrategyResult(result, is_binary=True)
+
+
 # ── Registry ──────────────────────────────────────────────────────────
 
 STRATEGIES: dict[str, callable] = {
@@ -478,4 +494,5 @@ STRATEGIES: dict[str, callable] = {
     "hough_lines": _hough_lines,
     # Thick wall handling
     "thick_wall_open": _thick_wall_open,
+    "distance_wall_fill": _distance_wall_fill,
 }
