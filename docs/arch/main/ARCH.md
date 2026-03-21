@@ -679,7 +679,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 
 ---
 
-## Known Issues & Status (as of 2026-03-20)
+## Known Issues & Status (as of 2026-03-21)
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
@@ -688,9 +688,9 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 ### Quality: CV room detection still imperfect
 
 Multi-strategy merge improved room counts but quality issues remain:
-- **OCR label concatenation** — when multiple text regions overlap one room polygon, labels concatenate: "Kitchen Bedroom Room Bath" instead of selecting the best match. This happens because `output.py` assigns ALL nearby text to a room.
+- **~~OCR label concatenation~~** — FIXED (2026-03-21). `output.py` now picks the single best label per room (prefers known room words, breaks ties by centroid proximity) instead of concatenating all matches.
 - **Logo/text regions detected as rooms** — "COMPASS", "WEST RESIDENCE CLUB CONDOMINIUMS" appear as rooms. The CV pipeline doesn't filter non-room regions (logos, legends, titles).
-- **Large merged rooms** — some strategies produce one giant room spanning most of the floor plan instead of individual rooms. This inflates cluster agreement counts.
+- **~~Large merged rooms~~** — FIXED (2026-03-21). `merge.py` now excludes rooms exceeding 50% of image area from clustering.
 
 ### Quality: Sketch generation from CV+AI data
 
@@ -700,9 +700,9 @@ The generated sketches don't closely match source images:
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
 - **Furniture placement is approximate** — Symbol Spotter detects fixtures but gives grid-cell positions, not pixel coords
 
-### Quality: Worker-side merge could use CV confidence data
+### Resolved: Worker-side merge now uses CV confidence data
 
-CV now sends `confidence` (0.3-0.9) and `found_by` (strategy names) per room. The Worker's `tierRooms()` uses confidence to split rooms into forAI/hintBank tiers. But the merge layer (`src/ai/merge.ts`) doesn't yet use these signals — it still starts all CV rooms at 0.3 confidence and builds up from specialist agreement. Higher CV confidence (0.9 = found by 5+ strategies) should boost the starting confidence.
+FIXED (2026-03-21). `merge.ts` now uses `room.confidence ?? 0.3` as the starting confidence instead of hardcoded 0.3. CV rooms found by 5+ strategies (confidence 0.9) retain their high confidence through the AI merge layer.
 
 ### Preprocessing metadata now flows through
 

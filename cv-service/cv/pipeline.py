@@ -18,7 +18,6 @@ from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
 from cv.merge import cluster_rooms
 import cv.enhance as _enhance_mod
-from cv.enhance import pick_winner
 
 log = logging.getLogger(__name__)
 

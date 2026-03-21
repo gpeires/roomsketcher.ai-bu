@@ -34,11 +34,15 @@ def cluster_rooms(
     diagonal = np.sqrt(h**2 + w**2)
     proximity = diagonal * 0.15
 
-    # Pool all rooms tagged with source strategy
+    # Pool all rooms tagged with source strategy, excluding giant rooms
+    # that span most of the image (detection artifacts, not real rooms)
+    max_area = h * w * 0.5
     tagged = []
     for entry in strategy_room_lists:
         strategy = entry["strategy"]
         for room in entry["rooms"]:
+            if room.get("area_px", 0) > max_area:
+                continue
             tagged.append({"room": room, "strategy": strategy})
 
     if not tagged:

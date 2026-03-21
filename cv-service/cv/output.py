@@ -195,8 +195,12 @@ def _convert_adjacency(
 
 
 def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
-    """Assign text labels to rooms using mask containment, with nearest-centroid fallback."""
-    room_labels: dict[int, list[str]] = {}
+    """Assign text labels to rooms using mask containment, with nearest-centroid fallback.
+
+    When multiple labels fall inside the same room, pick the single best one
+    (prefer known room words, break ties by proximity to room centroid).
+    """
+    room_labels: dict[int, list[dict]] = {}
 
     for label in labels:
         lx, ly = label["center"]
@@ -208,7 +212,7 @@ def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
             if mask is not None:
                 h, w = mask.shape
                 if 0 <= ly < h and 0 <= lx < w and mask[ly, lx] > 0:
-                    room_labels.setdefault(i, []).append(label["text"])
+                    room_labels.setdefault(i, []).append(label)
                     assigned = True
                     break
 
@@ -217,22 +221,51 @@ def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
             for i, room in enumerate(rooms):
                 bx, by, bw, bh = room["bbox"]
                 if bx <= lx <= bx + bw and by <= ly <= by + bh:
-                    room_labels.setdefault(i, []).append(label["text"])
+                    room_labels.setdefault(i, []).append(label)
                     assigned = True
                     break
 
-    # Build combined labels, filtering for room-name-like words
+    # Pick the single best label per room
     result = []
     for i, room in enumerate(rooms):
         r = dict(room)
         if i in room_labels:
-            words = room_labels[i]
-            # Keep only words that look like room names
-            filtered = [w for w in words if _is_room_label(w)]
-            if filtered:
-                r["label"] = " ".join(filtered)
+            candidates = room_labels[i]
+            # Filter to room-name-like text
+            filtered = [c for c in candidates if _is_room_label(c["text"])]
+            if not filtered:
+                filtered = candidates
+            r["label"] = _pick_best_label(filtered, room)
         result.append(r)
     return result
+
+
+def _pick_best_label(candidates: list[dict], room: dict) -> str:
+    """Pick the single best label from candidates for a room.
+
+    Prefers labels containing a known room word, then picks the one
+    closest to the room centroid.
+    """
+    if len(candidates) == 1:
+        return candidates[0]["text"]
+
+    cx, cy = room.get("centroid", (
+        room["bbox"][0] + room["bbox"][2] // 2,
+        room["bbox"][1] + room["bbox"][3] // 2,
+    ))
+
+    # Partition into known-room-word vs other
+    has_room_word = [c for c in candidates
+                     if any(w in c["text"].strip().lower().split()
+                            for w in _ROOM_WORDS)]
+
+    pool = has_room_word if has_room_word else candidates
+
+    # Pick closest to centroid
+    best = min(pool, key=lambda c: (
+        (c["center"][0] - cx) ** 2 + (c["center"][1] - cy) ** 2
+    ))
+    return best["text"]
 
 
 def _is_room_label(text: str) -> bool:

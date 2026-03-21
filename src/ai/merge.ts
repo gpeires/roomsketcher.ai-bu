@@ -263,7 +263,7 @@ export function mergeResults(gather: GatherResults): MergedRoom[] {
   const mergedRooms: MergedRoom[] = normalizedCVRooms.map((room) => {
     const sources: string[] = ['cv'];
     let label = room.label;
-    let confidence = 0.3;
+    let confidence = room.confidence ?? 0.3;
     let split_hint = false;
     let split_evidence: string[] | undefined;
 

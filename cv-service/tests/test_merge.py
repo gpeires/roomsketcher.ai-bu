@@ -137,6 +137,20 @@ class TestClusterRooms:
         assert result[0]["area_px"] == 30000
 
 
+    def test_giant_room_excluded(self):
+        """Rooms exceeding 50% of image area should be excluded as artifacts."""
+        normal = _make_room(10, 10, 100, 100)   # 10000 px
+        giant = _make_room(0, 0, 590, 390)       # 230100 px > 50% of 400*600=240000
+
+        result = cluster_rooms([
+            {"strategy": "raw", "rooms": [normal, giant]},
+        ], image_shape=(400, 600))
+
+        # Only the normal room should survive
+        assert len(result) == 1
+        assert result[0]["area_px"] == 10000
+
+
 class TestAssembleRooms:
     def test_converts_to_rectangles(self):
         rooms = [{"polygon": [(10, 10), (290, 10), (290, 190), (10, 190)]}]

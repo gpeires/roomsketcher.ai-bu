@@ -47,8 +47,24 @@ describe('mergeResults', () => {
     const merged = mergeResults(results);
     expect(merged).toHaveLength(2);
     expect(merged[0].label).toBe('Room 1');
-    expect(merged[0].confidence).toBeCloseTo(0.3); // CV-only confidence
+    expect(merged[0].confidence).toBeCloseTo(0.3); // CV-only confidence (no confidence field → default 0.3)
     expect(merged[0].sources).toEqual(['cv']);
+  });
+
+  it('uses CV confidence as starting confidence when provided', () => {
+    const cv = makeCv([
+      { label: 'Room 1', x: 0, y: 0, width: 300, depth: 200, confidence: 0.9, found_by: ['raw', 'enhanced', 'otsu', 'adaptive_large', 'canny_dilate'] },
+    ]);
+    const results: GatherResults = {
+      cv,
+      roomNamer: fail('room_namer'),
+      layoutDescriber: fail('layout_describer'),
+      symbolSpotter: fail('symbol_spotter'),
+      dimensionReader: fail('dimension_reader'),
+    };
+    const merged = mergeResults(results);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].confidence).toBeCloseTo(0.9); // CV confidence preserved, not reset to 0.3
   });
 
   it('assigns labels from Room Namer via spatial grid', () => {
