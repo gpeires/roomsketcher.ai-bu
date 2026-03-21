@@ -6,6 +6,8 @@ from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
 from cv.merge import (
     MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox,
     cluster_rooms_step, filter_clusters_by_bbox, detect_columns_step,
+    run_merge_pipeline, DEFAULT_MERGE_PIPELINE, EXCLUDED_MERGE_STEPS,
+    PRE_CLUSTER_STEPS, POST_CLUSTER_STEPS, CLUSTER_STEP,
 )
 
 
@@ -347,6 +349,63 @@ class TestDetectColumnsStep:
         result = detect_columns_step(rooms, ctx)
         assert len(result.rooms) == 1
         assert result.meta.get("skipped") is True
+
+
+class TestMergePipeline:
+    def _make_strategy_data(self):
+        rooms = [_make_room((150, 200), area_px=5000), _make_room((450, 200), area_px=5000)]
+        return [
+            {"strategy": "raw", "rooms": rooms, "count": 2},
+            {"strategy": "otsu", "rooms": rooms, "count": 2},
+        ]
+
+    def test_runs_all_steps(self):
+        strategy_rooms = self._make_strategy_data()
+        mask = np.zeros((400, 600), dtype=np.uint8)
+        mask[0:20, :] = 255
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)] * 2,
+            anchor_strategy="raw",
+            strategy_masks=[{"strategy": "raw", "mask": mask}],
+        )
+        rooms, meta = run_merge_pipeline(strategy_rooms, ctx)
+        assert len(rooms) >= 1
+        assert "steps" in meta
+        step_names = [s["name"] for s in meta["steps"]]
+        assert "bbox_filter_pre" in step_names
+        assert "cluster" in step_names
+        assert "bbox_filter_post" in step_names
+        assert "column_detect" in step_names
+
+    def test_excludes_steps(self):
+        strategy_rooms = self._make_strategy_data()
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)] * 2)
+        rooms, meta = run_merge_pipeline(strategy_rooms, ctx, excluded={"bbox_filter_pre", "column_detect"})
+        step_names = [s["name"] for s in meta["steps"]]
+        assert "bbox_filter_pre" not in step_names
+        assert "column_detect" not in step_names
+        assert "cluster" in step_names
+
+    def test_step_meta_has_timing(self):
+        strategy_rooms = self._make_strategy_data()
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)] * 2)
+        _, meta = run_merge_pipeline(strategy_rooms, ctx)
+        for step in meta["steps"]:
+            assert "time_ms" in step
+            assert "name" in step
+
+    def test_registry_populated(self):
+        assert "bbox_filter_pre" in PRE_CLUSTER_STEPS
+        assert CLUSTER_STEP[0] == "cluster"
+        assert "bbox_filter_post" in POST_CLUSTER_STEPS
+        assert "column_detect" in POST_CLUSTER_STEPS
+
+    def test_default_pipeline_order(self):
+        assert DEFAULT_MERGE_PIPELINE == ["bbox_filter_pre", "cluster", "bbox_filter_post", "column_detect"]
+
+    def test_excluded_merge_steps_empty(self):
+        assert len(EXCLUDED_MERGE_STEPS) == 0
 
 
 class TestAssembleRooms:

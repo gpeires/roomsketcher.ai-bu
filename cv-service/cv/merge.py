@@ -397,3 +397,74 @@ def _bbox_iou(bbox1, bbox2):
     intersection = (xi2 - xi1) * (yi2 - yi1)
     union = w1 * h1 + w2 * h2 - intersection
     return intersection / union if union > 0 else 0.0
+
+
+# ── Registry ──────────────────────────────────────────────────────────
+
+PRE_CLUSTER_STEPS: dict[str, Callable] = {
+    "bbox_filter_pre": filter_by_bbox,
+}
+
+CLUSTER_STEP: tuple[str, Callable] = ("cluster", cluster_rooms_step)
+
+POST_CLUSTER_STEPS: dict[str, Callable] = {
+    "bbox_filter_post": filter_clusters_by_bbox,
+    "column_detect": detect_columns_step,
+}
+
+DEFAULT_MERGE_PIPELINE = [
+    "bbox_filter_pre",
+    "cluster",
+    "bbox_filter_post",
+    "column_detect",
+]
+
+EXCLUDED_MERGE_STEPS: set[str] = set()
+
+
+def run_merge_pipeline(
+    strategy_room_lists: list[dict],
+    context: MergeContext,
+    pipeline: list[str] | None = None,
+    excluded: set[str] | None = None,
+) -> tuple[list[dict], dict]:
+    """Run the merge pipeline: a sequence of named steps over room data.
+
+    Returns (rooms, meta) where meta contains per-step timing and diagnostics.
+    """
+    steps = pipeline or DEFAULT_MERGE_PIPELINE
+    skip = excluded if excluded is not None else EXCLUDED_MERGE_STEPS
+    meta_steps: list[dict] = []
+
+    cluster_name = CLUSTER_STEP[0]
+    current_data = strategy_room_lists
+    clustered = False
+
+    for step_name in steps:
+        if step_name in skip:
+            continue
+
+        t0 = time.monotonic()
+
+        if step_name == cluster_name:
+            fn = CLUSTER_STEP[1]
+            result = fn(current_data, context)
+            current_data = result.rooms
+            clustered = True
+        elif not clustered and step_name in PRE_CLUSTER_STEPS:
+            fn = PRE_CLUSTER_STEPS[step_name]
+            result = fn(current_data, context)
+            current_data = result.rooms
+        elif clustered and step_name in POST_CLUSTER_STEPS:
+            fn = POST_CLUSTER_STEPS[step_name]
+            result = fn(current_data, context)
+            current_data = result.rooms
+        else:
+            log.warning("Merge step %s not found or wrong phase, skipping", step_name)
+            continue
+
+        elapsed = int((time.monotonic() - t0) * 1000)
+        step_meta = {"name": step_name, "time_ms": elapsed, **result.meta}
+        meta_steps.append(step_meta)
+
+    return current_data, {"steps": meta_steps}
