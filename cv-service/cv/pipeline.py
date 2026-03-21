@@ -16,7 +16,7 @@ from cv.dimensions import parse_dimension
 from cv.openings import detect_openings
 from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
-from cv.merge import cluster_rooms
+from cv.merge import run_merge_pipeline, MergeContext
 import cv.enhance as _enhance_mod
 
 log = logging.getLogger(__name__)
@@ -91,15 +91,27 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
             except Exception:
                 pass
 
-    # Step 3: Cluster rooms across strategies
-    clustered = cluster_rooms(strategy_room_data, (h, w))
+    # Step 3: Compute per-strategy bboxes and run merge pipeline
+    strategy_bboxes = []
+    for s in strategy_masks:
+        x, y, bw, bh = find_floor_plan_bbox(s["mask"])
+        strategy_bboxes.append((x, y, x + bw, y + bh))  # convert to (x0, y0, x1, y1)
+
+    anchor_name = max(strategy_room_data, key=lambda s: s["count"])["strategy"]
+
+    merge_context = MergeContext(
+        image_shape=(h, w),
+        strategy_bboxes=strategy_bboxes,
+        strategy_masks=strategy_masks,
+        anchor_strategy=anchor_name,
+    )
+    clustered, merge_meta = run_merge_pipeline(strategy_room_data, merge_context)
 
     if not clustered:
         log.warning("Room clustering produced 0 rooms, falling back to raw pipeline")
         return _run_pipeline(image, name)
 
-    # Step 4: Pick anchor strategy (most rooms) for walls/openings/scale
-    anchor_name = max(strategy_room_data, key=lambda s: s["count"])["strategy"]
+    # Step 4: Pick anchor mask for walls/openings/scale
     anchor_mask = next(s["mask"] for s in strategy_masks if s["strategy"] == anchor_name)
 
     # Step 5: Run full pipeline on anchor mask with clustered rooms
@@ -120,6 +132,7 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     result["meta"]["strategies_contributing"] = len(contributing)
     result["meta"]["merge_stats"] = _compute_merge_stats(confidence_scores)
     result["meta"]["merge_time_ms"] = elapsed_ms
+    result["meta"]["merge_steps"] = merge_meta
     result["meta"]["preprocessing"] = {
         "strategy_used": "multi_strategy_merge",
         "anchor_strategy": anchor_name,

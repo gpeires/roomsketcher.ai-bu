@@ -43,3 +43,17 @@ def test_pipeline_rooms_have_found_by(simple_2room_path):
     for room in result["rooms"]:
         assert "found_by" in room
         assert isinstance(room["found_by"], list)
+
+
+def test_pipeline_includes_merge_steps(simple_2room_path):
+    result = analyze_floor_plan(str(simple_2room_path))
+    meta = result["meta"]
+    assert "merge_steps" in meta
+    steps = meta["merge_steps"]["steps"]
+    step_names = [s["name"] for s in steps]
+    assert "bbox_filter_pre" in step_names
+    assert "cluster" in step_names
+    assert "bbox_filter_post" in step_names
+    assert "column_detect" in step_names
+    for step in steps:
+        assert "time_ms" in step
