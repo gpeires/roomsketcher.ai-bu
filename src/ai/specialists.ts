@@ -157,6 +157,12 @@ export async function callVisionSpecialist(
           ],
         },
       ],
+    }, {
+      gateway: {
+        id: 'roomsketcher-ai',
+        skipCache: false,
+        cacheTtl: 3600,
+      },
     }),
     new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error(`AI call timed out after ${timeoutMs}ms`)), timeoutMs),

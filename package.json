@@ -18,8 +18,8 @@
   "type": "commonjs",
   "dependencies": {
     "@cf-wasm/resvg": "^0.3.3",
-    "@modelcontextprotocol/sdk": "^1.26.0",
-    "agents": "^0.7.6",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "agents": "^0.7.9",
     "jsonrepair": "^3.13.3",
     "zod": "^4.3.6"
   },

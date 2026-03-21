@@ -461,16 +461,20 @@ After generating, call preview_sketch to verify. Check for overlapping walls, mi
     this.server.registerTool(
       'analyze_floor_plan_image',
       {
-        description: 'Analyze a floor plan image using computer vision to extract room geometries. Returns structured JSON with room positions, dimensions, and labels that can be passed to generate_floor_plan. Use this BEFORE generate_floor_plan when the user provides a floor plan image to copy. Pass image_url directly — the CV service fetches it server-side (no need to download or convert the image yourself). Alternatively pass image as base64.',
+        description: `Analyze a floor plan image using computer vision to extract room geometries. Returns structured JSON with room positions, dimensions, and labels that can be passed to generate_floor_plan. Use this BEFORE generate_floor_plan when the user provides a floor plan image to copy.
+
+Requires image_url — a URL to the floor plan image. The CV service fetches it server-side.
+If the user has a local image file, direct them to upload it at the /upload page first, then use the returned URL.
+Do NOT attempt to pass large images as base64 — use the upload page to get a URL instead.`,
         inputSchema: {
-          image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG)'),
+          image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG) — only for small images; prefer image_url via /upload'),
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
           name: z.string().optional().describe('Name for the floor plan'),
         },
       },
       async ({ image, image_url, name }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
-        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB);
+        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
       },
     );
 
@@ -589,6 +593,7 @@ PURPOSE: This is your eyes. Use it to verify what you built before presenting to
         return { content: [{ type: 'text' as const, text: JSON.stringify(tpl, null, 2) }] };
       },
     );
+
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -806,14 +811,23 @@ export default {
     }
 
     // Upload image API — stores temporarily for CV analysis
+    // CORS preflight for MCP App iframe uploads
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+    if (url.pathname === '/api/upload-image' && request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
     if (url.pathname === '/api/upload-image' && request.method === 'POST') {
       const contentType = request.headers.get('Content-Type') || '';
       if (contentType !== 'image/png' && contentType !== 'image/jpeg') {
-        return Response.json({ error: 'Content-Type must be image/png or image/jpeg' }, { status: 400 });
+        return Response.json({ error: 'Content-Type must be image/png or image/jpeg' }, { status: 400, headers: corsHeaders });
       }
       const buf = await request.arrayBuffer();
       if (buf.byteLength > 10 * 1024 * 1024) {
-        return Response.json({ error: 'Image too large (max 10 MB)' }, { status: 413 });
+        return Response.json({ error: 'Image too large (max 10 MB)' }, { status: 413, headers: corsHeaders });
       }
       const id = crypto.randomUUID();
       const bytes = new Uint8Array(buf);
@@ -826,7 +840,7 @@ export default {
         'INSERT INTO uploaded_images (id, data, content_type, created_at) VALUES (?, ?, ?, ?)'
       ).bind(id, base64, contentType, new Date().toISOString()).run();
       const imageUrl = `${url.origin}/api/images/${id}`;
-      return Response.json({ url: imageUrl, id });
+      return Response.json({ url: imageUrl, id }, { headers: corsHeaders });
     }
 
     // Serve uploaded image

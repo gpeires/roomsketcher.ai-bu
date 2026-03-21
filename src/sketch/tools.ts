@@ -396,9 +396,11 @@ export async function handleAnalyzeImage(
   cvServiceUrl: string,
   ai?: Ai,
   db?: D1Database,
+  workerUrl?: string,
 ): Promise<ToolResult> {
   if (!input.image && !input.image_url) {
-    return { content: [{ type: 'text' as const, text: 'Provide either image (base64) or image_url.' }] };
+    const uploadUrl = workerUrl ? `${workerUrl}/upload` : '/upload';
+    return { content: [{ type: 'text' as const, text: `No image provided. To analyze a floor plan image:\n\n1. Upload your image at ${uploadUrl}\n2. Copy the returned URL\n3. Call this tool again with that URL as image_url\n\nThe upload page supports drag-drop, paste from clipboard, and file selection.` }] };
   }
 
   // Fetch the source image for visual feedback

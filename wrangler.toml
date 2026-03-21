@@ -29,6 +29,11 @@ new_sqlite_classes = ["RoomSketcherHelpMCP"]
 tag = "v2"
 new_sqlite_classes = ["SketchSync"]
 
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = false
+
 [ai]
 binding = "AI"
 gateway = { id = "roomsketcher-ai", cache_ttl = 3600 }

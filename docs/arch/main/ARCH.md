@@ -716,11 +716,39 @@ Missing items: dishwasher, oven, washer/dryer, kitchen island, fireplace, AC uni
 
 `uploaded_images` table entries persist indefinitely. Should be cleaned up after CV analysis or via cron.
 
+### Blocked: MCP App for in-chat image upload (2026-03-21)
+
+**Goal:** Let users drag-drop floor plan images directly in the Claude conversation instead of visiting `/upload` separately.
+
+**Approach:** MCP Apps (`@modelcontextprotocol/ext-apps`) — tool + resource pairs that render interactive HTML in sandboxed iframes inside the host UI. The app would upload to `/api/upload-image`, get a URL, then call `analyze_floor_plan_image`.
+
+**Status: BLOCKED — Claude Desktop does not support MCP Apps for custom servers.**
+
+Root cause (confirmed via systematic isolation testing):
+- `_meta: { test: true }` on a tool → connects fine
+- `_meta: { ui: { resourceUri: 'ui://...' } }` on a tool → Claude Desktop **disconnects immediately**
+- `registerResource()` alone → connects fine
+- The `extensions` capability (`io.modelcontextprotocol/ui`) is **not in the MCP SDK** yet (pending SEP-1724)
+- `claudemcpcontent.com` (Anthropic's sandbox proxy for MCP App iframes) returns **NXDOMAIN** — infrastructure not operational
+- Launch partners (Slack, monday.com, Figma) use Anthropic's managed connector infrastructure, not the same path
+- GitHub issues: [anthropics/claude-ai-mcp#61](https://github.com/anthropics/claude-ai-mcp/issues/61), [anthropics/claude-code#34820](https://github.com/anthropics/claude-code/issues/34820)
+
+**Code ready** (parked, not deployed):
+- `src/mcp-app/upload-app.ts` — MCP Apps client with drag-drop, paste, file picker
+- `src/mcp-app/upload-app.html` + `upload-app.css` — Vite entry point
+- `vite.config.ts` — builds single-file HTML via `vite-plugin-singlefile`
+- `deploy.sh` includes `vite build` step
+- CORS on `/api/upload-image` for cross-origin iframe
+
+**When to retry:** Monitor SEP-1724 (extensions capability in MCP SDK), `claudemcpcontent.com` DNS, Claude Desktop release notes. When ready, use `getUiCapability()` guard in `oninitialized` + `tool.update({ _meta })` to conditionally enable.
+
+**Current workaround:** Users upload at `/upload` page, paste returned URL into chat.
+
 ---
 
 ## Image Upload System
 
-Users upload floor plan images via the `/upload` page, which stores them in D1 and returns a URL the agent can use with `analyze_floor_plan_image`.
+Users upload floor plan images via the `/upload` page, which stores them in D1 and returns a URL the agent can use with `analyze_floor_plan_image`. An in-chat MCP App upload widget is built but blocked on Claude Desktop MCP Apps support (see Known Issues).
 
 ### Flow
 
