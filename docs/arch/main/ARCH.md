@@ -548,7 +548,7 @@ The `/sweep` endpoint runs all 26 strategies (including excluded ones) and retur
 
 ---
 
-## AI-Layered CV Pipeline (2026-03-19 — 2026-03-20)
+## AI-Layered CV Pipeline (2026-03-19 — 2026-03-21)
 
 ### Overview
 
@@ -579,7 +579,7 @@ Worker fetches image bytes, encodes to base64
        ├─ Centroid-distance matching: map AI rooms to CV rooms
        ├─ Label normalization: "Toilet" → Bathroom, "Bed" → Bedroom
        ├─ Deduplication: overlapping regions merged
-       ├─ Confidence scoring: CV source = 0.3, specialist agreement = +0.15-0.2
+       ├─ Confidence scoring: CV confidence preserved (0.3-0.9), specialist agreement = +0.15-0.2
        └─ Fallback: if CV finds 0 rooms, AI specialists provide all room data
            ↓
      Validate (src/ai/validate.ts)
@@ -609,7 +609,7 @@ Routed through **AI Gateway** (`roomsketcher-ai`) for caching, retries, and rate
 1. **Grid-based position mapping** — AI specialists report room positions on a 3x3 grid (top-left, center, bottom-right). These are mapped to pixel coordinates based on image dimensions.
 2. **Centroid-distance matching** — Each AI-identified room is matched to the nearest CV room by centroid distance. Unmatched AI rooms become new rooms (AI-only).
 3. **Label normalization** — `SYMBOL_ROOM_MAP` maps fixture names to room types (e.g., "Toilet" → "Bathroom", "Stove" → "Kitchen"). Fuzzy matching handles partial labels.
-4. **Confidence scoring** — CV rooms start at 0.7 confidence. Each specialist that corroborates a room adds +0.05-0.2.
+4. **Confidence scoring** — CV rooms keep their multi-strategy confidence (0.3-0.9). Each specialist that corroborates a room adds +0.15-0.2, capped at 1.0.
 5. **Split hints** — When AI finds significantly more rooms than CV (3+ gap), remaining CV rooms get `split_hint: true` with evidence strings.
 
 ### Neuron Budget Tracking
