@@ -1,6 +1,7 @@
 // src/ai/orchestrator.ts
 import type {
   CVResult,
+  CVRoom,
   GatherResults,
   MergedRoom,
   PipelineConfig,
@@ -138,6 +139,63 @@ export async function gatherSpecialists(
   };
 }
 
+// ─── Room tiering ─────────────────────────────────────────────────────────
+
+export function tierRooms(rooms: CVRoom[]): {
+  forAI: CVRoom[];
+  hintBank: CVRoom[];
+} {
+  const forAI = rooms.filter((r) => (r.confidence ?? 1) >= 0.5);
+  const hintBank = rooms.filter((r) => (r.confidence ?? 1) < 0.5);
+  return { forAI, hintBank };
+}
+
+export function reconcileHintBank(
+  mergedRooms: MergedRoom[],
+  hintBank: CVRoom[],
+  imageSize: [number, number],
+): MergedRoom[] {
+  if (hintBank.length === 0) return mergedRooms;
+
+  const result = [...mergedRooms];
+
+  for (const hint of hintBank) {
+    // Check if this hint overlaps any existing merged room
+    const overlaps = result.some((mr) => bboxOverlap(hint, mr) > 0.3);
+    if (overlaps) continue;
+
+    // Non-overlapping hint — add as a low-confidence room
+    result.push({
+      label: hint.label,
+      x: hint.x,
+      y: hint.y,
+      width: hint.width,
+      depth: hint.depth,
+      type: hint.label.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_'),
+      confidence: hint.confidence ?? 0.3,
+      sources: ['cv_hint'],
+    });
+  }
+
+  return result;
+}
+
+function bboxOverlap(
+  a: { x: number; y: number; width: number; depth: number },
+  b: { x: number; y: number; width: number; depth: number },
+): number {
+  const xi1 = Math.max(a.x, b.x);
+  const yi1 = Math.max(a.y, b.y);
+  const xi2 = Math.min(a.x + a.width, b.x + b.width);
+  const yi2 = Math.min(a.y + a.depth, b.y + b.depth);
+  if (xi2 <= xi1 || yi2 <= yi1) return 0;
+  const intersection = (xi2 - xi1) * (yi2 - yi1);
+  const areaA = a.width * a.depth;
+  const areaB = b.width * b.depth;
+  const union = areaA + areaB - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
 // ─── Build output ────────────────────────────────────────────────────────────
 
 export function buildPipelineOutput(
@@ -149,8 +207,8 @@ export function buildPipelineOutput(
   return {
     name,
     rooms,
-    openings: [],
-    adjacency: [],
+    openings: (cv as Record<string, unknown>).openings as unknown[] ?? [],
+    adjacency: (cv as Record<string, unknown>).adjacency as unknown[] ?? [],
     meta: {
       image_size: [cv.meta.image_size?.[0] ?? cv.meta.image_width ?? 0, cv.meta.image_size?.[1] ?? cv.meta.image_height ?? 0],
       scale_cm_per_px: cv.meta.scale_cm_per_px,
@@ -164,6 +222,10 @@ export function buildPipelineOutput(
       specialists_failed: stats.failed,
       ...(stats.errors && Object.keys(stats.errors).length > 0 && { specialist_errors: stats.errors }),
       ...(stats.specialistData && Object.keys(stats.specialistData).length > 0 && { specialist_data: stats.specialistData }),
+      // Raw CV data for pipeline diagnostics
+      cv_rooms_raw: cv.rooms,
+      cv_rooms_detected: cv.meta.rooms_detected,
+      ...(cv.meta.preprocessing && { cv_preprocessing: cv.meta.preprocessing }),
     },
   };
 }
@@ -232,10 +294,16 @@ export async function runPipeline(
     else failed.push(key);
   }
 
-  // 3. Merge — deterministic reconciliation
-  const merged = mergeResults(gather);
+  // 3. Tier rooms — hold back low-confidence CV rooms
+  const { forAI, hintBank } = tierRooms(gather.cv.rooms);
+  const tieredGather = hintBank.length > 0
+    ? { ...gather, cv: { ...gather.cv, rooms: forAI } }
+    : gather;
 
-  // 4. Validate — AI feedback loop
+  // 4. Merge — deterministic reconciliation (uses only high+medium rooms)
+  const merged = mergeResults(tieredGather);
+
+  // 5. Validate — AI feedback loop
   const { rooms: validated, totalCorrections, passes } = await validateMergedResults(
     merged,
     imageBytes,
@@ -245,8 +313,15 @@ export async function runPipeline(
     config.maxValidationPasses,
   );
 
-  // 5. Build output + record neuron usage
-  const estimatedNeurons = (succeeded.length + passes) * 500; // updated after Task 0 measurement
+  // 6. Reconcile hint bank — add non-overlapping low-confidence rooms
+  const imageSize: [number, number] = [
+    gather.cv.meta.image_size?.[0] ?? gather.cv.meta.image_width ?? 900,
+    gather.cv.meta.image_size?.[1] ?? gather.cv.meta.image_height ?? 900,
+  ];
+  const reconciled = reconcileHintBank(validated, hintBank, imageSize);
+
+  // 7. Build output + record neuron usage
+  const estimatedNeurons = (succeeded.length + passes) * 500;
   await recordNeuronUsage(config.db, estimatedNeurons);
 
   // Collect parsed specialist data for debugging
@@ -256,7 +331,7 @@ export async function runPipeline(
   if (gather.symbolSpotter.ok) specialistData.symbolSpotter = gather.symbolSpotter;
   if (gather.dimensionReader.ok) specialistData.dimensionReader = gather.dimensionReader;
 
-  return buildPipelineOutput(name, validated, gather.cv, {
+  return buildPipelineOutput(name, reconciled, gather.cv, {
     corrections: totalCorrections,
     passes,
     neuronsUsed: estimatedNeurons,

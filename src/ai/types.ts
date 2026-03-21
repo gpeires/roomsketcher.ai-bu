@@ -63,6 +63,8 @@ export interface CVRoom {
   width: number;
   depth: number;
   polygon?: Array<{ x: number; y: number }>;
+  confidence?: number;
+  found_by?: string[];
 }
 
 export interface CVResult {
@@ -77,11 +79,10 @@ export interface CVResult {
     image_width?: number;            // legacy / tests
     image_height?: number;           // legacy / tests
     preprocessing?: {
-      raw_rooms: number;
-      enhanced_rooms: number;
-      raw_walls: number;
-      enhanced_walls: number;
       strategy_used: string;
+      anchor_strategy?: string;
+      strategies_run?: number;
+      strategies_contributing?: number;
     };
   };
 }
@@ -142,8 +143,8 @@ export interface GatherResults {
 export interface PipelineOutput {
   name: string;
   rooms: MergedRoom[];
-  openings: unknown[];  // pass-through from CV when available, empty otherwise
-  adjacency: unknown[]; // pass-through from CV when available, empty otherwise
+  openings: unknown[];  // pass-through from CV
+  adjacency: unknown[]; // pass-through from CV
   meta: {
     image_size: [number, number];
     scale_cm_per_px: number;
@@ -157,6 +158,10 @@ export interface PipelineOutput {
     specialists_failed: string[];
     specialist_errors?: Record<string, string>;
     specialist_data?: Record<string, unknown>;  // parsed specialist outputs for debugging
+    // Raw CV data for pipeline diagnostics
+    cv_rooms_raw?: CVRoom[];
+    cv_rooms_detected?: number;
+    cv_preprocessing?: CVResult['meta']['preprocessing'];
   };
 }
 
