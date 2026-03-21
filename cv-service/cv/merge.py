@@ -1,80 +1,100 @@
-"""Wall-level multi-strategy merging for CV pipeline."""
-import cv2
+"""Room-level multi-strategy merging for CV pipeline.
+
+Instead of merging wall masks (which destroys rooms by filling interiors),
+we detect rooms per strategy independently, then cluster spatially
+overlapping rooms. This can only ADD rooms — never destroy them.
+"""
 import numpy as np
-from cv.preprocess import filter_components
 
 
-def merge_wall_masks(strategy_results: list[dict]) -> np.ndarray:
-    """OR binary wall masks from strategies that detected >= 1 room.
+def cluster_rooms(
+    strategy_room_lists: list[dict],
+    image_shape: tuple[int, int],
+    iou_threshold: float = 0.3,
+) -> list[dict]:
+    """Cluster rooms across strategies by spatial overlap.
+
+    Rooms from different strategies that overlap significantly are grouped
+    into clusters. Each cluster produces one output room with confidence
+    scored by how many strategies independently found it.
 
     Args:
-        strategy_results: list of {"mask": np.ndarray, "rooms_detected": int}
+        strategy_room_lists: [{"strategy": str, "rooms": list[dict]}, ...]
+            Each room dict must have: bbox, area_px, centroid, mask, polygon
+        image_shape: (height, width) of the image
+        iou_threshold: Minimum bbox IoU to consider two rooms the same
 
     Returns:
-        Cleaned merged binary mask.
+        List of room dicts (same shape as input rooms) with added fields:
+            confidence: float (0.3-0.9)
+            found_by: list[str] (strategy names)
+            agreement_count: int
     """
-    # Filter to strategies that found at least 1 room
-    contributing = [s for s in strategy_results if s["rooms_detected"] > 0]
-    if not contributing:
-        # Fallback: use all masks if none found rooms
-        contributing = strategy_results
-
-    if not contributing:
-        raise ValueError("No strategy results provided")
-
-    # OR all contributing masks
-    merged = contributing[0]["mask"].copy()
-    for s in contributing[1:]:
-        merged = cv2.bitwise_or(merged, s["mask"])
-
-    # Clean: close small gaps, remove noise
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    merged = cv2.morphologyEx(merged, cv2.MORPH_CLOSE, kernel, iterations=2)
-    h, w = merged.shape
-    merged = filter_components(merged, h * w)
-
-    return merged
-
-
-def score_room_confidence(
-    merged_rooms: list[dict],
-    individual_results: list[list],
-    image_shape: tuple[int, int],
-) -> list[float]:
-    """Score each merged room's confidence by cross-strategy agreement.
-
-    For each merged room, count how many individual strategy results
-    detected a room overlapping the same area.
-
-    Returns list of confidence scores (0.3-0.9), one per merged room.
-    """
-    scores = []
     h, w = image_shape
     diagonal = np.sqrt(h**2 + w**2)
-    proximity_threshold = diagonal * 0.15  # 15% of image diagonal
+    proximity = diagonal * 0.15
 
-    for room in merged_rooms:
-        centroid = _polygon_centroid(room["polygon"])
-        agreement = 0
-        for strategy_rooms in individual_results:
-            for sr in strategy_rooms:
-                sr_centroid = _polygon_centroid(sr)
-                dist = np.sqrt((centroid[0] - sr_centroid[0])**2 +
-                               (centroid[1] - sr_centroid[1])**2)
-                if dist < proximity_threshold:
-                    agreement += 1
-                    break  # count each strategy at most once
+    # Pool all rooms tagged with source strategy
+    tagged = []
+    for entry in strategy_room_lists:
+        strategy = entry["strategy"]
+        for room in entry["rooms"]:
+            tagged.append({"room": room, "strategy": strategy})
 
-        if agreement >= 5:
-            scores.append(0.9)
-        elif agreement >= 3:
-            scores.append(0.7)
-        elif agreement >= 2:
-            scores.append(0.5)
+    if not tagged:
+        return []
+
+    # Sort by area descending — larger rooms are more reliable representatives
+    tagged.sort(key=lambda t: t["room"].get("area_px", 0), reverse=True)
+
+    # Greedy clustering
+    clusters: list[dict] = []
+
+    for item in tagged:
+        room = item["room"]
+        best_cluster = None
+        best_score = 0.0
+
+        for cluster in clusters:
+            rep = cluster["representative"]
+            score = _match_score(room, rep, iou_threshold, proximity)
+            if score > best_score:
+                best_score = score
+                best_cluster = cluster
+
+        if best_cluster is not None and best_score > 0:
+            best_cluster["members"].append(item)
+            # Keep largest-area room as representative
+            if room.get("area_px", 0) > best_cluster["representative"].get("area_px", 0):
+                best_cluster["representative"] = room
         else:
-            scores.append(0.3)
+            clusters.append({
+                "representative": room,
+                "members": [item],
+            })
 
-    return scores
+    # Build output — one room per cluster
+    result = []
+    for cluster in clusters:
+        rep = dict(cluster["representative"])
+        strategies = list(set(m["strategy"] for m in cluster["members"]))
+        n = len(strategies)
+
+        if n >= 5:
+            confidence = 0.9
+        elif n >= 3:
+            confidence = 0.7
+        elif n >= 2:
+            confidence = 0.5
+        else:
+            confidence = 0.3
+
+        rep["confidence"] = confidence
+        rep["found_by"] = strategies
+        rep["agreement_count"] = n
+        result.append(rep)
+
+    return result
 
 
 def assemble_rooms(
@@ -114,7 +134,35 @@ def assemble_rooms(
     return assembled
 
 
-def _polygon_centroid(polygon):
-    """Compute centroid of a polygon (list of (x,y) tuples or similar)."""
-    pts = np.array(polygon)
-    return pts.mean(axis=0)
+def _match_score(room1, room2, iou_threshold, proximity):
+    """Score how likely two rooms are the same. Returns > 0 if they match."""
+    iou = _bbox_iou(room1["bbox"], room2["bbox"])
+    if iou >= iou_threshold:
+        return iou
+
+    # Fallback: centroid proximity
+    c1 = np.array(room1["centroid"], dtype=float)
+    c2 = np.array(room2["centroid"], dtype=float)
+    dist = np.linalg.norm(c1 - c2)
+    if dist < proximity:
+        return 0.5
+
+    return 0.0
+
+
+def _bbox_iou(bbox1, bbox2):
+    """Compute Intersection over Union of two bounding boxes (x, y, w, h)."""
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+
+    xi1 = max(x1, x2)
+    yi1 = max(y1, y2)
+    xi2 = min(x1 + w1, x2 + w2)
+    yi2 = min(y1 + h1, y2 + h2)
+
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+
+    intersection = (xi2 - xi1) * (yi2 - yi1)
+    union = w1 * h1 + w2 * h2 - intersection
+    return intersection / union if union > 0 else 0.0

@@ -16,7 +16,7 @@ from cv.dimensions import parse_dimension
 from cv.openings import detect_openings
 from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
-from cv.merge import merge_wall_masks, score_room_confidence, assemble_rooms
+from cv.merge import cluster_rooms
 import cv.enhance as _enhance_mod
 from cv.enhance import pick_winner
 
@@ -31,7 +31,7 @@ def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> d
 
 
 def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict:
-    """Run all strategies, merge wall masks, detect rooms once on merged mask."""
+    """Run all strategies, detect rooms per strategy, cluster, run pipeline once."""
     from cv.strategies import STRATEGIES, StrategyResult
 
     h, w = image.shape[:2]
@@ -41,25 +41,22 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     def _get_strategy_mask(strategy_name, strategy_fn):
         try:
             sr: StrategyResult = strategy_fn(image.copy())
-            if sr.is_binary:
-                binary = sr.image
-            else:
-                binary = prepare(sr.image)
-            return {"mask": binary, "strategy": strategy_name, "error": None}
+            binary = sr.image if sr.is_binary else prepare(sr.image)
+            return {"mask": binary, "strategy": strategy_name}
         except Exception as e:
-            log.warning("Strategy %s mask extraction failed: %s", strategy_name, e)
-            return {"mask": None, "strategy": strategy_name, "error": str(e)}
+            log.warning("Strategy %s mask failed: %s", strategy_name, e)
+            return None
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
-            name: pool.submit(_get_strategy_mask, name, fn)
-            for name, fn in STRATEGIES.items()
+            sname: pool.submit(_get_strategy_mask, sname, fn)
+            for sname, fn in STRATEGIES.items()
         }
         strategy_masks = []
         for sname, future in futures.items():
             try:
                 result = future.result(timeout=120)
-                if result["mask"] is not None:
+                if result is not None:
                     strategy_masks.append(result)
             except Exception as e:
                 log.warning("Strategy %s timed out: %s", sname, e)
@@ -68,108 +65,87 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
         log.error("All strategies failed, falling back to raw pipeline")
         return _run_pipeline(image, name)
 
-    # Step 2: Quick room count per strategy (parallel)
-    def _quick_room_count(mask):
+    # Step 2: Detect rooms per strategy (parallel)
+    def _detect_rooms_for(entry):
         try:
-            rooms, _ = detect_rooms(mask)
-            return rooms
+            rooms, _ = detect_rooms(entry["mask"])
+            return {"strategy": entry["strategy"], "rooms": rooms, "count": len(rooms)}
         except Exception:
-            return []
+            return {"strategy": entry["strategy"], "rooms": [], "count": 0}
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        room_futures = {
-            i: pool.submit(_quick_room_count, s["mask"])
-            for i, s in enumerate(strategy_masks)
-        }
-        for i, future in room_futures.items():
+        room_futures = [pool.submit(_detect_rooms_for, s) for s in strategy_masks]
+        strategy_room_data = []
+        for future in room_futures:
             try:
-                rooms = future.result(timeout=60)
-                strategy_masks[i]["rooms_detected"] = len(rooms)
-                strategy_masks[i]["rooms"] = rooms
+                strategy_room_data.append(future.result(timeout=60))
             except Exception:
-                strategy_masks[i]["rooms_detected"] = 0
-                strategy_masks[i]["rooms"] = []
+                pass
 
-    # Step 3: Merge wall masks
-    merged_mask = merge_wall_masks(strategy_masks)
+    # Step 3: Cluster rooms across strategies
+    clustered = cluster_rooms(strategy_room_data, (h, w))
 
-    # Step 4: Run full pipeline once on merged mask
-    result = _run_pipeline(image, name, binary_override=merged_mask)
+    if not clustered:
+        log.warning("Room clustering produced 0 rooms, falling back to raw pipeline")
+        return _run_pipeline(image, name)
 
-    # Step 5: Score confidence per room
-    # Get individual room polygons from contributing strategies
-    individual_rooms = []
-    contributing_strategies = []
-    for s in strategy_masks:
-        if s["rooms_detected"] > 0:
-            individual_rooms.append(
-                [r["polygon"] for r in s["rooms"] if r.get("polygon")]
-            )
-            contributing_strategies.append(s["strategy"])
+    # Step 4: Pick anchor strategy (most rooms) for walls/openings/scale
+    anchor_name = max(strategy_room_data, key=lambda s: s["count"])["strategy"]
+    anchor_mask = next(s["mask"] for s in strategy_masks if s["strategy"] == anchor_name)
 
-    # Get the merged rooms (raw detect_rooms output for scoring)
-    merged_rooms_raw, _ = detect_rooms(merged_mask)
-    confidence_scores = score_room_confidence(
-        merged_rooms_raw, individual_rooms, (h, w),
-    )
+    # Step 5: Run full pipeline on anchor mask with clustered rooms
+    result = _run_pipeline(image, name, binary_override=anchor_mask, rooms_override=clustered)
 
-    # Step 6: Determine which strategies found each room
-    found_by = _compute_found_by(
-        merged_rooms_raw, strategy_masks, (h, w),
-    )
-
-    # Step 7: Assemble clean rooms with confidence
-    scale = result["meta"]["scale_cm_per_px"]
-    assembled = assemble_rooms(
-        merged_rooms_raw, confidence_scores, scale, found_by=found_by,
-    )
-
-    # Attach confidence and found_by to the output rooms
+    # Step 6: Attach confidence/found_by to output rooms
     for i, room in enumerate(result.get("rooms", [])):
-        if i < len(assembled):
-            room["confidence"] = assembled[i]["confidence"]
-            room["found_by"] = assembled[i]["found_by"]
+        if i < len(clustered):
+            room["confidence"] = clustered[i]["confidence"]
+            room["found_by"] = clustered[i]["found_by"]
 
-    # Step 8: Add merge metadata
+    # Step 7: Merge metadata
+    contributing = [s for s in strategy_room_data if s["count"] > 0]
     elapsed_ms = int((time.monotonic() - start) * 1000)
+    confidence_scores = [r["confidence"] for r in clustered]
+
     result["meta"]["strategies_run"] = len(strategy_masks)
-    result["meta"]["strategies_contributing"] = len(contributing_strategies)
+    result["meta"]["strategies_contributing"] = len(contributing)
     result["meta"]["merge_stats"] = _compute_merge_stats(confidence_scores)
     result["meta"]["merge_time_ms"] = elapsed_ms
     result["meta"]["preprocessing"] = {
         "strategy_used": "multi_strategy_merge",
+        "anchor_strategy": anchor_name,
         "strategies_run": len(strategy_masks),
-        "strategies_contributing": len(contributing_strategies),
+        "strategies_contributing": len(contributing),
     }
 
     log.info(
-        "Multi-strategy merge: %d strategies run, %d contributing, %d rooms detected (time=%dms)",
-        len(strategy_masks),
-        len(contributing_strategies),
-        result["meta"]["rooms_detected"],
-        elapsed_ms,
+        "Multi-strategy merge: %d strategies, %d contributing, %d rooms (time=%dms)",
+        len(strategy_masks), len(contributing), len(clustered), elapsed_ms,
     )
     return result
 
 
 def _run_pipeline(
-    image: np.ndarray, name: str, binary_override: np.ndarray | None = None,
+    image: np.ndarray,
+    name: str,
+    binary_override: np.ndarray | None = None,
+    rooms_override: list[dict] | None = None,
 ) -> dict:
-    """Run the full CV pipeline on a single image. Pure function, no side effects.
+    """Run the full CV pipeline on a single image.
 
     Args:
         image: Original color image (used for OCR).
         name: Floor plan name.
         binary_override: Pre-processed binary wall mask. If provided, skip prepare().
+        rooms_override: Pre-detected rooms. If provided, skip detect_rooms() for room
+            output but still run it internally to get closed_binary for openings.
     """
     h, w = image.shape[:2]
-    if binary_override is not None:
-        binary = binary_override
-    else:
-        binary = prepare(image)
+    binary = binary_override if binary_override is not None else prepare(image)
     fp_bbox = find_floor_plan_bbox(binary)
     walls = detect_walls(binary)
-    rooms, closed_binary = detect_rooms(binary)
+    detected_rooms, closed_binary = detect_rooms(binary)
+    rooms = rooms_override if rooms_override is not None else detected_rooms
     text_regions = extract_text_regions(image)
     scale = _calibrate_scale(walls, text_regions, image_shape=(h, w))
     openings = detect_openings(binary, closed_binary, rooms, walls, scale)
@@ -190,33 +166,6 @@ def _run_pipeline(
         "openings_detected": len(openings),
     }
     return result
-
-
-def _compute_found_by(
-    merged_rooms: list[dict],
-    strategy_masks: list[dict],
-    image_shape: tuple[int, int],
-) -> list[list[str]]:
-    """For each merged room, list which strategies found an overlapping room."""
-    h, w = image_shape
-    diagonal = np.sqrt(h**2 + w**2)
-    proximity = diagonal * 0.15
-
-    found_by = []
-    for room in merged_rooms:
-        centroid = np.array(room["centroid"], dtype=float)
-        sources = []
-        for s in strategy_masks:
-            if s["rooms_detected"] == 0:
-                continue
-            for sr in s["rooms"]:
-                sr_centroid = np.array(sr["centroid"], dtype=float)
-                dist = np.linalg.norm(centroid - sr_centroid)
-                if dist < proximity:
-                    sources.append(s["strategy"])
-                    break
-        found_by.append(sources)
-    return found_by
 
 
 def _compute_merge_stats(confidence_scores: list[float]) -> dict:
