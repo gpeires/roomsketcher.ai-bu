@@ -226,6 +226,108 @@ def filter_clusters_by_bbox(
     return MergeStepResult(rooms=kept, removed=removed, meta=meta)
 
 
+def detect_columns_step(
+    rooms: list[dict],
+    context: MergeContext,
+) -> MergeStepResult:
+    """Detect structural columns (small square blobs) in the anchor mask."""
+    if context.strategy_masks is None or context.anchor_strategy is None:
+        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+
+    anchor_mask = None
+    for s in context.strategy_masks:
+        if s["strategy"] == context.anchor_strategy:
+            anchor_mask = s["mask"]
+            break
+    if anchor_mask is None:
+        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+
+    h, w = anchor_mask.shape
+    total_px = h * w
+    min_area = max(20, int(total_px * 0.0001))
+    max_area = max(500, int(total_px * 0.005))
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        anchor_mask, connectivity=8
+    )
+
+    candidates = []
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_area or area > max_area:
+            continue
+        cw = stats[i, cv2.CC_STAT_WIDTH]
+        ch = stats[i, cv2.CC_STAT_HEIGHT]
+        aspect = max(cw, ch) / max(min(cw, ch), 1)
+        if aspect > 1.3:
+            continue
+        bb_area = cw * ch
+        solidity = area / bb_area if bb_area > 0 else 0
+        if solidity < 0.8:
+            continue
+        cx, cy = centroids[i]
+        candidates.append({
+            "centroid": (int(cx), int(cy)),
+            "bbox": (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
+                     int(cw), int(ch)),
+            "area_px": int(area),
+            "solidity": round(solidity, 2),
+        })
+
+    grid_detected = False
+    grid_spacing = None
+    if len(candidates) >= 3:
+        xs = sorted(c["centroid"][0] for c in candidates)
+        ys = sorted(c["centroid"][1] for c in candidates)
+        grid_detected, grid_spacing = _check_grid_regularity(xs, ys)
+
+    context.columns = candidates
+
+    meta = {
+        "columns_found": len(candidates),
+        "grid_detected": grid_detected,
+        "grid_spacing_px": grid_spacing,
+    }
+    return MergeStepResult(rooms=rooms, removed=[], meta=meta)
+
+
+def _check_grid_regularity(
+    xs: list[int], ys: list[int],
+) -> tuple[bool, list[int] | None]:
+    """Check if a set of x/y coordinates form a regular grid."""
+
+    def _find_spacing(coords: list[int], tolerance: int = 10) -> int | None:
+        if len(coords) < 3:
+            return None
+        clusters: list[list[int]] = []
+        for c in coords:
+            placed = False
+            for cl in clusters:
+                if abs(c - cl[-1]) <= tolerance:
+                    cl.append(c)
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([c])
+        if len(clusters) < 3:
+            return None
+        centers = sorted(sum(cl) / len(cl) for cl in clusters)
+        diffs = [centers[i + 1] - centers[i] for i in range(len(centers) - 1)]
+        if not diffs:
+            return None
+        median_diff = sorted(diffs)[len(diffs) // 2]
+        if median_diff < 10:
+            return None
+        consistent = all(abs(d - median_diff) / median_diff < 0.3 for d in diffs)
+        return int(median_diff) if consistent else None
+
+    x_spacing = _find_spacing(xs)
+    y_spacing = _find_spacing(ys)
+    if x_spacing is not None and y_spacing is not None:
+        return True, [x_spacing, y_spacing]
+    return False, None
+
+
 def assemble_rooms(
     rooms: list[dict],
     confidence_scores: list[float],

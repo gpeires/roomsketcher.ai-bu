@@ -5,7 +5,7 @@ import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
 from cv.merge import (
     MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox,
-    cluster_rooms_step, filter_clusters_by_bbox,
+    cluster_rooms_step, filter_clusters_by_bbox, detect_columns_step,
 )
 
 
@@ -299,6 +299,54 @@ class TestFilterClustersByBbox:
         result = filter_clusters_by_bbox(rooms, ctx)
         assert len(result.rooms) == 1
         assert len(result.removed) == 0
+
+
+class TestDetectColumnsStep:
+    def _make_grid_mask(self):
+        mask = np.zeros((400, 600), dtype=np.uint8)
+        for row in range(3):
+            for col in range(4):
+                y, x = 50 + row * 100, 80 + col * 120
+                mask[y:y+10, x:x+10] = 255
+        mask[0:5, :] = 255
+        mask[:, 0:5] = 255
+        return mask
+
+    def test_finds_grid(self):
+        mask = self._make_grid_mask()
+        rooms = [_make_room((300, 200))]
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)],
+            anchor_strategy="raw",
+            strategy_masks=[{"strategy": "raw", "mask": mask}],
+        )
+        result = detect_columns_step(rooms, ctx)
+        assert len(result.rooms) == 1
+        assert result.rooms[0]["centroid"] == (300, 200)
+        assert ctx.columns is not None
+        assert result.meta["columns_found"] >= 6
+
+    def test_ignores_elongated_components(self):
+        mask = np.zeros((400, 600), dtype=np.uint8)
+        mask[100:102, 100:200] = 255
+        mask[200:220, 200:202] = 255
+        rooms = []
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)],
+            anchor_strategy="raw",
+            strategy_masks=[{"strategy": "raw", "mask": mask}],
+        )
+        result = detect_columns_step(rooms, ctx)
+        assert result.meta["columns_found"] == 0
+
+    def test_noop_when_no_masks(self):
+        rooms = [_make_room((300, 200))]
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
+        result = detect_columns_step(rooms, ctx)
+        assert len(result.rooms) == 1
+        assert result.meta.get("skipped") is True
 
 
 class TestAssembleRooms:
