@@ -258,7 +258,7 @@ def sweep_strategies(image: np.ndarray, plan_name: str) -> dict:
         results = []
         for name, future in futures.items():
             try:
-                results.append(future.result(timeout=10))
+                results.append(future.result(timeout=120))
             except Exception as e:
                 log.warning("Strategy %s timed out or crashed: %s", name, e)
                 results.append({
