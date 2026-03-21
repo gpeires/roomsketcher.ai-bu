@@ -46,7 +46,7 @@ async def test_sweep_endpoint(b64_simple_image):
     data = resp.json()
     assert "image_size" in data
     assert "strategies" in data
-    assert len(data["strategies"]) == 27
+    assert len(data["strategies"]) == 28
     # Each strategy has required fields
     for s in data["strategies"]:
         assert "strategy" in s
