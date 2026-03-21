@@ -32,7 +32,7 @@ class TestSweepStrategies:
         result = sweep_strategies(simple_2room_image, "Test")
         assert "image_size" in result
         assert "strategies" in result
-        assert len(result["strategies"]) == 8
+        assert len(result["strategies"]) == 13
 
     def test_each_strategy_has_required_fields(self, simple_2room_image):
         result = sweep_strategies(simple_2room_image, "Test")

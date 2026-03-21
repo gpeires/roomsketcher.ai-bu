@@ -18,12 +18,14 @@ def bgr_image():
 
 
 class TestStrategyRegistry:
-    def test_has_8_strategies(self):
-        assert len(STRATEGIES) == 8
+    def test_has_13_strategies(self):
+        assert len(STRATEGIES) == 13
 
     def test_expected_names(self):
         expected = {"raw", "enhanced", "otsu", "adaptive_large",
-                    "invert", "canny_dilate", "downscale", "heavy_bilateral"}
+                    "invert", "canny_dilate", "downscale", "heavy_bilateral",
+                    "morph_gradient", "sauvola", "clahe_aggressive",
+                    "hsv_value", "multi_scale"}
         assert set(STRATEGIES.keys()) == expected
 
 
@@ -42,7 +44,10 @@ class TestStrategyOutputs:
         assert result.image.ndim == 3
         assert result.image.shape[2] == 3
 
-    @pytest.mark.parametrize("name", ["otsu", "adaptive_large", "canny_dilate", "downscale"])
+    @pytest.mark.parametrize("name", [
+        "otsu", "adaptive_large", "canny_dilate", "downscale",
+        "morph_gradient", "sauvola", "clahe_aggressive", "hsv_value", "multi_scale",
+    ])
     def test_binary_strategies_return_mask(self, name, bgr_image):
         result = STRATEGIES[name](bgr_image.copy())
         assert result.is_binary is True
