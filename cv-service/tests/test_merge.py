@@ -1,10 +1,26 @@
 """Tests for room-level multi-strategy merging."""
+import cv2
 import numpy as np
 import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
+from cv.merge import MergeContext, MergeStepResult
 
 
-def _make_room(x, y, w, h):
+def _make_room(centroid, bbox=None, area_px=1000):
+    cx, cy = centroid
+    if bbox is None:
+        bbox = (cx - 50, cy - 50, 100, 100)
+    return {
+        "bbox": bbox,
+        "area_px": area_px,
+        "centroid": centroid,
+        "mask": np.zeros((10, 10), dtype=np.uint8),
+        "polygon": [(cx - 50, cy - 50), (cx + 50, cy - 50),
+                     (cx + 50, cy + 50), (cx - 50, cy + 50)],
+    }
+
+
+def _make_room_old(x, y, w, h):
     """Create a synthetic room dict matching detect_rooms() output."""
     mask = np.zeros((400, 600), dtype=np.uint8)
     mask[y:y+h, x:x+w] = 255
@@ -15,6 +31,29 @@ def _make_room(x, y, w, h):
         "mask": mask,
         "polygon": [(x, y), (x + w, y), (x + w, y + h), (x, y + h)],
     }
+
+
+class TestMergeDataStructures:
+    def test_merge_context_creation(self):
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(10, 10, 590, 390), (15, 12, 585, 388)],
+        )
+        assert ctx.image_shape == (400, 600)
+        assert len(ctx.strategy_bboxes) == 2
+        assert ctx.consensus_bbox is None
+        assert ctx.anchor_strategy is None
+        assert ctx.strategy_masks is None
+        assert ctx.columns is None
+
+    def test_merge_step_result_creation(self):
+        rooms = [{"bbox": (10, 10, 100, 100), "centroid": (60, 60)}]
+        removed = [{"bbox": (0, 0, 10, 10), "removal_reason": "test"}]
+        meta = {"rooms_removed": 1}
+        result = MergeStepResult(rooms=rooms, removed=removed, meta=meta)
+        assert len(result.rooms) == 1
+        assert len(result.removed) == 1
+        assert result.meta["rooms_removed"] == 1
 
 
 class TestBboxIou:
@@ -35,88 +74,70 @@ class TestBboxIou:
 
 class TestClusterRooms:
     def test_same_room_two_strategies(self):
-        """Same room found by two strategies should cluster together."""
-        room_a = _make_room(10, 10, 280, 180)
-        room_b = _make_room(15, 12, 275, 178)
-
+        room_a = _make_room_old(10, 10, 280, 180)
+        room_b = _make_room_old(15, 12, 275, 178)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [room_a]},
             {"strategy": "enhanced", "rooms": [room_b]},
         ], image_shape=(400, 600))
-
         assert len(result) == 1
         assert result[0]["confidence"] == 0.5
         assert set(result[0]["found_by"]) == {"raw", "enhanced"}
 
     def test_different_rooms_separate_clusters(self):
-        """Non-overlapping rooms should be in separate clusters."""
-        room_left = _make_room(10, 10, 200, 380)
-        room_right = _make_room(310, 10, 280, 380)
-
+        room_left = _make_room_old(10, 10, 200, 380)
+        room_right = _make_room_old(310, 10, 280, 380)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [room_left, room_right]},
         ], image_shape=(400, 600))
-
         assert len(result) == 2
 
     def test_high_confidence_five_strategies(self):
-        """Room found by 5+ strategies -> confidence 0.9."""
         result = cluster_rooms([
-            {"strategy": f"s{i}", "rooms": [_make_room(50 + i, 50 + i, 200, 150)]}
+            {"strategy": f"s{i}", "rooms": [_make_room_old(50 + i, 50 + i, 200, 150)]}
             for i in range(6)
         ], image_shape=(400, 600))
-
         assert len(result) == 1
         assert result[0]["confidence"] == 0.9
         assert result[0]["agreement_count"] == 6
 
     def test_medium_confidence_three_strategies(self):
-        """Room found by 3 strategies -> confidence 0.7."""
         result = cluster_rooms([
-            {"strategy": f"s{i}", "rooms": [_make_room(50 + i, 50 + i, 200, 150)]}
+            {"strategy": f"s{i}", "rooms": [_make_room_old(50 + i, 50 + i, 200, 150)]}
             for i in range(3)
         ], image_shape=(400, 600))
-
         assert len(result) == 1
         assert result[0]["confidence"] == 0.7
 
     def test_single_strategy_low_confidence(self):
-        """Room found by only 1 strategy -> confidence 0.3."""
         result = cluster_rooms([
-            {"strategy": "raw", "rooms": [_make_room(10, 10, 200, 150)]},
+            {"strategy": "raw", "rooms": [_make_room_old(10, 10, 200, 150)]},
             {"strategy": "enhanced", "rooms": []},
         ], image_shape=(400, 600))
-
         assert len(result) == 1
         assert result[0]["confidence"] == 0.3
 
     def test_empty_input(self):
-        """No rooms from any strategy -> empty result."""
         result = cluster_rooms([
             {"strategy": "raw", "rooms": []},
         ], image_shape=(400, 600))
         assert result == []
 
     def test_union_discovers_more_rooms(self):
-        """Different strategies finding different rooms should all appear."""
-        room_a = _make_room(10, 10, 200, 180)
-        room_b = _make_room(310, 10, 280, 180)
-        room_c = _make_room(10, 210, 200, 180)
-
+        room_a = _make_room_old(10, 10, 200, 180)
+        room_b = _make_room_old(310, 10, 280, 180)
+        room_c = _make_room_old(10, 210, 200, 180)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [room_a, room_b]},
             {"strategy": "enhanced", "rooms": [room_a, room_c]},
         ], image_shape=(400, 600))
-
-        assert len(result) == 3  # Union: a, b, c
+        assert len(result) == 3
 
     def test_preserves_representative_fields(self):
-        """Clustered rooms should preserve bbox, polygon, centroid, mask, area_px."""
-        room = _make_room(10, 10, 200, 150)
+        room = _make_room_old(10, 10, 200, 150)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [room]},
         ], image_shape=(400, 600))
-
         assert "bbox" in result[0]
         assert "polygon" in result[0]
         assert "centroid" in result[0]
@@ -124,29 +145,21 @@ class TestClusterRooms:
         assert "mask" in result[0]
 
     def test_largest_area_becomes_representative(self):
-        """The largest room in a cluster should be the representative."""
-        small = _make_room(20, 20, 150, 100)  # area = 15000
-        large = _make_room(10, 10, 200, 150)  # area = 30000
-
+        small = _make_room_old(20, 20, 150, 100)
+        large = _make_room_old(10, 10, 200, 150)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [small]},
             {"strategy": "enhanced", "rooms": [large]},
         ], image_shape=(400, 600))
-
         assert len(result) == 1
         assert result[0]["area_px"] == 30000
 
-
     def test_giant_room_excluded(self):
-        """Rooms exceeding 50% of image area should be excluded as artifacts."""
-        normal = _make_room(10, 10, 100, 100)   # 10000 px
-        giant = _make_room(0, 0, 590, 390)       # 230100 px > 50% of 400*600=240000
-
+        normal = _make_room_old(10, 10, 100, 100)
+        giant = _make_room_old(0, 0, 590, 390)
         result = cluster_rooms([
             {"strategy": "raw", "rooms": [normal, giant]},
         ], image_shape=(400, 600))
-
-        # Only the normal room should survive
         assert len(result) == 1
         assert result[0]["area_px"] == 10000
 

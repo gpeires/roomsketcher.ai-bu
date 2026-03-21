@@ -4,7 +4,32 @@ Instead of merging wall masks (which destroys rooms by filling interiors),
 we detect rooms per strategy independently, then cluster spatially
 overlapping rooms. This can only ADD rooms — never destroy them.
 """
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Callable, NamedTuple
+
+import cv2
 import numpy as np
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class MergeContext:
+    """Shared state bag passed through merge pipeline steps."""
+    image_shape: tuple[int, int]
+    strategy_bboxes: list[tuple[int, int, int, int]]
+    consensus_bbox: tuple[int, int, int, int] | None = None
+    anchor_strategy: str | None = None
+    strategy_masks: list[dict] | None = None
+    columns: list[dict] | None = None
+
+
+class MergeStepResult(NamedTuple):
+    rooms: list[dict]
+    removed: list[dict]
+    meta: dict
 
 
 def cluster_rooms(
