@@ -97,7 +97,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (143 tests)
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (172 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -205,7 +205,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped, low-contrast)
 │   ├── test_app.py             # FastAPI endpoint tests
 │   ├── test_enhance.py         # Enhancement algorithm + pick_winner tests (10 tests)
-│   ├── test_merge.py           # Room clustering, bbox IoU, assemble_rooms tests (17 tests)
+│   ├── test_merge.py           # Room clustering, bbox IoU, assemble_rooms, merge pipeline tests (42 tests)
 │   ├── test_strategies.py      # Strategy output format/shape tests
 │   ├── test_sweep.py           # Sweep endpoint + single-strategy pipeline tests
 │   ├── test_pipeline.py        # Pipeline integration tests (incl. multi-strategy merge, confidence)
@@ -424,7 +424,7 @@ _run_pipeline(image, binary_override?, rooms_override?)
   └── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
 ```
 
-**Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 5 rooms.
+**Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 3 real rooms (earlier baseline of 5 included 2 margin artifacts that `bbox_filter_pre` now correctly removes).
 
 **Sweep endpoint** (`/sweep`): Runs all 28 strategies (including excluded ones) and returns per-strategy results with debug binary masks. Used for diagnostics and strategy evaluation.
 
@@ -701,7 +701,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
-**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 23-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 5 CV rooms + 4 AI-only rooms = 9 total.
+**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 23-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 3 CV rooms (was 5 before bbox_filter_pre corrected 2 margin artifacts) + AI enrichment.
 
 ### Resolved: Letterboxed images caused 0 rooms in threshold strategies
 
@@ -729,7 +729,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 | Image | Rooms | Strategies contributing | thick_wall_open contributes to |
 |-------|-------|------------------------|-------------------------------|
 | 547 W 47th | 8 | 18/22 | 4 rooms (1 unique) |
-| 520 W 23rd | 5 | 21/22 | 3 rooms |
+| 520 W 23rd | 3 | 22/22 | 3 rooms |
 | Plan 3 | 8 | 21/22 | 2 rooms |
 | New plan | 5 | 21/22 | 2 rooms |
 
@@ -739,7 +739,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 
 Multi-strategy merge improved room counts but quality issues remain:
 - **~~OCR label concatenation~~** — FIXED (2026-03-21). `output.py` now picks the single best label per room (prefers known room words, breaks ties by centroid proximity) instead of concatenating all matches.
-- **~~Logo/text regions detected as rooms~~** — MITIGATED (2026-03-21). `bbox_filter_pre` merge step computes consensus floor plan bbox (median of per-strategy bboxes) and removes rooms with centroids outside it, eliminating false rooms from logos, headers, and dimension text. `bbox_filter_post` re-checks after clustering as a safety net.
+- **~~Logo/text regions detected as rooms~~** — MITIGATED (2026-03-21). `bbox_filter_pre` merge step computes consensus floor plan bbox (median of per-strategy bboxes) and removes rooms with centroids outside it, eliminating false rooms from logos, headers, and dimension text. `bbox_filter_post` re-checks after clustering as a safety net. **Validated (2026-03-21):** On 520 W 23rd, bbox_filter_pre correctly removes 44 margin artifacts (two clusters of ~22 rooms each at left/right margins, area ~590K px each — these are blank areas flanking the floor plan that every strategy detects as giant contours). The previous baseline of 5 rooms was wrong — 2 were margin artifacts. Correct baseline is 3 rooms. 547 W 47th: 0 rooms removed (all inside bbox), 8 rooms preserved.
 - **~~Large merged rooms~~** — FIXED (2026-03-21). `merge.py` now excludes rooms exceeding 50% of image area from clustering.
 
 ### Quality: Sketch generation from CV+AI data

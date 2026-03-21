@@ -1230,7 +1230,7 @@ Use the `/analyze` endpoint. Check `meta.merge_steps` — verify `bbox_filter_pr
 
 Check room counts match or improve vs. baseline:
 - 547 W 47th: was 8 rooms
-- 520 W 23rd: was 5 rooms
+- 520 W 23rd: was 5 rooms → corrected to 3 (2 were margin artifacts removed by bbox_filter_pre)
 - Plan 3: was 8 rooms
 - New plan: was 5 rooms
 
