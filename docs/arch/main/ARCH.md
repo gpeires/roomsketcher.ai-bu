@@ -60,7 +60,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
                  │   ├─ /health           │
                  │   ├─ /analyze          │
                  │   ├─ /sweep            │
-                 │   ├─ 21 strategies     │
+                 │   ├─ 22 strategies     │
                  │   │  multi-strategy    │
                  │   │  room-level merge  │
                  │   ├─ OpenCV pipeline   │
@@ -97,7 +97,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (142 tests)
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (143 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -190,7 +190,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 ├── cv/
 │   ├── __init__.py
 │   ├── pipeline.py             # Orchestrator — multi-strategy merge, EXCLUDED_STRATEGIES, sweep
-│   ├── strategies.py           # 26 preprocessing strategies (STRATEGIES registry, StrategyResult)
+│   ├── strategies.py           # 27 preprocessing strategies (STRATEGIES registry, StrategyResult)
 │   ├── merge.py                # Room-level clustering across strategies (cluster_rooms, assemble_rooms)
 │   ├── enhance.py              # Image enhancement (CLAHE + bilateral filter + unsharp mask)
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
@@ -386,11 +386,11 @@ Agent calls analyze_floor_plan_image → Worker fetches image from D1
 
 ### CV Pipeline (`cv-service/cv/pipeline.py`)
 
-The pipeline uses **multi-strategy room-level merging**: run 21 preprocessing strategies in parallel, detect rooms per strategy, cluster overlapping rooms across strategies, then run the full pipeline once on an anchor strategy's binary mask.
+The pipeline uses **multi-strategy room-level merging**: run 22 preprocessing strategies in parallel, detect rooms per strategy, cluster overlapping rooms across strategies, then run the full pipeline once on an anchor strategy's binary mask.
 
 ```
 analyze_image(image)
-  ├── Step 1: Run 21 strategies in parallel → binary masks
+  ├── Step 1: Run 22 strategies in parallel → binary masks
   │   (EXCLUDED_STRATEGIES: lab_a_channel, lab_b_channel, saturation, top_hat_otsu, black_hat)
   ├── Step 2: detect_rooms() per strategy in parallel → rooms per strategy
   ├── Step 3: cluster_rooms() — cluster spatially overlapping rooms across strategies
@@ -416,7 +416,7 @@ _run_pipeline(image, binary_override?, rooms_override?)
 
 **Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 5 rooms.
 
-**Sweep endpoint** (`/sweep`): Runs all 26 strategies (including excluded ones) and returns per-strategy results with debug binary masks. Used for diagnostics and strategy evaluation.
+**Sweep endpoint** (`/sweep`): Runs all 27 strategies (including excluded ones) and returns per-strategy results with debug binary masks. Used for diagnostics and strategy evaluation.
 
 **Output JSON structure:**
 ```json
@@ -545,12 +545,12 @@ The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-se
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/health` | GET | Health check |
-| `/analyze` | POST | Multi-strategy merge: run 21 strategies, cluster rooms, return merged result |
-| `/sweep` | POST | Diagnostics: run all 26 strategies independently, return per-strategy results with debug binary masks |
+| `/analyze` | POST | Multi-strategy merge: run 22 strategies, cluster rooms, return merged result |
+| `/sweep` | POST | Diagnostics: run all 27 strategies independently, return per-strategy results with debug binary masks |
 
 The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms have `confidence` (0.3-0.9) and `found_by` (list of strategy names). Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
 
-The `/sweep` endpoint runs all 26 strategies (including excluded ones) and returns `{image_size, strategies[]}` where each strategy entry has the full pipeline result plus `debug_binary` (base64 PNG of the binary wall mask) and `time_ms`.
+The `/sweep` endpoint runs all 27 strategies (including excluded ones) and returns `{image_size, strategies[]}` where each strategy entry has the full pipeline result plus `debug_binary` (base64 PNG of the binary wall mask) and `time_ms`.
 
 ---
 
@@ -569,7 +569,7 @@ Worker fetches image bytes, encodes to base64
 │                                  │
 │  CV Service (Hetzner)            │  Workers AI (Cloudflare AI Gateway)
 │  POST /analyze                   │  4 vision specialists:
-│  └─ 21-strategy multi-merge     │  ├─ Room Namer → ["Kitchen", "Bedroom", ...]
+│  └─ 22-strategy multi-merge     │  ├─ Room Namer → ["Kitchen", "Bedroom", ...]
 │     └─ room-level clustering    │  ├─ Layout Describer → {room_count, rooms[{name, position, size}]}
 │                                  │  ├─ Symbol Spotter → [{type: "Toilet", position: "bottom-left"}]
 │  Returns: CVResult               │  └─ Dimension Reader → [{text: "10'2\"x15'8\"", room: "Bedroom"}]
@@ -628,13 +628,14 @@ Workers AI charges by "neurons" (compute units). The system tracks daily usage i
 
 ### CV Preprocessing Strategies (2026-03-20)
 
-The CV service has **26 preprocessing strategies** registered in `cv/strategies.py`, of which **21 are active** (5 excluded for zero yield). Each strategy transforms the input image into a form optimized for wall/room detection.
+The CV service has **27 preprocessing strategies** registered in `cv/strategies.py`, of which **22 are active** (5 excluded for zero yield). Each strategy transforms the input image into a form optimized for wall/room detection.
 
 **Strategy categories:**
 - **Direct binarization** (8): raw, otsu, adaptive_large, canny_dilate, downscale, morph_gradient, sauvola, median_otsu
 - **Enhancement + binarization** (4): enhanced (CLAHE+bilateral+unsharp), heavy_bilateral, clahe_aggressive, hsv_value
 - **Edge-based** (5): sobel_magnitude, log_edges, dog_edges, hough_lines, multi_scale
 - **Local adaptive** (3): niblack, wolf, bilateral_adaptive
+- **Thick wall handling** (1): thick_wall_open (morphological open removes thin furniture lines, preserves thick walls)
 - **Color channel** (3, excluded): lab_a_channel, lab_b_channel, saturation
 - **Morphological** (2, excluded): top_hat_otsu, black_hat
 - **Other** (1): invert
@@ -690,30 +691,39 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
-**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 21-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 5 CV rooms + 4 AI-only rooms = 9 total.
+**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 22-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 5 CV rooms + 4 AI-only rooms = 9 total.
 
 ### Resolved: Letterboxed images caused 0 rooms in threshold strategies
 
 **Fixed (2026-03-21).** Floor plan images with black letterbox bars (sidebars, top/bottom bars from PDF rendering) contaminated threshold-based strategies — black bars became ~40% wall density, destroying room detection. `remove_letterbox()` in `preprocess.py` now scans inward from each edge and fills uniformly dark strips with white before any strategy runs. On 520 W 23rd: raw went from 0→5 rooms, multi_scale from 0→5, otsu from 0→4.
 
-### Open: Thick walls and structural columns in luxury floor plans
+### Partially resolved: Thick walls and structural columns in luxury floor plans
 
-**Status: Unsolved.** Architectural floor plans (e.g., 547 W 47th) draw walls as filled rectangles (8-20px thick) and columns as small filled squares/circles. The pipeline struggles with these:
+**Status: Mitigated (2026-03-21).** Architectural floor plans (e.g., 547 W 47th) draw walls as filled rectangles (8-20px thick) and columns as small filled squares/circles. The core tension: strategies that fill thick walls (multi_scale, downscale) also over-fill furniture.
 
-- **Thin-edge splitting** — Threshold strategies (raw, otsu) detect thick walls as parallel thin edges instead of solid fills. `raw` on 547 W 47th: gradient_ratio=0.494 (half the wall pixels are edge-only), only 4 rooms detected.
-- **Over-filling** — Strategies that DO fill thick walls (multi_scale, downscale) also merge furniture and room content into the wall mask. `multi_scale` on 547 W 47th: 24.5% density (vs. ideal ~10%), 6 rooms but with furniture artifacts.
-- **The morphological close trap** — A larger morphological close (7x7) bridges parallel wall edges but ALSO merges furniture into walls — exactly the multi_scale failure mode. This is why a simple `prepare()` fix doesn't work.
-- **Columns** — Captured naturally by strategies that handle thick walls (multi_scale, downscale find 2-3 column-like blobs on 547 W 47th). But since those strategies also over-fill, columns aren't reliably isolated. Columns don't appear in RoomSketcher sketch output, so detection only has value as intermediate structural reasoning (e.g., perimeter anchoring).
+**What was added:** `thick_wall_open` strategy — morphological open (erode 5x5 then dilate) on the raw binary mask. Erosion removes thin furniture outlines (1-3px) while preserving thick walls (5-15px). On 547 W 47th: 6 rooms at 9.1% density (vs. multi_scale's 6 rooms at 24.5%). Contributes uniquely to rooms that no other strategy detects.
+
+**What remains:** The strategy regresses on thin-walled plans (plan3: 3→2, new_plan: 6→3) because erosion also removes thin walls. This is acceptable in the multi-strategy merge — other strategies compensate. But it means thick wall handling is a strategy-level addition, not a universal preprocessing fix.
 
 **Empirical data (547 W 47th):**
 
 | Strategy | Rooms | Density | Gradient Ratio | Issue |
 |----------|-------|---------|----------------|-------|
+| thick_wall_open | 6 | 9.1% | 0.438 | Clean walls, no furniture |
 | multi_scale | 6 | 24.5% | 0.203 (solid) | Over-fills furniture |
 | raw | 4 | 11.1% | 0.494 (mixed) | Thin edges, missing rooms |
 | adaptive_large | 3 | 9.2% | 0.897 (thin) | Edge-only walls |
 
-**Next steps:** Solving this likely requires either (a) wall vs. furniture classification (structural elements are elongated and connected, furniture is isolated), or (b) a two-pass approach where edges are detected first, then filled only within connected wall-like structures. The current room-level merge partially compensates by clustering rooms across strategies, but the underlying wall mask quality limits room detection accuracy.
+**Multi-strategy merge results with thick_wall_open:**
+
+| Image | Rooms | Strategies contributing | thick_wall_open contributes to |
+|-------|-------|------------------------|-------------------------------|
+| 547 W 47th | 8 | 18/22 | 4 rooms (1 unique) |
+| 520 W 23rd | 5 | 21/22 | 3 rooms |
+| Plan 3 | 8 | 21/22 | 2 rooms |
+| New plan | 5 | 21/22 | 2 rooms |
+
+**Remaining opportunities:** Column detection (columns appear as small filled squares at regular grid intervals — could serve as perimeter anchors), distance-transform wall filling (fill background pixels between parallel close edges), and wall-vs-furniture classification based on connected component shape analysis.
 
 ### Quality: CV room detection still imperfect
 

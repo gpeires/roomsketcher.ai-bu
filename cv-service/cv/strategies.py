@@ -419,6 +419,28 @@ def _hough_lines(image: np.ndarray) -> StrategyResult:
     return StrategyResult(binary, is_binary=True)
 
 
+# ── Thick wall handling ───────────────────────────────────────────────
+
+
+def _thick_wall_open(image: np.ndarray) -> StrategyResult:
+    """Morphological open to remove thin furniture lines, keeping thick walls.
+
+    Luxury/architectural floor plans draw walls as filled rectangles (5-15px thick)
+    and furniture as thin outlines (1-3px). Erosion with a 5x5 kernel removes
+    furniture outlines while preserving thick wall structures.
+
+    Best for: plans with filled thick walls (gradient_ratio < 0.3).
+    Regression risk: thin-walled plans where walls are also 1-3px — the merge
+    compensates via other strategies.
+    """
+    binary = prepare(image)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    h, w = opened.shape
+    opened = filter_components(opened, h * w)
+    return StrategyResult(opened, is_binary=True)
+
+
 # ── Registry ──────────────────────────────────────────────────────────
 
 STRATEGIES: dict[str, callable] = {
@@ -454,4 +476,6 @@ STRATEGIES: dict[str, callable] = {
     "bilateral_adaptive": _bilateral_adaptive,
     "median_otsu": _median_otsu,
     "hough_lines": _hough_lines,
+    # Thick wall handling
+    "thick_wall_open": _thick_wall_open,
 }

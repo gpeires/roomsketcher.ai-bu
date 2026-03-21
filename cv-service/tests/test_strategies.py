@@ -18,8 +18,8 @@ def bgr_image():
 
 
 class TestStrategyRegistry:
-    def test_has_26_strategies(self):
-        assert len(STRATEGIES) == 26
+    def test_has_27_strategies(self):
+        assert len(STRATEGIES) == 27
 
     def test_expected_names(self):
         expected = {"raw", "enhanced", "otsu", "adaptive_large",
@@ -30,7 +30,8 @@ class TestStrategyRegistry:
                     "black_hat", "top_hat_otsu",
                     "niblack", "wolf",
                     "lab_a_channel", "lab_b_channel", "saturation",
-                    "bilateral_adaptive", "median_otsu", "hough_lines"}
+                    "bilateral_adaptive", "median_otsu", "hough_lines",
+                    "thick_wall_open"}
         assert set(STRATEGIES.keys()) == expected
 
 
