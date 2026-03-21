@@ -43,6 +43,43 @@ def compute_consensus_bbox(
     return (int(median[0]), int(median[1]), int(median[2]), int(median[3]))
 
 
+def filter_by_bbox(
+    strategy_room_lists: list[dict],
+    context: MergeContext,
+) -> MergeStepResult:
+    """Pre-cluster filter: remove rooms whose centroid falls outside consensus bbox."""
+    consensus = compute_consensus_bbox(context.strategy_bboxes)
+    if consensus is None:
+        return MergeStepResult(rooms=strategy_room_lists, removed=[], meta={"skipped": True})
+    context.consensus_bbox = consensus
+    x0, y0, x1, y1 = consensus
+
+    filtered = []
+    removed = []
+    rooms_in = 0
+    for entry in strategy_room_lists:
+        kept = []
+        for room in entry["rooms"]:
+            rooms_in += 1
+            cx, cy = room["centroid"]
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                kept.append(room)
+            else:
+                room_copy = dict(room)
+                room_copy["removal_reason"] = "outside_floor_plan_bbox"
+                room_copy["_strategy"] = entry["strategy"]
+                removed.append(room_copy)
+        filtered.append({"strategy": entry["strategy"], "rooms": kept})
+
+    meta = {
+        "consensus_bbox": (x0, y0, x1 - x0, y1 - y0),
+        "rooms_in": rooms_in,
+        "rooms_removed": len(removed),
+        "strategies_with_bbox": len(context.strategy_bboxes),
+    }
+    return MergeStepResult(rooms=filtered, removed=removed, meta=meta)
+
+
 def cluster_rooms(
     strategy_room_lists: list[dict],
     image_shape: tuple[int, int],

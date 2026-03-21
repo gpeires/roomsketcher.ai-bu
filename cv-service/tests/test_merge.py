@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
-from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox
+from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox
 
 
 def _make_room(centroid, bbox=None, area_px=1000):
@@ -89,6 +89,58 @@ class TestConsensusBbox:
     def test_empty_returns_none(self):
         result = compute_consensus_bbox([])
         assert result is None
+
+
+class TestFilterByBbox:
+    def test_removes_rooms_outside_bbox(self):
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(50, 50, 550, 350)] * 3,
+        )
+        strategy_rooms = [
+            {"strategy": "raw", "rooms": [_make_room((300, 200)), _make_room((10, 10))]},
+        ]
+        result = filter_by_bbox(strategy_rooms, ctx)
+        total_kept = sum(len(e["rooms"]) for e in result.rooms)
+        assert total_kept == 1
+        assert len(result.removed) == 1
+        assert result.removed[0]["removal_reason"] == "outside_floor_plan_bbox"
+
+    def test_keeps_rooms_inside_bbox(self):
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)] * 3,
+        )
+        strategy_rooms = [
+            {"strategy": "raw", "rooms": [_make_room((300, 200)), _make_room((100, 100))]},
+        ]
+        result = filter_by_bbox(strategy_rooms, ctx)
+        total_kept = sum(len(e["rooms"]) for e in result.rooms)
+        assert total_kept == 2
+        assert len(result.removed) == 0
+
+    def test_sets_consensus_bbox_on_context(self):
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(50, 50, 550, 350), (55, 55, 545, 345)],
+        )
+        strategy_rooms = [{"strategy": "raw", "rooms": []}]
+        filter_by_bbox(strategy_rooms, ctx)
+        assert ctx.consensus_bbox is not None
+
+    def test_preserves_strategy_structure(self):
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)] * 2,
+        )
+        strategy_rooms = [
+            {"strategy": "raw", "rooms": [_make_room((300, 200))]},
+            {"strategy": "otsu", "rooms": [_make_room((100, 100))]},
+        ]
+        result = filter_by_bbox(strategy_rooms, ctx)
+        assert len(result.rooms) == 2
+        assert result.rooms[0]["strategy"] == "raw"
+        assert result.rooms[1]["strategy"] == "otsu"
 
 
 class TestBboxIou:
