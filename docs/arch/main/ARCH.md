@@ -97,7 +97,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (132 tests)
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (142 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -446,6 +446,12 @@ _run_pipeline(image, binary_override?, rooms_override?)
 
 Rooms are emitted as **rect** (`{x, y, width, depth}`) when the room is rectangular (mask area / bbox area ≥ 0.85) or **polygon** (`{polygon: [{x,y}...]}`) for L-shaped/irregular rooms. Both formats are accepted by `SimpleFloorPlanInputSchema` in `compile-layout.ts`. Coordinates are normalized to the floor plan bbox origin so rooms start near (0,0).
 
+### Input Normalization (`cv-service/cv/preprocess.py`)
+
+**Letterbox removal** (`remove_letterbox()`) runs before any strategy or binarization. Real-world floor plan images often have black bars on sides/top/bottom (letterboxing from PDF rendering, scanning, or marketing materials). These bars contaminate threshold-based binarization — on the 520 W 23rd test image, black sidebars caused raw/otsu/downscale/multi_scale strategies to produce ~40% wall density and detect 0 rooms. After letterbox removal, `raw` detects 5 rooms at 6.7% density.
+
+Algorithm: scan inward from each edge in 10px strips. If a strip is uniformly dark (mean < 30, std < 15), classify as letterbox. Fill with white (255). Scan depth limited to 1/3 of image from each edge. Applied once in `analyze_image()` and `run_single_strategy()` before the image reaches any strategy.
+
 ### Preprocessing (`cv-service/cv/preprocess.py`)
 
 Two-pass wall mask extraction:
@@ -635,8 +641,9 @@ The CV service has **26 preprocessing strategies** registered in `cv/strategies.
 
 **Top performers by image (rooms detected):**
 - 547 W 47th: multi_scale=6, hough_lines=6, downscale=5
-- 520 W 23rd (critical): canny_dilate=6, morph_gradient=6, sobel_magnitude=6, log_edges=6, niblack=6
+- 520 W 23rd: canny_dilate=6, hough_lines=6, niblack=6, morph_gradient=6 (after letterbox fix; previously raw/otsu/multi_scale all detected 0 rooms due to black sidebar contamination, now raw=5, multi_scale=5, otsu=4)
 - Plan 3: canny_dilate=10, log_edges=10, then 6 strategies at 9
+- New plan: enhanced=8, then 7 strategies at 7
 
 **Preprocessing metadata** added to `meta.preprocessing`:
 ```json
@@ -684,6 +691,29 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
 **Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 21-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 5 CV rooms + 4 AI-only rooms = 9 total.
+
+### Resolved: Letterboxed images caused 0 rooms in threshold strategies
+
+**Fixed (2026-03-21).** Floor plan images with black letterbox bars (sidebars, top/bottom bars from PDF rendering) contaminated threshold-based strategies — black bars became ~40% wall density, destroying room detection. `remove_letterbox()` in `preprocess.py` now scans inward from each edge and fills uniformly dark strips with white before any strategy runs. On 520 W 23rd: raw went from 0→5 rooms, multi_scale from 0→5, otsu from 0→4.
+
+### Open: Thick walls and structural columns in luxury floor plans
+
+**Status: Unsolved.** Architectural floor plans (e.g., 547 W 47th) draw walls as filled rectangles (8-20px thick) and columns as small filled squares/circles. The pipeline struggles with these:
+
+- **Thin-edge splitting** — Threshold strategies (raw, otsu) detect thick walls as parallel thin edges instead of solid fills. `raw` on 547 W 47th: gradient_ratio=0.494 (half the wall pixels are edge-only), only 4 rooms detected.
+- **Over-filling** — Strategies that DO fill thick walls (multi_scale, downscale) also merge furniture and room content into the wall mask. `multi_scale` on 547 W 47th: 24.5% density (vs. ideal ~10%), 6 rooms but with furniture artifacts.
+- **The morphological close trap** — A larger morphological close (7x7) bridges parallel wall edges but ALSO merges furniture into walls — exactly the multi_scale failure mode. This is why a simple `prepare()` fix doesn't work.
+- **Columns** — Captured naturally by strategies that handle thick walls (multi_scale, downscale find 2-3 column-like blobs on 547 W 47th). But since those strategies also over-fill, columns aren't reliably isolated. Columns don't appear in RoomSketcher sketch output, so detection only has value as intermediate structural reasoning (e.g., perimeter anchoring).
+
+**Empirical data (547 W 47th):**
+
+| Strategy | Rooms | Density | Gradient Ratio | Issue |
+|----------|-------|---------|----------------|-------|
+| multi_scale | 6 | 24.5% | 0.203 (solid) | Over-fills furniture |
+| raw | 4 | 11.1% | 0.494 (mixed) | Thin edges, missing rooms |
+| adaptive_large | 3 | 9.2% | 0.897 (thin) | Edge-only walls |
+
+**Next steps:** Solving this likely requires either (a) wall vs. furniture classification (structural elements are elongated and connected, furniture is isolated), or (b) a two-pass approach where edges are detected first, then filled only within connected wall-like structures. The current room-level merge partially compensates by clustering rooms across strategies, but the underlying wall mask quality limits room detection accuracy.
 
 ### Quality: CV room detection still imperfect
 

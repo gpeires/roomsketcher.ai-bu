@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 import cv2
 import numpy as np
 
-from cv.preprocess import prepare, find_floor_plan_bbox
+from cv.preprocess import prepare, find_floor_plan_bbox, remove_letterbox
 from cv.walls import detect_walls
 from cv.rooms import detect_rooms
 from cv.ocr import extract_text_regions
@@ -35,6 +35,9 @@ def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> d
 def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict:
     """Run all strategies, detect rooms per strategy, cluster, run pipeline once."""
     from cv.strategies import STRATEGIES, StrategyResult
+
+    # Normalize: remove black letterbox bars before any strategy runs
+    image = remove_letterbox(image)
 
     h, w = image.shape[:2]
     start = time.monotonic()
@@ -260,6 +263,9 @@ def run_single_strategy(
     - time_ms: wall-clock time in milliseconds
     """
     from cv.strategies import StrategyResult
+
+    # Normalize: remove black letterbox bars before strategy runs
+    image = remove_letterbox(image)
 
     start = time.monotonic()
     try:

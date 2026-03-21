@@ -3,6 +3,79 @@ import cv2
 import numpy as np
 
 
+def remove_letterbox(image: np.ndarray) -> np.ndarray:
+    """Remove black letterbox bars from floor plan images.
+
+    Scans inward from each edge of the image. If a strip is uniformly dark
+    (mean < 30, std < 15), it's a letterbox bar — fill with white (255) so
+    it becomes background, not wall, during binarization.
+
+    Works on both grayscale (H,W) and color (H,W,3) images.
+    Returns the same dtype/shape with letterbox regions set to white.
+    """
+    if image.ndim == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image
+
+    h, w = gray.shape
+    strip = 10
+    max_dark_mean = 30
+    max_dark_std = 15
+    # Don't scan more than 1/3 of the image from any edge
+    max_top = h // 3
+    max_left = w // 3
+
+    top = 0
+    while top + strip <= max_top:
+        s = gray[top:top + strip, :]
+        if s.mean() < max_dark_mean and s.std() < max_dark_std:
+            top += strip
+        else:
+            break
+
+    bottom = h
+    while bottom - strip >= h - max_top:
+        s = gray[bottom - strip:bottom, :]
+        if s.mean() < max_dark_mean and s.std() < max_dark_std:
+            bottom -= strip
+        else:
+            break
+
+    left = 0
+    while left + strip <= max_left:
+        s = gray[:, left:left + strip]
+        if s.mean() < max_dark_mean and s.std() < max_dark_std:
+            left += strip
+        else:
+            break
+
+    right = w
+    while right - strip >= w - max_left:
+        s = gray[:, right - strip:right]
+        if s.mean() < max_dark_mean and s.std() < max_dark_std:
+            right -= strip
+        else:
+            break
+
+    # Only modify if we actually found letterbox bars
+    if top == 0 and bottom == h and left == 0 and right == w:
+        return image
+
+    result = image.copy()
+    fill = 255 if image.ndim == 2 else (255, 255, 255)
+    if top > 0:
+        result[:top, :] = fill
+    if bottom < h:
+        result[bottom:, :] = fill
+    if left > 0:
+        result[:, :left] = fill
+    if right < w:
+        result[:, right:] = fill
+
+    return result
+
+
 def prepare(image: np.ndarray) -> np.ndarray:
     """Convert a floor plan image to a binary wall mask (walls=255, rooms=0).
 
