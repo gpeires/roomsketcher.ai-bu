@@ -3,7 +3,10 @@ import cv2
 import numpy as np
 import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
-from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox, cluster_rooms_step
+from cv.merge import (
+    MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox,
+    cluster_rooms_step, filter_clusters_by_bbox,
+)
 
 
 def _make_room(centroid, bbox=None, area_px=1000):
@@ -275,6 +278,27 @@ class TestClusterRoomsStep:
         ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
         result = cluster_rooms_step(strategy_rooms, ctx)
         assert any(r.get("removal_reason") == "giant_room" for r in result.removed)
+
+
+class TestFilterClustersByBbox:
+    def test_removes_clusters_outside_bbox(self):
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(50, 50, 550, 350)] * 3)
+        ctx.consensus_bbox = (50, 50, 550, 350)
+        rooms = [
+            {**_make_room((300, 200)), "confidence": 0.9, "found_by": ["raw"], "agreement_count": 5},
+            {**_make_room((10, 10)), "confidence": 0.3, "found_by": ["raw"], "agreement_count": 1},
+        ]
+        result = filter_clusters_by_bbox(rooms, ctx)
+        assert len(result.rooms) == 1
+        assert result.rooms[0]["centroid"] == (300, 200)
+        assert len(result.removed) == 1
+
+    def test_noop_when_no_consensus_bbox(self):
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[])
+        rooms = [{**_make_room((300, 200)), "confidence": 0.9, "found_by": ["raw"], "agreement_count": 5}]
+        result = filter_clusters_by_bbox(rooms, ctx)
+        assert len(result.rooms) == 1
+        assert len(result.removed) == 0
 
 
 class TestAssembleRooms:

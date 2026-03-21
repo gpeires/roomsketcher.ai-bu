@@ -202,6 +202,30 @@ def cluster_rooms_step(
     return MergeStepResult(rooms=clustered, removed=removed, meta=meta)
 
 
+def filter_clusters_by_bbox(
+    rooms: list[dict],
+    context: MergeContext,
+) -> MergeStepResult:
+    """Post-cluster filter: remove clustered rooms outside consensus bbox."""
+    if context.consensus_bbox is None:
+        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+
+    x0, y0, x1, y1 = context.consensus_bbox
+    kept = []
+    removed = []
+    for room in rooms:
+        cx, cy = room["centroid"]
+        if x0 <= cx <= x1 and y0 <= cy <= y1:
+            kept.append(room)
+        else:
+            room_copy = dict(room)
+            room_copy["removal_reason"] = "outside_floor_plan_bbox_post"
+            removed.append(room_copy)
+
+    meta = {"rooms_in": len(rooms), "rooms_removed": len(removed)}
+    return MergeStepResult(rooms=kept, removed=removed, meta=meta)
+
+
 def assemble_rooms(
     rooms: list[dict],
     confidence_scores: list[float],
