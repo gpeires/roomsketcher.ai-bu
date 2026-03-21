@@ -10,6 +10,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 2. **AI floor plan sketcher** — Claude generates floor plans from natural language, users edit in a browser SPA, changes sync in real-time via WebSocket
 3. **Design knowledge system** — Articles chunked, tagged, and indexed for AI-driven design recommendations
 4. **CV floor plan extraction** — OpenCV + Tesseract pipeline on Hetzner that analyzes floor plan images and extracts room geometries, labels, and dimensions
+5. **AI-layered CV pipeline** — 4 Workers AI vision specialists run in parallel with CV, results merged via centroid-distance matching
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -58,8 +59,24 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
                  │   FastAPI CV Service   │
                  │   ├─ /health           │
                  │   ├─ /analyze          │
+                 │   ├─ /sweep            │
+                 │   ├─ 21 strategies     │
+                 │   │  multi-strategy    │
+                 │   │  room-level merge  │
                  │   ├─ OpenCV pipeline   │
                  │   └─ Tesseract OCR     │
+                 └────────────────────────┘
+
+         Cloudflare AI Gateway (roomsketcher-ai)
+                 ┌────────────────────────┐
+                 │  4 Vision Specialists  │
+                 │  ├─ Room Namer         │
+                 │  ├─ Layout Describer   │
+                 │  ├─ Symbol Spotter     │
+                 │  └─ Dimension Reader   │
+                 │                        │
+                 │  Model: llama-3.2-11b  │
+                 │  -vision-instruct      │
                  └────────────────────────┘
 ```
 
@@ -80,7 +97,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && pytest        # Run CV pipeline tests
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (132 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -144,6 +161,19 @@ src/
 │   ├── knowledge.ts            # searchDesignKnowledge + logInsight handlers
 │   ├── knowledge.test.ts       # Knowledge tool tests
 │   └── fts.ts                  # Shared sanitizeFtsQuery() utility
+├── ai/
+│   ├── orchestrator.ts          # Image fetch, CV service call, specialist dispatch, merge
+│   ├── merge.ts                 # Centroid-distance matching, label normalization, deduplication
+│   ├── specialists.ts           # Prompts + response parsers for 4 vision specialists
+│   ├── validate.ts              # Merged result validation (optional feedback loop)
+│   ├── types.ts                 # CVResult, MergedRoom, GatherResults, PipelineOutput, PipelineConfig
+│   ├── parse-json.ts            # JSON repair (jsonrepair lib) + error handling
+│   └── __tests__/
+│       ├── merge.test.ts        # Centroid matching, label normalization, dedup tests
+│       ├── orchestrator.test.ts # Image fetching, CV service integration tests
+│       ├── parse-json.test.ts   # JSON repair tests
+│       ├── specialists.test.ts  # Prompt + parser tests
+│       └── validate.test.ts     # Validation logic tests
 ├── sync/
 │   ├── zendesk.ts              # Zendesk API client (paginated)
 │   ├── html-to-text.ts         # HTML → plain text converter
@@ -159,7 +189,10 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 ├── app.py                      # FastAPI entry — /health, /analyze endpoints
 ├── cv/
 │   ├── __init__.py
-│   ├── pipeline.py             # Orchestrator — image → rooms/walls/text/openings/topology → output
+│   ├── pipeline.py             # Orchestrator — multi-strategy merge, EXCLUDED_STRATEGIES, sweep
+│   ├── strategies.py           # 26 preprocessing strategies (STRATEGIES registry, StrategyResult)
+│   ├── merge.py                # Room-level clustering across strategies (cluster_rooms, assemble_rooms)
+│   ├── enhance.py              # Image enhancement (CLAHE + bilateral filter + unsharp mask)
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
 │   ├── walls.py                # Wall line detection via morphological extraction
 │   ├── rooms.py                # Room detection + polygon extraction + closed mask export
@@ -169,9 +202,13 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── dimensions.py           # Parse metric/imperial/compound dimensions to cm
 │   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon)
 ├── tests/
-│   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped)
+│   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped, low-contrast)
 │   ├── test_app.py             # FastAPI endpoint tests
-│   ├── test_pipeline.py        # Pipeline integration tests
+│   ├── test_enhance.py         # Enhancement algorithm + pick_winner tests (10 tests)
+│   ├── test_merge.py           # Room clustering, bbox IoU, assemble_rooms tests (17 tests)
+│   ├── test_strategies.py      # Strategy output format/shape tests
+│   ├── test_sweep.py           # Sweep endpoint + single-strategy pipeline tests
+│   ├── test_pipeline.py        # Pipeline integration tests (incl. multi-strategy merge, confidence)
 │   ├── test_rooms.py           # Room detection + polygon extraction tests
 │   ├── test_openings.py        # Door/window detection tests
 │   ├── test_topology.py        # Adjacency detection tests
@@ -349,18 +386,37 @@ Agent calls analyze_floor_plan_image → Worker fetches image from D1
 
 ### CV Pipeline (`cv-service/cv/pipeline.py`)
 
+The pipeline uses **multi-strategy room-level merging**: run 21 preprocessing strategies in parallel, detect rooms per strategy, cluster overlapping rooms across strategies, then run the full pipeline once on an anchor strategy's binary mask.
+
 ```
 analyze_image(image)
-  ├── prepare(image)              → binary wall mask (walls=255, rooms=0)
+  ├── Step 1: Run 21 strategies in parallel → binary masks
+  │   (EXCLUDED_STRATEGIES: lab_a_channel, lab_b_channel, saturation, top_hat_otsu, black_hat)
+  ├── Step 2: detect_rooms() per strategy in parallel → rooms per strategy
+  ├── Step 3: cluster_rooms() — cluster spatially overlapping rooms across strategies
+  │   ├── Pool all rooms tagged with source strategy
+  │   ├── Sort by area descending (largest = best representative)
+  │   ├── Greedy clustering: IoU >= 0.3 or centroid distance < 15% diagonal
+  │   └── Confidence: 5+ strategies=0.9, 3-4=0.7, 2=0.5, 1=0.3
+  ├── Step 4: Pick anchor strategy (most rooms) for walls/openings/scale
+  ├── Step 5: _run_pipeline(anchor_mask, clustered_rooms) → full pipeline
+  └── Step 6: Attach confidence/found_by to output rooms, merge metadata
+
+_run_pipeline(image, binary_override?, rooms_override?)
+  ├── prepare(image) or use binary_override
   ├── find_floor_plan_bbox(binary) → crop region excluding headers/legends
   ├── detect_walls(binary)        → wall segments [{start, end, thickness}]
-  ├── detect_rooms(binary)        → (rooms [{bbox, centroid, mask, polygon}], closed_binary)
+  ├── detect_rooms(binary)        → (rooms, closed_binary) — still runs for closed_binary even with override
   ├── extract_text_regions(image) → OCR results [{text, center}] (with text merging)
   ├── _calibrate_scale(walls, text_regions) → cm-per-pixel scale factor
-  ├── detect_openings(binary, closed, rooms, walls, scale) → [{type, position, width, rooms}]
-  ├── detect_adjacency(rooms, binary)  → [{room_a, room_b, orientation, length}]
+  ├── detect_openings(binary, closed, rooms, walls, scale)
+  ├── detect_adjacency(rooms, binary)
   └── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
 ```
+
+**Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 5 rooms.
+
+**Sweep endpoint** (`/sweep`): Runs all 26 strategies (including excluded ones) and returns per-strategy results with debug binary masks. Used for diagnostics and strategy evaluation.
 
 **Output JSON structure:**
 ```json
@@ -483,9 +539,182 @@ The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-se
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/health` | GET | Health check |
-| `/analyze` | POST | Accept `{image, image_url, name}`, run CV pipeline, return rooms + meta |
+| `/analyze` | POST | Multi-strategy merge: run 21 strategies, cluster rooms, return merged result |
+| `/sweep` | POST | Diagnostics: run all 26 strategies independently, return per-strategy results with debug binary masks |
 
-The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms may be rect or polygon format. Openings include detected doors (with `between` room pairs) and windows (with `room` + `wall` side). Adjacency lists which rooms share walls.
+The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms have `confidence` (0.3-0.9) and `found_by` (list of strategy names). Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
+
+The `/sweep` endpoint runs all 26 strategies (including excluded ones) and returns `{image_size, strategies[]}` where each strategy entry has the full pipeline result plus `debug_binary` (base64 PNG of the binary wall mask) and `time_ms`.
+
+---
+
+## AI-Layered CV Pipeline (2026-03-19 — 2026-03-20)
+
+### Overview
+
+The `analyze_floor_plan_image` MCP tool runs **CV + 4 AI vision specialists in parallel**, then merges results. This was added to compensate for CV's weakness on complex real-world floor plans.
+
+```
+analyze_floor_plan_image(image_url)
+  ↓
+Worker fetches image bytes, encodes to base64
+  ↓
+┌──────────── Parallel ────────────┐
+│                                  │
+│  CV Service (Hetzner)            │  Workers AI (Cloudflare AI Gateway)
+│  POST /analyze                   │  4 vision specialists:
+│  └─ 21-strategy multi-merge     │  ├─ Room Namer → ["Kitchen", "Bedroom", ...]
+│     └─ room-level clustering    │  ├─ Layout Describer → {room_count, rooms[{name, position, size}]}
+│                                  │  ├─ Symbol Spotter → [{type: "Toilet", position: "bottom-left"}]
+│  Returns: CVResult               │  └─ Dimension Reader → [{text: "10'2\"x15'8\"", room: "Bedroom"}]
+│  (rooms w/ confidence+found_by)  │
+└──────────┬───────────────────────┘
+           ↓
+     Tier Rooms (src/ai/orchestrator.ts)
+       ├─ tierRooms(): split CV rooms by confidence
+       │   ├─ forAI: confidence >= 0.5 → sent to AI merge
+       │   └─ hintBank: confidence < 0.5 → held back
+           ↓
+     Merge (src/ai/merge.ts) — uses only forAI rooms
+       ├─ Centroid-distance matching: map AI rooms to CV rooms
+       ├─ Label normalization: "Toilet" → Bathroom, "Bed" → Bedroom
+       ├─ Deduplication: overlapping regions merged
+       ├─ Confidence scoring: CV source = 0.3, specialist agreement = +0.15-0.2
+       └─ Fallback: if CV finds 0 rooms, AI specialists provide all room data
+           ↓
+     Validate (src/ai/validate.ts)
+       └─ Optional feedback loop via validator specialist
+           ↓
+     Reconcile Hint Bank (src/ai/orchestrator.ts)
+       └─ reconcileHintBank(): add non-overlapping hint bank rooms (IoU < 0.3)
+           ↓
+     Returns: PipelineOutput JSON (ready for generate_floor_plan)
+```
+
+### Specialist Details
+
+| Specialist | Model | Prompt Summary | Response Parser |
+|-----------|-------|----------------|-----------------|
+| Room Namer | `@cf/meta/llama-3.2-11b-vision-instruct` | "List every room label visible" | `parseRoomNamerResponse` |
+| Layout Describer | same | "Count rooms, describe position (3x3 grid) & size" | `parseLayoutDescriberResponse` |
+| Symbol Spotter | same | "Find fixtures: toilet, sink, bed, stove..." | `parseSymbolSpotterResponse` |
+| Dimension Reader | same | "Extract measurement text & room association" | `parseDimensionReaderResponse` |
+
+Routed through **AI Gateway** (`roomsketcher-ai`) for caching, retries, and rate limiting.
+
+**Error handling:** Each specialist has a 30s timeout. Bad JSON is repaired via `jsonrepair`. If a specialist fails, merge proceeds with partial data (returns `SpecialistFailure` with error message).
+
+### Merge Algorithm (`src/ai/merge.ts`)
+
+1. **Grid-based position mapping** — AI specialists report room positions on a 3x3 grid (top-left, center, bottom-right). These are mapped to pixel coordinates based on image dimensions.
+2. **Centroid-distance matching** — Each AI-identified room is matched to the nearest CV room by centroid distance. Unmatched AI rooms become new rooms (AI-only).
+3. **Label normalization** — `SYMBOL_ROOM_MAP` maps fixture names to room types (e.g., "Toilet" → "Bathroom", "Stove" → "Kitchen"). Fuzzy matching handles partial labels.
+4. **Confidence scoring** — CV rooms start at 0.7 confidence. Each specialist that corroborates a room adds +0.05-0.2.
+5. **Split hints** — When AI finds significantly more rooms than CV (3+ gap), remaining CV rooms get `split_hint: true` with evidence strings.
+
+### Neuron Budget Tracking
+
+Workers AI charges by "neurons" (compute units). The system tracks daily usage in `ai_neuron_usage` D1 table:
+- Budget: 50,000 neurons/day (configurable via `DEFAULT_CONFIG.neuronBudget`)
+- Buffer: 5,000 neurons (skip AI when within buffer of limit)
+- Each specialist call costs ~625 neurons (4 calls = ~2,500 per analysis)
+- Budget checked before each analysis; if exceeded, CV-only results returned
+
+### CV Preprocessing Strategies (2026-03-20)
+
+The CV service has **26 preprocessing strategies** registered in `cv/strategies.py`, of which **21 are active** (5 excluded for zero yield). Each strategy transforms the input image into a form optimized for wall/room detection.
+
+**Strategy categories:**
+- **Direct binarization** (8): raw, otsu, adaptive_large, canny_dilate, downscale, morph_gradient, sauvola, median_otsu
+- **Enhancement + binarization** (4): enhanced (CLAHE+bilateral+unsharp), heavy_bilateral, clahe_aggressive, hsv_value
+- **Edge-based** (5): sobel_magnitude, log_edges, dog_edges, hough_lines, multi_scale
+- **Local adaptive** (3): niblack, wolf, bilateral_adaptive
+- **Color channel** (3, excluded): lab_a_channel, lab_b_channel, saturation
+- **Morphological** (2, excluded): top_hat_otsu, black_hat
+- **Other** (1): invert
+
+**Top performers by image (rooms detected):**
+- 547 W 47th: multi_scale=6, hough_lines=6, downscale=5
+- 520 W 23rd (critical): canny_dilate=6, morph_gradient=6, sobel_magnitude=6, log_edges=6, niblack=6
+- Plan 3: canny_dilate=10, log_edges=10, then 6 strategies at 9
+
+**Preprocessing metadata** added to `meta.preprocessing`:
+```json
+{
+  "strategy_used": "multi_strategy_merge",
+  "anchor_strategy": "canny_dilate",
+  "strategies_run": 21,
+  "strategies_contributing": 17
+}
+```
+
+**Merge stats** added to `meta.merge_stats`:
+```json
+{"high": 5, "medium": 1, "low": 1, "total": 7}
+```
+
+### TypeScript Types (`src/ai/types.ts`)
+
+```typescript
+// Specialist result types
+RoomNamerResult, LayoutDescriberResult, SymbolSpotterResult, DimensionReaderResult
+SpecialistFailure  // { ok: false, specialist, error }
+
+// CV service output
+CVRoom { label, x, y, width, depth, polygon?, confidence?, found_by? }
+CVResult { name, rooms: CVRoom[], meta: { ..., preprocessing?: { strategy_used, anchor_strategy?, strategies_run?, strategies_contributing? } } }
+
+// Merge output
+MergedRoom { label, x, y, width, depth, type, confidence, sources[], split_hint?, split_evidence? }
+
+// Full pipeline
+GatherResults { cv, roomNamer, layoutDescriber, symbolSpotter, dimensionReader }
+PipelineOutput { name, rooms: MergedRoom[], openings, adjacency, meta: { ..., specialists_succeeded, specialists_failed, merge_stats?, merge_time_ms? } }
+PipelineConfig { ai, db, cvServiceUrl, model, fallbackModel, timeouts, neuronBudget }
+
+// Orchestrator exports
+tierRooms(rooms: CVRoom[]) → { forAI: CVRoom[], hintBank: CVRoom[] }
+reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → MergedRoom[]
+```
+
+---
+
+## Known Issues & Status (as of 2026-03-20)
+
+### Resolved: CV finds 0 rooms on real-world floor plans
+
+**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 21-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 5 CV rooms + 4 AI-only rooms = 9 total.
+
+### Quality: CV room detection still imperfect
+
+Multi-strategy merge improved room counts but quality issues remain:
+- **OCR label concatenation** — when multiple text regions overlap one room polygon, labels concatenate: "Kitchen Bedroom Room Bath" instead of selecting the best match. This happens because `output.py` assigns ALL nearby text to a room.
+- **Logo/text regions detected as rooms** — "COMPASS", "WEST RESIDENCE CLUB CONDOMINIUMS" appear as rooms. The CV pipeline doesn't filter non-room regions (logos, legends, titles).
+- **Large merged rooms** — some strategies produce one giant room spanning most of the floor plan instead of individual rooms. This inflates cluster agreement counts.
+
+### Quality: Sketch generation from CV+AI data
+
+The generated sketches don't closely match source images:
+- **CV polygon geometry is real** but often irregular/noisy
+- **AI-only rooms use estimated geometry** — grid-cell positions (3x3) and estimated sizes, not real pixel coordinates
+- **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
+- **Furniture placement is approximate** — Symbol Spotter detects fixtures but gives grid-cell positions, not pixel coords
+
+### Quality: Worker-side merge could use CV confidence data
+
+CV now sends `confidence` (0.3-0.9) and `found_by` (strategy names) per room. The Worker's `tierRooms()` uses confidence to split rooms into forAI/hintBank tiers. But the merge layer (`src/ai/merge.ts`) doesn't yet use these signals — it still starts all CV rooms at 0.3 confidence and builds up from specialist agreement. Higher CV confidence (0.9 = found by 5+ strategies) should boost the starting confidence.
+
+### Preprocessing metadata now flows through
+
+`meta.cv_preprocessing` in `PipelineOutput` contains `{ strategy_used, anchor_strategy, strategies_run, strategies_contributing }`. Specialist errors surfaced in `meta.specialist_errors`.
+
+### Minor: Furniture catalog gaps
+
+Missing items: dishwasher, oven, washer/dryer, kitchen island, fireplace, AC unit. Tracked in `project_furniture_catalog_gaps.md`.
+
+### Minor: Uploaded images not cleaned up
+
+`uploaded_images` table entries persist indefinitely. Should be cleaned up after CV analysis or via cron.
 
 ---
 
