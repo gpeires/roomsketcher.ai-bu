@@ -32,6 +32,17 @@ class MergeStepResult(NamedTuple):
     meta: dict
 
 
+def compute_consensus_bbox(
+    bboxes: list[tuple[int, int, int, int]],
+) -> tuple[int, int, int, int] | None:
+    """Compute a robust consensus bounding box from multiple strategy bboxes."""
+    if not bboxes:
+        return None
+    arr = np.array(bboxes)
+    median = np.median(arr, axis=0).astype(int)
+    return (int(median[0]), int(median[1]), int(median[2]), int(median[3]))
+
+
 def cluster_rooms(
     strategy_room_lists: list[dict],
     image_shape: tuple[int, int],

@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
-from cv.merge import MergeContext, MergeStepResult
+from cv.merge import MergeContext, MergeStepResult, compute_consensus_bbox
 
 
 def _make_room(centroid, bbox=None, area_px=1000):
@@ -54,6 +54,41 @@ class TestMergeDataStructures:
         assert len(result.rooms) == 1
         assert len(result.removed) == 1
         assert result.meta["rooms_removed"] == 1
+
+
+class TestConsensusBbox:
+    def test_median_of_bboxes(self):
+        bboxes = [
+            (10, 20, 500, 380),
+            (15, 25, 510, 385),
+            (12, 22, 505, 382),
+        ]
+        result = compute_consensus_bbox(bboxes)
+        assert result == (12, 22, 505, 382)
+
+    def test_robust_to_outlier(self):
+        bboxes = [
+            (10, 20, 500, 380),
+            (12, 22, 502, 382),
+            (11, 21, 501, 381),
+            (10, 20, 500, 380),
+            (0, 0, 1000, 1000),
+        ]
+        result = compute_consensus_bbox(bboxes)
+        assert result == (10, 20, 501, 381)
+
+    def test_degrades_to_full_image(self):
+        bboxes = [(0, 0, 600, 400)] * 3
+        result = compute_consensus_bbox(bboxes)
+        assert result == (0, 0, 600, 400)
+
+    def test_single_bbox(self):
+        result = compute_consensus_bbox([(10, 20, 500, 380)])
+        assert result == (10, 20, 500, 380)
+
+    def test_empty_returns_none(self):
+        result = compute_consensus_bbox([])
+        assert result is None
 
 
 class TestBboxIou:
