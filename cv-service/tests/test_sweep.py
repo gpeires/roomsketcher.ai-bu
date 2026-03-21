@@ -28,11 +28,11 @@ class TestRunSingleStrategy:
 
 
 class TestSweepStrategies:
-    def test_returns_all_8_strategies(self, simple_2room_image):
+    def test_returns_all_strategies(self, simple_2room_image):
         result = sweep_strategies(simple_2room_image, "Test")
         assert "image_size" in result
         assert "strategies" in result
-        assert len(result["strategies"]) == 13
+        assert len(result["strategies"]) == 26
 
     def test_each_strategy_has_required_fields(self, simple_2room_image):
         result = sweep_strategies(simple_2room_image, "Test")
