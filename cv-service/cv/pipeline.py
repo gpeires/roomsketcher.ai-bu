@@ -22,6 +22,9 @@ from cv.enhance import pick_winner
 
 log = logging.getLogger(__name__)
 
+# Strategies that produced 0 rooms across all test images — skip to save time
+EXCLUDED_STRATEGIES = {"lab_a_channel", "lab_b_channel", "saturation", "top_hat_otsu", "black_hat"}
+
 
 def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> dict:
     image = cv2.imread(image_path)
@@ -47,10 +50,14 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
             log.warning("Strategy %s mask failed: %s", strategy_name, e)
             return None
 
+    active_strategies = {
+        k: v for k, v in STRATEGIES.items() if k not in EXCLUDED_STRATEGIES
+    }
+
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {
             sname: pool.submit(_get_strategy_mask, sname, fn)
-            for sname, fn in STRATEGIES.items()
+            for sname, fn in active_strategies.items()
         }
         strategy_masks = []
         for sname, future in futures.items():
