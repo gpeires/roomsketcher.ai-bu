@@ -19,11 +19,15 @@ class AnalyzeRequest(BaseModel):
     name: str = Field(default="Extracted Floor Plan")
 
 class PreprocessingMeta(BaseModel):
-    raw_rooms: int
-    enhanced_rooms: int
-    raw_walls: int
-    enhanced_walls: int
     strategy_used: str
+    strategies_run: int = 0
+    strategies_contributing: int = 0
+
+class MergeStats(BaseModel):
+    high: int = 0
+    medium: int = 0
+    low: int = 0
+    total: int = 0
 
 class MetaOutput(BaseModel):
     image_size: tuple[int, int]
@@ -33,6 +37,10 @@ class MetaOutput(BaseModel):
     text_regions: int
     openings_detected: int = 0
     preprocessing: PreprocessingMeta | None = None
+    strategies_run: int = 0
+    strategies_contributing: int = 0
+    merge_stats: MergeStats | None = None
+    merge_time_ms: int = 0
 
 class AnalyzeResponse(BaseModel):
     """Response allows rooms in both rect and polygon formats, and
