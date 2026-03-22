@@ -120,3 +120,60 @@ def test_multiple_labels_prefers_room_word():
     # Actually both "primary" and "bathroom" are in _ROOM_WORDS, so it falls back to proximity
     # "Primary" at (108,112) is closer to centroid (110,110) than "Bathroom" at (115,120)
     assert result["rooms"][0]["label"] == "Primary"
+
+
+class TestGhostRoomFiltering:
+    """Rooms outside the floor plan or with garbage labels should be removed."""
+
+    def _make_room(self, label, x, y, w, h, confidence=0.9):
+        import numpy as np
+        mask = np.zeros((800, 800), dtype=np.uint8)
+        # Only create mask pixels if coordinates are valid
+        if x >= 0 and y >= 0 and x + w <= 800 and y + h <= 800:
+            mask[y:y+h, x:x+w] = 255
+        return {
+            "label": label,
+            "bbox": (x, y, w, h),
+            "area_px": w * h,
+            "centroid": (x + w // 2, y + h // 2),
+            "mask": mask,
+            "polygon": [(x, y), (x+w, y), (x+w, y+h), (x, y+h)],
+            "confidence": confidence,
+        }
+
+    def test_removes_negative_coordinate_rooms(self):
+        rooms = [
+            self._make_room("Kitchen", 100, 100, 200, 150),
+            self._make_room("Ghost", -320, -60, 320, 760),  # negative coords
+        ]
+        result = build_floor_plan_input(
+            rooms, [], (800, 800), 1.0, "Test",
+            floor_plan_bbox=(50, 50, 700, 700),
+        )
+        labels = [r["label"] for r in result["rooms"]]
+        assert "Kitchen" in labels
+        assert "Ghost" not in labels
+
+    def test_removes_zero_dimension_rooms(self):
+        rooms = [
+            self._make_room("Kitchen", 100, 100, 200, 150),
+            self._make_room("Tiny", 300, 300, 5, 5),  # too small
+        ]
+        result = build_floor_plan_input(
+            rooms, [], (800, 800), 1.0, "Test",
+            floor_plan_bbox=(50, 50, 700, 700),
+        )
+        labels = [r["label"] for r in result["rooms"]]
+        assert "Kitchen" in labels
+        assert len(result["rooms"]) == 1
+
+    def test_removes_rooms_outside_floor_plan_bbox(self):
+        rooms = [
+            self._make_room("Kitchen", 100, 100, 200, 150),
+            self._make_room("Logo", 100, 750, 280, 60),  # below floor plan
+        ]
+        result = build_floor_plan_input(
+            rooms, [], (800, 800), 1.0, "Test",
+            floor_plan_bbox=(50, 50, 700, 650),
+        )
+        assert len(result["rooms"]) == 1

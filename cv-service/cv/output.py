@@ -80,6 +80,31 @@ def build_floor_plan_input(
 
     labeled_rooms = _assign_labels(rooms, labels)
 
+    # Filter out ghost rooms: negative coords, outside floor plan, too small
+    filtered_rooms = []
+    for room in labeled_rooms:
+        bx, by, bw, bh = room["bbox"]
+
+        # Skip rooms with negative coordinates
+        if bx < 0 or by < 0:
+            continue
+
+        # Skip rooms with zero/tiny dimensions (< 0.5% of image area)
+        min_area = image_shape[0] * image_shape[1] * 0.005
+        if room["area_px"] < min_area:
+            continue
+
+        # Skip rooms whose centroid is outside the floor plan bbox
+        if floor_plan_bbox is not None:
+            fbx, fby, fbw, fbh = floor_plan_bbox
+            cx, cy = room.get("centroid", (bx + bw // 2, by + bh // 2))
+            if cx < fbx or cx > fbx + fbw or cy < fby or cy > fby + fbh:
+                continue
+
+        filtered_rooms.append(room)
+
+    labeled_rooms = filtered_rooms
+
     # Normalize coordinates relative to the floor plan bounding box origin
     # so that rooms start near (0,0) instead of at arbitrary image offsets.
     origin_x = floor_plan_bbox[0] if floor_plan_bbox else 0
