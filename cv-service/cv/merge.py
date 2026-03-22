@@ -443,6 +443,180 @@ def _check_grid_regularity(
     return False, None
 
 
+def refine_polygons_step(
+    rooms: list[dict],
+    context: MergeContext,
+) -> MergeStepResult:
+    """Refine room polygons using wall thickness data.
+
+    Dilates thick wall regions in the wall mask so room contours follow the
+    inner face of thick walls. This can split merged rooms and preserve
+    protrusions/alcoves created by structural elements.
+    """
+    if context.anchor_mask is None or context.thickness_profile is None:
+        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+
+    profile = context.thickness_profile
+    if not profile.elements:
+        return MergeStepResult(rooms=rooms, removed=[], meta={
+            "skipped": False, "reason": "no_thick_elements", "rooms_in": len(rooms),
+        })
+
+    anchor_mask = context.anchor_mask.copy()
+    h, w = anchor_mask.shape
+    min_room_area = int(h * w * 0.005)
+
+    # Build dilation mask: only dilate in regions around structural elements
+    dilation_amount = max(1, int(profile.thick_wall_px / 2))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                       (dilation_amount * 2 + 1, dilation_amount * 2 + 1))
+
+    # Create a region mask covering structural element bboxes (with padding)
+    region_mask = np.zeros((h, w), dtype=np.uint8)
+    pad = dilation_amount * 2
+    for elem in profile.elements:
+        bx, by, bw, bh = elem.bbox
+        y0 = max(0, by - pad)
+        y1 = min(h, by + bh + pad)
+        x0 = max(0, bx - pad)
+        x1 = min(w, bx + bw + pad)
+        region_mask[y0:y1, x0:x1] = 255
+
+    # Dilate the wall mask, but only apply changes in structural regions
+    dilated = cv2.dilate(anchor_mask, kernel, iterations=1)
+    refined_mask = anchor_mask.copy()
+    structural_region = region_mask > 0
+    refined_mask[structural_region] = dilated[structural_region]
+
+    # Re-trace room contours on the refined mask
+    gap_size = max(15, min(80, max(h, w) // 10))
+    v_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (1, gap_size))
+    closed = cv2.morphologyEx(refined_mask, cv2.MORPH_CLOSE, v_kern, iterations=1)
+    h_kern = cv2.getStructuringElement(cv2.MORPH_RECT, (gap_size, 1))
+    closed = cv2.morphologyEx(closed, cv2.MORPH_CLOSE, h_kern, iterations=1)
+
+    inv = cv2.bitwise_not(closed)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(inv, connectivity=4)
+
+    # Collect refined room contours
+    refined_rooms: list[dict] = []
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area < min_room_area:
+            continue
+        rx = int(stats[i, cv2.CC_STAT_LEFT])
+        ry = int(stats[i, cv2.CC_STAT_TOP])
+        rw = int(stats[i, cv2.CC_STAT_WIDTH])
+        rh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        rcx, rcy = int(centroids[i][0]), int(centroids[i][1])
+
+        # Skip exterior background
+        touches_border = rx == 0 or ry == 0 or (rx + rw) >= w or (ry + rh) >= h
+        if touches_border and area > (h * w * 0.3):
+            continue
+
+        # Extract polygon
+        room_mask = (labels == i).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(room_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            continue
+        largest_contour = max(contours, key=cv2.contourArea)
+        perimeter = cv2.arcLength(largest_contour, True)
+        epsilon = 0.015 * perimeter
+        approx = cv2.approxPolyDP(largest_contour, epsilon, True)
+        polygon = [(int(pt[0][0]), int(pt[0][1])) for pt in approx]
+
+        refined_rooms.append({
+            "centroid": (rcx, rcy),
+            "bbox": (rx, ry, rw, rh),
+            "area_px": int(area),
+            "polygon": polygon,
+        })
+
+    # Match refined rooms to originals
+    max_match_dist = max(h, w) * 0.3
+    matches: dict[int, list[dict]] = {}  # orig_idx -> list of refined rooms
+    unmatched_refined: list[dict] = []
+
+    for refined in refined_rooms:
+        rcx, rcy = refined["centroid"]
+        best_idx = -1
+        best_dist = float("inf")
+        for j, orig in enumerate(rooms):
+            ocx, ocy = orig.get("centroid", (0, 0))
+            if isinstance(ocx, float):
+                ocx, ocy = int(ocx), int(ocy)
+            ox, oy, ow, oh = orig.get("bbox", (0, 0, w, h))
+            inside = ox <= rcx <= ox + ow and oy <= rcy <= oy + oh
+            d = ((rcx - ocx) ** 2 + (rcy - ocy) ** 2) ** 0.5
+            if (inside or d < max_match_dist) and d < best_dist:
+                best_dist = d
+                best_idx = j
+
+        if best_idx >= 0:
+            matches.setdefault(best_idx, []).append(refined)
+        else:
+            unmatched_refined.append(refined)
+
+    output_rooms: list[dict] = []
+    matched_originals: set[int] = set()
+
+    for orig_idx, refined_list in matches.items():
+        matched_originals.add(orig_idx)
+        orig = rooms[orig_idx]
+        if len(refined_list) == 1:
+            output_rooms.append({
+                **orig,
+                "polygon": refined_list[0]["polygon"],
+                "centroid": refined_list[0]["centroid"],
+                "bbox": refined_list[0]["bbox"],
+                "area_px": refined_list[0]["area_px"],
+            })
+        else:
+            # Split: largest inherits original, others get split_from
+            sorted_by_area = sorted(refined_list, key=lambda r: r["area_px"], reverse=True)
+            largest = sorted_by_area[0]
+            output_rooms.append({
+                **orig,
+                "polygon": largest["polygon"],
+                "centroid": largest["centroid"],
+                "bbox": largest["bbox"],
+                "area_px": largest["area_px"],
+            })
+            for split_room in sorted_by_area[1:]:
+                output_rooms.append({
+                    **split_room,
+                    "confidence": 0.5,
+                    "found_by": orig.get("found_by", []),
+                    "split_from": orig.get("centroid"),
+                    "source": "polygon_refine",
+                })
+
+    # Unmatched refined rooms = newly discovered
+    for refined in unmatched_refined:
+        output_rooms.append({
+            **refined,
+            "confidence": 0.3,
+            "found_by": [],
+            "source": "polygon_refine",
+        })
+
+    # Preserve lost rooms (originals with no match)
+    for j, orig in enumerate(rooms):
+        if j not in matched_originals:
+            log.warning("polygon_refine: room at %s lost, preserving original", orig.get("centroid"))
+            output_rooms.append(orig)
+
+    meta = {
+        "rooms_in": len(rooms),
+        "rooms_out": len(output_rooms),
+        "rooms_split": max(0, len(output_rooms) - len(rooms)),
+        "rooms_lost_preserved": len(rooms) - len(matched_originals),
+        "dilation_px": dilation_amount,
+    }
+    return MergeStepResult(rooms=output_rooms, removed=[], meta=meta)
+
+
 def assemble_rooms(
     rooms: list[dict],
     confidence_scores: list[float],
@@ -525,6 +699,7 @@ CLUSTER_STEP: tuple[str, Callable] = ("cluster", cluster_rooms_step)
 POST_CLUSTER_STEPS: dict[str, Callable] = {
     "bbox_filter_post": filter_clusters_by_bbox,
     "structural_detect": detect_structural_elements_step,
+    "polygon_refine": refine_polygons_step,
 }
 
 DEFAULT_MERGE_PIPELINE = [
@@ -532,6 +707,7 @@ DEFAULT_MERGE_PIPELINE = [
     "cluster",
     "bbox_filter_post",
     "structural_detect",
+    "polygon_refine",
 ]
 
 EXCLUDED_MERGE_STEPS: set[str] = set()

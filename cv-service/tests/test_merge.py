@@ -6,6 +6,7 @@ from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
 from cv.merge import (
     MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox,
     cluster_rooms_step, filter_clusters_by_bbox, detect_structural_elements_step,
+    refine_polygons_step,
     run_merge_pipeline, DEFAULT_MERGE_PIPELINE, EXCLUDED_MERGE_STEPS,
     PRE_CLUSTER_STEPS, POST_CLUSTER_STEPS, CLUSTER_STEP,
     StructuralElement, ThicknessProfile,
@@ -408,6 +409,7 @@ class TestMergePipeline:
         assert "cluster" in step_names
         assert "bbox_filter_post" in step_names
         assert "structural_detect" in step_names
+        assert "polygon_refine" in step_names
 
     def test_excludes_steps(self):
         strategy_rooms = self._make_strategy_data()
@@ -431,12 +433,141 @@ class TestMergePipeline:
         assert CLUSTER_STEP[0] == "cluster"
         assert "bbox_filter_post" in POST_CLUSTER_STEPS
         assert "structural_detect" in POST_CLUSTER_STEPS
+        assert "polygon_refine" in POST_CLUSTER_STEPS
 
     def test_default_pipeline_order(self):
-        assert DEFAULT_MERGE_PIPELINE == ["bbox_filter_pre", "cluster", "bbox_filter_post", "structural_detect"]
+        assert DEFAULT_MERGE_PIPELINE == ["bbox_filter_pre", "cluster", "bbox_filter_post", "structural_detect", "polygon_refine"]
 
     def test_excluded_merge_steps_empty(self):
         assert len(EXCLUDED_MERGE_STEPS) == 0
+
+
+class TestRefinePolygonsStep:
+    def _make_thick_wall_merged_mask(self):
+        """Two rooms separated by a 16px thick wall.
+
+        Room A: left half (cols 0-240)
+        Thick wall: cols 240-256 (16px wide)
+        Room B: right half (cols 256-500)
+        Thin outer walls: 2px
+        """
+        mask = np.zeros((300, 500), dtype=np.uint8)
+        # Outer walls (2px)
+        mask[0:2, :] = 255
+        mask[298:300, :] = 255
+        mask[:, 0:2] = 255
+        mask[:, 498:500] = 255
+        # Thick interior wall (16px) — with gaps at top and bottom so rooms connect
+        mask[20:280, 240:256] = 255
+        return mask
+
+    def test_splits_merged_rooms(self):
+        mask = self._make_thick_wall_merged_mask()
+        merged_room = {
+            "centroid": (250, 150),
+            "bbox": (2, 2, 496, 296),
+            "area_px": 140000,
+            "confidence": 0.9,
+            "found_by": ["raw", "otsu"],
+            "polygon": [(2, 2), (498, 2), (498, 298), (2, 298)],
+        }
+        profile = ThicknessProfile(
+            elements=[StructuralElement(
+                kind="thick_wall",
+                centroid=(248, 150),
+                bbox=(240, 20, 16, 260),
+                area_px=4160,
+                thickness_px=16.0,
+                aspect_ratio=16.25,
+            )],
+            thin_wall_px=2.0,
+            thick_wall_px=16.0,
+        )
+        ctx = MergeContext(
+            image_shape=(300, 500),
+            strategy_bboxes=[(0, 0, 500, 300)],
+            anchor_mask=mask,
+            thickness_profile=profile,
+        )
+        result = refine_polygons_step([merged_room], ctx)
+        # Should split into 2 rooms
+        assert len(result.rooms) >= 2
+        # Largest split room inherits original confidence/found_by
+        largest = max(result.rooms, key=lambda r: r["area_px"])
+        assert largest["confidence"] == 0.9
+        assert "raw" in largest["found_by"]
+        # Smaller split rooms get split_from and confidence 0.5
+        others = [r for r in result.rooms if r is not largest]
+        for r in others:
+            assert r["confidence"] == 0.5
+            assert "split_from" in r
+
+    def test_preserves_rooms_on_thin_wall_mask(self):
+        """Rooms separated by thin walls should not be affected."""
+        mask = np.zeros((300, 500), dtype=np.uint8)
+        mask[0:2, :] = 255
+        mask[298:300, :] = 255
+        mask[:, 0:2] = 255
+        mask[:, 498:500] = 255
+        mask[:, 248:250] = 255  # 2px thin interior wall
+        room_a = {
+            "centroid": (125, 150), "bbox": (2, 2, 246, 296),
+            "area_px": 70000, "confidence": 0.9, "found_by": ["raw"],
+            "polygon": [(2, 2), (248, 2), (248, 298), (2, 298)],
+        }
+        room_b = {
+            "centroid": (375, 150), "bbox": (250, 2, 248, 296),
+            "area_px": 70000, "confidence": 0.9, "found_by": ["raw"],
+            "polygon": [(250, 2), (498, 2), (498, 298), (250, 298)],
+        }
+        profile = ThicknessProfile(
+            elements=[],
+            thin_wall_px=2.0,
+            thick_wall_px=2.0,
+        )
+        ctx = MergeContext(
+            image_shape=(300, 500),
+            strategy_bboxes=[(0, 0, 500, 300)],
+            anchor_mask=mask,
+            thickness_profile=profile,
+        )
+        result = refine_polygons_step([room_a, room_b], ctx)
+        assert len(result.rooms) == 2
+
+    def test_noop_when_no_profile(self):
+        rooms = [_make_room((300, 200))]
+        ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
+        result = refine_polygons_step(rooms, ctx)
+        assert len(result.rooms) == 1
+        assert result.meta.get("skipped") is True
+
+    def test_lost_room_preserved(self):
+        """If refinement loses a room, original polygon is kept as fallback."""
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        mask[:] = 255  # All wall — no room space
+        room = {
+            "centroid": (50, 50), "bbox": (10, 10, 80, 80),
+            "area_px": 1000, "confidence": 0.7, "found_by": ["raw"],
+            "polygon": [(10, 10), (90, 10), (90, 90), (10, 90)],
+        }
+        profile = ThicknessProfile(
+            elements=[StructuralElement(
+                kind="thick_wall", centroid=(50, 50),
+                bbox=(0, 0, 100, 100), area_px=10000,
+                thickness_px=50.0, aspect_ratio=1.0,
+            )],
+            thin_wall_px=2.0,
+            thick_wall_px=50.0,
+        )
+        ctx = MergeContext(
+            image_shape=(100, 100),
+            strategy_bboxes=[(0, 0, 100, 100)],
+            anchor_mask=mask,
+            thickness_profile=profile,
+        )
+        result = refine_polygons_step([room], ctx)
+        # Room should be preserved (fallback)
+        assert len(result.rooms) >= 1
 
 
 class TestMergeContextFields:
