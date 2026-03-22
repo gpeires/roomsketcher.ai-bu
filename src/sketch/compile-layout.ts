@@ -251,6 +251,42 @@ function subtractSegments(
   return result;
 }
 
+/**
+ * Check if a point is strictly inside any room rectangle.
+ * Used to determine if a wall has a room on both sides (interior) or not (exterior).
+ */
+function pointInsideAnyRoom(x: number, y: number, rects: Rect[]): boolean {
+  const eps = 1; // 1cm tolerance for boundary hits
+  for (const r of rects) {
+    if (x >= r.x - eps && x <= r.x + r.w + eps && y >= r.y - eps && y <= r.y + r.h + eps) return true;
+  }
+  return false;
+}
+
+/**
+ * Determine if a non-shared wall segment is truly exterior (on the building perimeter)
+ * or interior (between rooms that don't share an exact edge).
+ * Probes a point on each side of the wall midpoint — if both sides are inside a room, it's interior.
+ */
+function classifyWallType(
+  edge: Edge, segStart: number, segEnd: number, rects: Rect[],
+): 'exterior' | 'interior' {
+  const mid = (segStart + segEnd) / 2;
+  const probe = 5; // cm offset to check other side of wall
+
+  if (edge.axis === 'x') {
+    // Vertical wall at x=edge.pos
+    const leftInside = pointInsideAnyRoom(edge.pos - probe, mid, rects);
+    const rightInside = pointInsideAnyRoom(edge.pos + probe, mid, rects);
+    return (leftInside && rightInside) ? 'interior' : 'exterior';
+  } else {
+    // Horizontal wall at y=edge.pos
+    const aboveInside = pointInsideAnyRoom(mid, edge.pos - probe, rects);
+    const belowInside = pointInsideAnyRoom(mid, edge.pos + probe, rects);
+    return (aboveInside && belowInside) ? 'interior' : 'exterior';
+  }
+}
+
 function generateWalls(
   rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[][],
   thicknessOverrides?: { exterior?: number; interior?: number },
@@ -272,7 +308,7 @@ function generateWalls(
     walls.push(makeWall(start, end, 'interior', thicknessOverrides));
   }
 
-  // Exterior walls: each room edge minus shared edge coverage
+  // Non-shared walls: classify as exterior or interior based on surroundings
   for (let i = 0; i < rects.length; i++) {
     const edges = allEdges[i];
     for (const edge of edges) {
@@ -300,7 +336,8 @@ function generateWalls(
           start = { x: seg.start, y: edge.pos };
           end = { x: seg.end, y: edge.pos };
         }
-        walls.push(makeWall(start, end, 'exterior', thicknessOverrides));
+        const wallType = classifyWallType(edge, seg.start, seg.end, rects);
+        walls.push(makeWall(start, end, wallType, thicknessOverrides));
       }
     }
   }

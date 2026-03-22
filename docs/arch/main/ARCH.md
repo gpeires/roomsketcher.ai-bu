@@ -120,7 +120,7 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
-│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls)
+│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe)
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
@@ -309,6 +309,11 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 - Divider walls → `<line>` elements with dashed stroke (thin visual).
 - Junction circles at shared **exterior** wall endpoints fill corner gaps (`<circle>` with `r = max(thickness)/2`). Interior wall junctions don't get circles.
 - Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls. Window line offset = `thickness / 2` for exterior, `2` for interior.
+
+**Wall type classification** (`compile-layout.ts`):
+- Shared edges (two rooms touch at aligned edges) → `interior` walls. Detected via `findSharedEdges()` which finds overlapping opposing edges within `SNAP_TOLERANCE` (20cm).
+- Non-shared edges → classified by `classifyWallType()`, which probes a point 5cm to each side of the wall midpoint. If both sides are inside a room rectangle (with 1cm boundary tolerance), the wall is `interior`; otherwise `exterior`. This correctly handles rooms embedded inside larger rooms (e.g., W/D and CL 2 surrounded by Bedroom 2) where edges don't align but the wall is still internal to the building.
+- Before this fix, ALL non-shared edges were classified as `exterior`, causing thick polygon walls around small internal rooms like closets and laundry rooms.
 
 **Element attributes:** All SVG elements have `data-id` (element ID) and `data-type` (`"wall"`, `"room"`, `"opening"`, `"furniture"`). These are required for:
 - Incremental updates via `update_sketch` (agent can target specific elements)
@@ -1121,7 +1126,7 @@ SimpleFloorPlanInput
 
 This is the primary input format used by both template mode and copy mode (CV output maps directly to this schema).
 
-**Wall thickness gap:** `compile-layout.ts` currently hardcodes `WALL_THICKNESS = {exterior: 20, interior: 10}` (cm). The CV pipeline detects actual wall thickness (`wall_thickness.thin_cm` / `thick_cm` in the `/analyze` response), but this data is not yet passed through to the sketch compiler. Adding an optional `wallThickness` field to `SimpleFloorPlanInput` and using it in `compileSimpleInput()` is the planned next step.
+**Wall thickness override:** `SimpleFloorPlanInput` accepts an optional `wallThickness: { exterior?: number, interior?: number }` field (cm). When provided, `compile-layout.ts` uses these values instead of the defaults (`WALL_THICKNESS = {exterior: 20, interior: 10}`). The CV pipeline detects actual wall thickness (`wall_thickness.thin_cm` / `thick_cm` in the `/analyze` response) and `cvToSketchInput()` maps these to the `wallThickness` field.
 
 ---
 
