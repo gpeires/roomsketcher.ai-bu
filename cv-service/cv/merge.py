@@ -65,11 +65,11 @@ def _safe_dilation(thick_wall_px: float) -> int:
 def cap_wall_thickness_cm(thin_cm: float, thick_cm: float) -> tuple[float, float]:
     """Clamp wall thickness to realistic residential bounds.
 
-    Interior walls: 5-20cm (typical 10-15cm)
-    Exterior walls: 10-40cm (typical 20-30cm)
+    Interior walls: 8-20cm (typical 10-15cm)
+    Exterior walls: 15-40cm (typical 20-30cm)
     """
-    thin_cm = max(5.0, min(thin_cm, 20.0))
-    thick_cm = max(10.0, min(thick_cm, 40.0))
+    thin_cm = max(8.0, min(thin_cm, 20.0))
+    thick_cm = max(15.0, min(thick_cm, 40.0))
     # Exterior must be >= interior
     thick_cm = max(thick_cm, thin_cm)
     return thin_cm, thick_cm

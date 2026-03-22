@@ -80,10 +80,15 @@ def build_floor_plan_input(
 
     labeled_rooms = _assign_labels(rooms, labels)
 
-    # Filter out ghost rooms: negative coords, outside floor plan, too small
+    # Filter out ghost rooms: low confidence, negative coords, outside floor plan, too small
     filtered_rooms = []
     for room in labeled_rooms:
         bx, by, bw, bh = room["bbox"]
+
+        # Skip low-confidence rooms (found by only 1 strategy — almost always noise)
+        confidence = room.get("confidence", 0.9)
+        if confidence < 0.5:
+            continue
 
         # Skip rooms with negative coordinates
         if bx < 0 or by < 0:
@@ -103,6 +108,7 @@ def build_floor_plan_input(
 
         filtered_rooms.append(room)
 
+    labeled_rooms_unfiltered = labeled_rooms
     labeled_rooms = filtered_rooms
 
     # Normalize coordinates relative to the floor plan bounding box origin
@@ -122,6 +128,8 @@ def build_floor_plan_input(
         bbox_area = max(bw * bh, 1)
         is_non_rect = len(polygon) > 4 and room["area_px"] / bbox_area < 0.85
 
+        room_type = _infer_room_type(label)
+
         if is_non_rect and polygon:
             # Emit polygon format, normalized to origin
             scaled_poly = [
@@ -129,19 +137,24 @@ def build_floor_plan_input(
                  "y": _to_cm_grid(py - origin_y, scale_cm_per_px)}
                 for px, py in polygon
             ]
-            output_rooms.append({"label": label, "polygon": scaled_poly})
+            entry = {"label": label, "polygon": scaled_poly}
         else:
             # Emit standard rect format
-            output_rooms.append({
+            entry = {
                 "label": label,
                 "x": _to_cm_grid(bx - origin_x, scale_cm_per_px),
                 "y": _to_cm_grid(by - origin_y, scale_cm_per_px),
                 "width": _to_cm_grid(bw, scale_cm_per_px),
                 "depth": _to_cm_grid(bh, scale_cm_per_px),
-            })
+            }
+        if room_type != "other":
+            entry["type"] = room_type
+        output_rooms.append(entry)
 
+    # Pass the PRE-filtered rooms to _convert_openings so that opening
+    # indices (which reference the original room list) stay valid.
     output_openings = _convert_openings(
-        openings or [], labeled_rooms, scale_cm_per_px
+        openings or [], labeled_rooms_unfiltered, scale_cm_per_px
     )
 
     result = {"name": name, "rooms": output_rooms}
@@ -149,7 +162,7 @@ def build_floor_plan_input(
         result["openings"] = output_openings
     if adjacency:
         result["adjacency"] = _convert_adjacency(
-            adjacency, labeled_rooms, scale_cm_per_px
+            adjacency, labeled_rooms_unfiltered, scale_cm_per_px
         )
     return result
 
@@ -260,7 +273,7 @@ def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
                     assigned = True
                     break
 
-        # Fallback: assign to nearest room whose bbox contains the label
+        # Fallback 1: assign to nearest room whose bbox contains the label
         if not assigned:
             for i, room in enumerate(rooms):
                 bx, by, bw, bh = room["bbox"]
@@ -268,6 +281,27 @@ def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
                     room_labels.setdefault(i, []).append(label)
                     assigned = True
                     break
+
+        # Fallback 2: assign to nearest room by centroid distance (within
+        # a generous threshold).  This catches labels that fall just outside
+        # a room's detected mask/bbox due to segmentation noise.
+        if not assigned and _is_room_label(label["text"]):
+            best_i = -1
+            best_dist = float("inf")
+            for i, room in enumerate(rooms):
+                cx, cy = room.get("centroid", (
+                    room["bbox"][0] + room["bbox"][2] // 2,
+                    room["bbox"][1] + room["bbox"][3] // 2,
+                ))
+                d = ((lx - cx) ** 2 + (ly - cy) ** 2) ** 0.5
+                # Max distance: half the room's diagonal
+                bw, bh = room["bbox"][2], room["bbox"][3]
+                max_d = ((bw ** 2 + bh ** 2) ** 0.5) * 0.7
+                if d < best_dist and d < max_d:
+                    best_dist = d
+                    best_i = i
+            if best_i >= 0:
+                room_labels.setdefault(best_i, []).append(label)
 
     # Pick the single best label per room
     result = []
@@ -309,6 +343,38 @@ def _pick_best_label(candidates: list[dict], room: dict) -> str:
         (c["center"][0] - cx) ** 2 + (c["center"][1] - cy) ** 2
     ))
     return best["text"]
+
+
+_ROOM_TYPE_MAP = {
+    # Keywords → room type.  Checked in order; first match wins.
+    "bedroom": "bedroom", "bed": "bedroom", "master": "bedroom",
+    "primary": "bedroom", "guest": "bedroom",
+    "kitchen": "kitchen", "pantry": "kitchen",
+    "bathroom": "bathroom", "bath": "bathroom", "powder": "bathroom",
+    "ensuite": "bathroom", "wc": "bathroom", "toilet": "bathroom",
+    "living": "living", "lounge": "living", "family": "living",
+    "dining": "dining", "breakfast": "dining", "nook": "dining",
+    "hallway": "hallway", "hall": "hallway", "corridor": "hallway",
+    "foyer": "hallway", "entry": "hallway", "vestibule": "hallway",
+    "closet": "closet", "cl": "closet", "wic": "closet",
+    "walk-in": "closet", "dressing": "closet",
+    "storage": "storage",
+    "laundry": "laundry", "w/d": "laundry",
+    "office": "office", "study": "office", "den": "office",
+    "balcony": "balcony", "terrace": "balcony", "patio": "balcony",
+    "garage": "garage",
+    "utility": "utility", "mudroom": "utility",
+}
+
+
+def _infer_room_type(label: str) -> str:
+    """Infer room type from label text. Returns 'other' if no match."""
+    low = label.strip().lower()
+    words = re.split(r"[\s/&,]+", low)
+    for word in words:
+        if word in _ROOM_TYPE_MAP:
+            return _ROOM_TYPE_MAP[word]
+    return "other"
 
 
 def _is_room_label(text: str) -> bool:

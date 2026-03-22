@@ -559,8 +559,13 @@ This tells the agent which rooms share walls and how the layout connects — cri
 ### Label Assignment (`cv-service/cv/output.py`)
 
 1. **Filter text regions** — exclude dimension strings, single characters, and text outside the floor plan bbox
-2. **Assign to rooms** — primary: check if label center falls inside room's binary mask. Fallback: check if label center is inside room's bounding box.
+2. **Assign to rooms** — three-tier fallback:
+   - Primary: check if label center falls inside room's binary mask
+   - Fallback 1: check if label center is inside room's bounding box
+   - Fallback 2 (added 2026-03-22): assign to nearest room by centroid distance within 0.7× room diagonal — catches labels just outside noisy masks/bboxes
 3. **Room-name filtering** — a word list (~40 common room names like "bedroom", "kitchen", "foyer") filters OCR noise. Title-case alphabetic words of 4+ chars are also accepted.
+4. **Confidence filtering** (added 2026-03-22) — rooms with confidence < 0.5 (found by only 1 strategy) are dropped before output. These are almost always detection noise.
+5. **Room type inference** (added 2026-03-22) — `_infer_room_type(label)` maps label text to room types via `_ROOM_TYPE_MAP` (~40 keyword→type mappings). Splits label on whitespace/separators and returns the first matching type. Output rooms include `"type"` field when not `"other"`.
 
 ### OCR Text Merging (`cv-service/cv/ocr.py`)
 
@@ -611,7 +616,7 @@ The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-se
 | `/analyze` | POST | Multi-strategy merge: run 23 strategies, cluster rooms, return merged result |
 | `/sweep` | POST | Diagnostics: run all 28 strategies independently, return per-strategy results with debug binary masks |
 
-The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms have `confidence` (0.3-0.9) and `found_by` (list of strategy names). Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
+The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms have `confidence` (0.5-0.9, rooms below 0.5 are filtered out), `found_by` (list of strategy names), and optionally `type` (inferred from label text via `_infer_room_type()`). Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
 
 The `/sweep` endpoint runs all 28 strategies (including excluded ones) and returns `{image_size, strategies[]}` where each strategy entry has the full pipeline result plus `debug_binary` (base64 PNG of the binary wall mask) and `time_ms`.
 
@@ -744,7 +749,7 @@ pipelineToSketchInput(output: PipelineOutput) → SimpleFloorPlanInput  // legac
 | Plan 3 | 8 | 21/22 | 2 rooms |
 | New plan | 5 | 21/22 | 2 rooms |
 
-**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `structural_detect` replaces old `column_detect` — uses distance transform to profile wall thickness, classifying elements as columns, thick walls, or perimeter. `polygon_refine` dilates thick wall regions (capped at 8px via `_safe_dilation()` to avoid swallowing small rooms) and re-traces contours, splitting rooms that were merged by thick structural junctions. Wall thickness data (`thin_cm`, `thick_cm`, structural elements) is included in the API response, capped at realistic residential bounds via `cap_wall_thickness_cm()` (interior 5-20cm, exterior 10-40cm). **Remaining opportunities:** Using structural element data for perimeter anchoring and grid overlay, and wall-vs-furniture classification.
+**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `structural_detect` replaces old `column_detect` — uses distance transform to profile wall thickness, classifying elements as columns, thick walls, or perimeter. `polygon_refine` dilates thick wall regions (capped at 8px via `_safe_dilation()` to avoid swallowing small rooms) and re-traces contours, splitting rooms that were merged by thick structural junctions. Wall thickness data (`thin_cm`, `thick_cm`, structural elements) is included in the API response, capped at realistic residential bounds via `cap_wall_thickness_cm()` (interior 8-20cm, exterior 15-40cm). **Remaining opportunities:** Using structural element data for perimeter anchoring and grid overlay, and wall-vs-furniture classification.
 
 ### Quality: CV room detection still imperfect
 
@@ -755,25 +760,26 @@ Multi-strategy merge improved room counts but quality issues remain:
 - **~~Dimension text as room labels~~** — FIXED (2026-03-22). `_DIM_LIKE` regex expanded to catch OCR-garbled imperial dimensions (degree symbols, dashes, spaces). `_FIXTURE_ABBREVS` blocklist rejects "DW", "Ref", "W/D", "LC", "P". `_LOGO_WORDS` blocklist rejects "COMPASS", "Hanna", brokerage names. `_is_room_label()` now rejects all-caps non-room words. Added "WIC" and "CL" to `_ROOM_WORDS` (walk-in closet, closet).
 - **~~Ghost rooms at negative coordinates~~** — FIXED (2026-03-22). `build_floor_plan_input()` now filters rooms with negative coordinates, area < 0.5% of image, or centroids outside floor plan bbox.
 - **~~Excessive polygon dilation~~** — FIXED (2026-03-22). `_safe_dilation()` caps polygon refinement dilation at 8px max, preventing thick wall measurements from swallowing small rooms.
-- **~~Unrealistic wall thickness in output~~** — FIXED (2026-03-22). `cap_wall_thickness_cm()` clamps interior walls to 5-20cm, exterior to 10-40cm.
+- **~~Unrealistic wall thickness in output~~** — FIXED (2026-03-22). `cap_wall_thickness_cm()` clamps interior walls to 8-20cm, exterior to 15-40cm (raised from 5/10 to match standard residential construction).
 - **~~Scale calibration orientation mismatch~~** — FIXED (2026-03-22). `_calibrate_scale()` now allows orientation-mismatched dimension-to-wall matching with 2x distance penalty. Max matching distance increased from 15% to 20% of image diagonal.
 
 - **~~Label fallback leaks noise~~** — FIXED (2026-03-22). `_assign_labels()` no longer falls back to unfiltered candidates. When all labels for a room fail `_is_room_label()`, the room gets a generic "Room N" label instead of noise like "COMPASS", "ye", or "Net". Confirmed on Shore Dr (COMPASS gone) and Res 507 (ye/Net gone).
 - **~~Adaptive room segmentation~~** — ADDED (2026-03-22). `detect_rooms()` now estimates wall thickness via `_estimate_wall_thickness()` and reduces the closing kernel for thick-walled plans. Helps on synthetic tests but real-world impact is limited — Apt 6C bedrooms still merge, Unit 2C still only 5 rooms. The root cause is at the contour-detection level, not just the closing kernel size.
 
 **Remaining quality issues (2026-03-22):**
-- **Room segmentation upstream of merge** — thick walls cause adjacent rooms to merge at the contour-detection level. The adaptive closing kernel helps marginally but doesn't fix the fundamental issue. Both bedrooms in Apt 6C are still merged into one large room. Unit 2C detects only 5 rooms for a 9-room apartment. Potential approaches: watershed segmentation, skeleton-based room splitting, or using structural element data to identify merge boundaries.
+- **Room segmentation upstream of merge** — thick walls cause adjacent rooms to merge at the contour-detection level. The adaptive closing kernel helps marginally but doesn't fix the fundamental issue. Unit 2C detects only 5 rooms for a 9-room apartment. Potential approaches: watershed segmentation, skeleton-based room splitting, or using structural element data to identify merge boundaries.
 - **Scale calibration still falls back on some images** — Res 507 has clear dimension labels ("10'- 6\" x 8'- 10\"") that parse correctly, but OCR may fragment compound text or the wall detector doesn't find walls close enough to match. Debug logging now in place — enable `DEBUG` level on the CV service to trace dimension→wall matching.
-- **Many rooms get generic "Room N" labels** — Now that the fallback is suppressed, rooms without valid OCR text inside them get generic labels. This is correct behavior (better than noise labels) but means the agent must interpret the image to assign proper room names. Shore Dr: 10 of 13 rooms are "Room N". This is an OCR/text-assignment quality issue, not a labeling bug.
+- **Footer/legend text assigned to rooms** — Shore Drive picks up "2 Bedroom 2 Bathroom" from the COMPASS footer and assigns it to a small room near the bottom. The floor plan bbox filter should catch this but the footer text falls inside the bbox. Need a secondary filter: reject labels that look like summary stats (contain digit + room-type word patterns like "2 Bedroom").
+- **Noisy polygon geometry** — rooms that should be simple rectangles often have 8-15 vertices due to DP epsilon (0.015 * perimeter) keeping too many points and rectilinear snapping not fully cleaning up. The `_snap_to_rectilinear()` function only snaps edges within 15° of axis-aligned.
 
-**Latest CV test results (2026-03-22, 235 tests passing, deployed):**
+**Latest CV test results (2026-03-22, deployed):**
 
-| Image | Rooms | Scale | Labels | Issues |
-|-------|-------|-------|--------|--------|
-| Unit 2C (520 W 23rd) | 5 | measured (0.46) | Room 1-5, no noise | Only 5 rooms for 9-room apt (heavy merging) |
-| Shore Dr (9511) | 13 | measured (0.62) | Bedroom, wic; 10 generic "Room N" | COMPASS gone; many unlabeled rooms |
-| Apt 6C (520 W 23rd) | 6 | measured (2.63) | FOYER, CL, BATH; 3 generic | Both bedrooms still merged |
-| Res 507 (547 W 47th) | 8 | fallback (0.85) | Bedroom, Foyer, Bed; 5 generic | Scale still fallback; ye/Net gone |
+| Image | Rooms | Scale | Labels | Types | Issues |
+|-------|-------|-------|--------|-------|--------|
+| Unit 2C (520 W 23rd) | 5 | measured (0.46) | Primary, Bedroom, Room (3 generic) | bedroom×2 | Only 5 rooms for 9-room apt |
+| Shore Dr (9511) | 12 | measured (0.62) | Bedroom, wic, "2 Bedroom 2 Bathroom"; 9 generic | bedroom, closet | Footer text leaking; Room 13 (0.3) filtered |
+| Apt 6C (520 W 23rd) | 5 | measured (2.63) | FOYER, BEDROOM×2, CL, LIVING/DINING | hallway, bedroom×2, closet, living | BATH (0.3) filtered; all rooms now labeled |
+| Res 507 (547 W 47th) | 8 | fallback (0.85) | Bed, Bedroom×2, Foyer, & Dining; 3 generic | bedroom×3, hallway, dining | Scale still fallback; "& Dining" partial label |
 
 ### Quality: Sketch generation from CV data
 
