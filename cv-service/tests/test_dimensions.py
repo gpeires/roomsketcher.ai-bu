@@ -1,3 +1,4 @@
+import pytest
 from cv.dimensions import parse_dimension, parse_all_dimensions
 
 def test_parse_metric_meters():
@@ -49,3 +50,22 @@ def test_parse_all_dimensions_empty():
     assert parse_all_dimensions("") == []
     assert parse_all_dimensions("Kitchen") == []
     assert parse_all_dimensions("8.6 m²") == []
+
+
+class TestOCRGarbledDimensions:
+    """Dimensions as OCR commonly garbles them."""
+
+    @pytest.mark.parametrize("text,expected_cm", [
+        ("10'- 6\"", 320),     # space after dash
+        ("10' - 6\"", 320),    # spaces around dash
+        ("10'  6\"", 320),     # double space, no dash
+        ("8'- 10\"", 269),     # space after dash
+        ("21'- 1\"", 643),     # space after dash
+        ("10' -8\"", 325),     # space before dash
+        ("10'-  8\"", 325),    # double space after dash
+        ("7' 6\"", 229),       # space, no dash
+    ])
+    def test_parses_spaced_imperial(self, text, expected_cm):
+        result = parse_dimension(text)
+        assert result is not None, f"Failed to parse: {text!r}"
+        assert abs(result - expected_cm) < 5, f"{text!r}: got {result}, expected ~{expected_cm}"

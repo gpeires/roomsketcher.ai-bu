@@ -264,12 +264,14 @@ def _calibrate_scale(walls, text_regions, image_shape):
             ex, ey = wall["end"]
             wall_horizontal = abs(ey - sy) < abs(ex - sx)
 
-            if wall_horizontal != label_horizontal:
-                continue
+            # Orientation mismatch penalty: compound dims (e.g. "10'-6" x 8'-10"")
+            # are always horizontal text but may label vertical walls.
+            # Allow mismatch but penalize distance by 2x.
+            orientation_penalty = 1.0 if (wall_horizontal == label_horizontal) else 2.0
 
             if wall_horizontal:
                 wall_y = (sy + ey) / 2
-                perp_dist = abs(ty - wall_y)
+                perp_dist = abs(ty - wall_y) * orientation_penalty
                 wall_min_x = min(sx, ex)
                 wall_max_x = max(sx, ex)
                 margin = (wall_max_x - wall_min_x) * 0.2
@@ -277,7 +279,7 @@ def _calibrate_scale(walls, text_regions, image_shape):
                     continue
             else:
                 wall_x = (sx + ex) / 2
-                perp_dist = abs(tx - wall_x)
+                perp_dist = abs(tx - wall_x) * orientation_penalty
                 wall_min_y = min(sy, ey)
                 wall_max_y = max(sy, ey)
                 margin = (wall_max_y - wall_min_y) * 0.2
@@ -288,8 +290,8 @@ def _calibrate_scale(walls, text_regions, image_shape):
                 best_dist = perp_dist
                 best_wall = wall
 
-        max_dist = max(image_shape) * 0.15
-        if best_wall is not None and best_dist < max_dist:
+        max_dist = max(image_shape) * 0.20
+        if best_wall is not None and best_dist <= max_dist:
             sx, sy = best_wall["start"]
             ex, ey = best_wall["end"]
             wall_px = math.hypot(ex - sx, ey - sy)

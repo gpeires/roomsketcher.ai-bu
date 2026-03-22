@@ -1,4 +1,4 @@
-from cv.pipeline import analyze_floor_plan
+from cv.pipeline import analyze_floor_plan, _calibrate_scale
 
 
 def test_pipeline_end_to_end(simple_2room_path):
@@ -57,3 +57,25 @@ def test_pipeline_includes_merge_steps(simple_2room_path):
     assert "structural_detect" in step_names
     for step in steps:
         assert "time_ms" in step
+
+
+class TestScaleCalibrationRelaxed:
+    """Scale calibration should try both orientations for compound dimensions."""
+
+    def test_matches_vertical_dimension_on_horizontal_label(self):
+        """A compound dimension like '10'-6" x 8'-10"' is OCR'd as horizontal
+        text but the first dimension may label a vertical wall."""
+        walls = [
+            {"start": (100, 50), "end": (100, 370), "thickness": 5},  # vertical, ~320px
+        ]
+        text_regions = [
+            {
+                "text": "10'- 6\" x 8'- 10\"",
+                "center": (140, 200),  # to the right of the vertical wall
+                "bbox": (110, 190, 180, 20),  # wide text = horizontal
+                "confidence": 85,
+            },
+        ]
+        scale, confidence = _calibrate_scale(walls, text_regions, (400, 400))
+        assert confidence == "measured", "Should match despite orientation mismatch"
+        assert 0.5 < scale < 2.0, f"Scale {scale} out of reasonable range"
