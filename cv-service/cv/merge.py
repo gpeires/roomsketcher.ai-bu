@@ -531,6 +531,7 @@ def refine_polygons_step(
             "bbox": (rx, ry, rw, rh),
             "area_px": int(area),
             "polygon": polygon,
+            "mask": room_mask,
         })
 
     # Match refined rooms to originals
