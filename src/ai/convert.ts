@@ -1,6 +1,6 @@
 // src/ai/convert.ts
-// Deterministic conversion from PipelineOutput → SimpleFloorPlanInput
-// Eliminates AI agent interpretation errors by mapping pipeline data directly.
+// Deterministic conversion from CV output → SimpleFloorPlanInput
+// Maps CV room data directly to sketch input format.
 
 import type { PipelineOutput, MergedRoom } from './types';
 import type { SimpleFloorPlanInput, SimpleRoomInput, RoomType } from '../sketch/types';
@@ -70,6 +70,62 @@ export function pipelineToSketchInput(output: PipelineOutput): SimpleFloorPlanIn
 
   return {
     name: output.name,
+    units: 'metric',
+    rooms,
+    openings: openings.length > 0 ? openings : undefined,
+    ...(wallThickness ? { wallThickness } : {}),
+  };
+}
+
+// ─── CV-only converter (no PipelineOutput dependency) ───────────────────────
+
+interface CVAnalyzeResult {
+  name: string;
+  rooms: Array<{
+    label: string;
+    x: number;
+    y: number;
+    width: number;
+    depth: number;
+    polygon?: Array<{ x: number; y: number }>;
+  }>;
+  openings?: Array<Record<string, unknown>>;
+  meta: {
+    wall_thickness?: { thin_cm: number; thick_cm: number };
+  };
+}
+
+export function cvToSketchInput(cv: CVAnalyzeResult): SimpleFloorPlanInput {
+  const rooms: SimpleRoomInput[] = cv.rooms.map((room) => {
+    const base = {
+      label: room.label,
+      type: inferRoomType(room.label),
+    };
+    // Use polygon format if available, otherwise rect
+    if (room.polygon && room.polygon.length > 2) {
+      return { ...base, polygon: room.polygon };
+    }
+    return { ...base, x: room.x, y: room.y, width: room.width, depth: room.depth };
+  });
+
+  const openings = Array.isArray(cv.openings)
+    ? cv.openings.filter((o): o is Record<string, unknown> =>
+        typeof o === 'object' && o !== null && 'type' in o,
+      ).map((o) => ({
+        type: o.type as 'door' | 'window' | 'opening',
+        ...(o.between ? { between: o.between as [string, string] } : {}),
+        ...(o.room ? { room: o.room as string } : {}),
+        ...(o.wall ? { wall: o.wall as 'north' | 'south' | 'east' | 'west' } : {}),
+        ...(o.width ? { width: o.width as number } : {}),
+        ...(o.position !== undefined ? { position: o.position as number } : {}),
+      }))
+    : [];
+
+  const wt = cv.meta.wall_thickness;
+  const wallThickness = wt ? { interior: wt.thin_cm, exterior: wt.thick_cm } : undefined;
+
+  return {
+    name: cv.name,
     units: 'metric',
     rooms,
     openings: openings.length > 0 ? openings : undefined,

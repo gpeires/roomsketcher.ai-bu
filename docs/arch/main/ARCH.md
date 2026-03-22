@@ -10,7 +10,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 2. **AI floor plan sketcher** — Claude generates floor plans from natural language, users edit in a browser SPA, changes sync in real-time via WebSocket
 3. **Design knowledge system** — Articles chunked, tagged, and indexed for AI-driven design recommendations
 4. **CV floor plan extraction** — OpenCV + Tesseract pipeline on Hetzner that analyzes floor plan images and extracts room geometries, labels, and dimensions
-5. **AI-layered CV pipeline** — 4 Workers AI vision specialists run in parallel with CV, results merged via centroid-distance matching
+5. **Claude-driven Copy Mode** — CV provides measured geometry, Claude interprets the image and drives sketch construction directly (AI specialists removed — see System Audit section)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -67,17 +67,8 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
                  │   └─ Tesseract OCR     │
                  └────────────────────────┘
 
-         Cloudflare AI Gateway (roomsketcher-ai)
-                 ┌────────────────────────┐
-                 │  4 Vision Specialists  │
-                 │  ├─ Room Namer         │
-                 │  ├─ Layout Describer   │
-                 │  ├─ Symbol Spotter     │
-                 │  └─ Dimension Reader   │
-                 │                        │
-                 │  Model: llama-3.2-11b  │
-                 │  -vision-instruct      │
-                 └────────────────────────┘
+         (AI specialists REMOVED — see System Audit section)
+         Claude interprets image + CV data directly
 ```
 
 ---
@@ -162,10 +153,11 @@ src/
 │   ├── knowledge.test.ts       # Knowledge tool tests
 │   └── fts.ts                  # Shared sanitizeFtsQuery() utility
 ├── ai/
-│   ├── orchestrator.ts          # Image fetch, CV service call, specialist dispatch, merge
-│   ├── merge.ts                 # Centroid-distance matching, label normalization, deduplication
-│   ├── specialists.ts           # Prompts + response parsers for 4 vision specialists
-│   ├── validate.ts              # Merged result validation (optional feedback loop)
+│   ├── orchestrator.ts          # Image fetch, CV service call (specialist dispatch legacy, bypassed)
+│   ├── merge.ts                 # Label normalization, deduplication (bypassed in Copy Mode)
+│   ├── specialists.ts           # Prompts + response parsers for vision specialists (bypassed)
+│   ├── validate.ts              # Merged result validation (bypassed)
+│   ├── convert.ts               # pipelineToSketchInput() + cvToSketchInput() — CV→sketch converter
 │   ├── types.ts                 # CVResult, MergedRoom, GatherResults, PipelineOutput, PipelineConfig
 │   ├── parse-json.ts            # JSON repair (jsonrepair lib) + error handling
 │   └── __tests__/
@@ -409,7 +401,7 @@ analyze_image(image)
   │   MergeContext carries shared state: strategy bboxes, consensus bbox, anchor, columns
   │   MergeStepResult reports rooms kept, removed, per-step diagnostics
   │   Steps excludable via EXCLUDED_MERGE_STEPS for debugging/testing
-  ├── Step 4: Pick anchor strategy (most rooms) for walls/openings/scale
+  ├── Step 4: Pick anchor strategy (closest to median room count) for walls/openings/scale
   ├── Step 5: _run_pipeline(anchor_mask, clustered_rooms) → full pipeline
   └── Step 6: Attach confidence/found_by to output rooms, merge metadata
 
@@ -447,6 +439,7 @@ _run_pipeline(image, binary_override?, rooms_override?)
   "meta": {
     "image_size": [1200, 800],
     "scale_cm_per_px": 1.25,
+    "scale_confidence": "measured",
     "walls_detected": 12,
     "rooms_detected": 5,
     "text_regions": 15,
@@ -485,7 +478,7 @@ Two-pass wall mask extraction:
 
 1. **Close door gaps** — morphological close with a kernel sized to span realistic door openings (15–80px, capped at image_dim/10). Returns `(rooms, closed_binary)` — the closed mask is reused by opening detection.
 2. **Invert** — rooms become white regions
-3. **Connected components** — each region with area > 1% of image area becomes a room
+3. **Connected components** — each region with area > 0.5% of image area becomes a room (lowered from 1% to recover closets and small bathrooms)
 4. **Polygon extraction** — `cv2.findContours` + `cv2.approxPolyDP` (epsilon = 1.5% of perimeter) extracts a simplified polygon from each room's mask. Vertices are snapped to a 5px grid and corrected to rectilinear (90-degree angles) via a two-pass snap that aligns near-horizontal/vertical edges. This captures L-shapes, T-shapes, and irregular rooms that a bounding box would miss.
 5. **Output** — bbox, centroid, area, binary mask, and polygon per room
 
@@ -540,7 +533,9 @@ Matches dimension text labels to their nearest **parallel** wall using perpendic
 - Maximum perpendicular distance: 15% of image dimension (tighter than the previous 30%)
 - Compute `cm / wall_pixel_length` for each match
 - Use the median as the scale factor to reject outliers
-- Fallback: `1000 / image_width` (assumes 10m-wide floor plan)
+- Returns `(scale, confidence)` tuple: `"measured"` when dimension labels matched, `"fallback"` when using default
+- Fallback: `1000 / image_width` (assumes 10m-wide floor plan) — **unreliable, produces wrong room sizes**
+- `scale_confidence` is exposed in the API response (`meta.scale_confidence`) so downstream can warn users
 
 ### Deployment
 
@@ -565,77 +560,47 @@ The `/sweep` endpoint runs all 28 strategies (including excluded ones) and retur
 
 ---
 
-## AI-Layered CV Pipeline (2026-03-19 — 2026-03-21)
+## System Audit & Architecture Simplification (2026-03-22)
 
-### Overview
+### What was removed and why
 
-The `analyze_floor_plan_image` MCP tool runs **CV + 4 AI vision specialists in parallel**, then merges results. This was added to compensate for CV's weakness on complex real-world floor plans.
+A full system audit (plan file: `abstract-sparking-globe.md`) traced data through every pipeline boundary and identified a **fundamental architectural flaw**: the AI specialist + merge + validate layer (~1000 LOC) could only change room *labels* and confidence, never room *geometry*. When CV got wrong room sizes/positions, nothing downstream could fix it.
+
+**Removed components (still in codebase, bypassed at runtime):**
+- 4 Llama 3.2 11B Vision specialists (Room Namer, Layout Describer, Symbol Spotter, Dimension Reader)
+- Merge logic (`src/ai/merge.ts`) — centroid-distance matching, label normalization, confidence scoring
+- Validation loop (`src/ai/validate.ts`) — 2-pass Llama 3.2 self-correction
+- Orchestrator AI path (`src/ai/orchestrator.ts`) — specialist dispatch, tiering, hint bank
+
+**Evidence for removal:**
+- Layout Describer used 3×3 grid (33% image per cell) — too coarse for positioning
+- Dimension Reader captured text but never parsed it into numeric values
+- Merge scoring system (6 factors, ~200 LOC) net effect: sometimes fixing room labels
+- Validation loop: Llama 3.2 too weak to reliably self-correct
+- None of these components could fix the actual quality problems (wrong room sizes, positions, missing rooms)
+
+### Current architecture: CV + Claude
 
 ```
 analyze_floor_plan_image(image_url)
   ↓
-Worker fetches image bytes, encodes to base64
+Worker fetches image, sends to CV service
   ↓
-┌──────────── Parallel ────────────┐
-│                                  │
-│  CV Service (Hetzner)            │  Workers AI (Cloudflare AI Gateway)
-│  POST /analyze                   │  4 vision specialists:
-│  └─ 23-strategy multi-merge     │  ├─ Room Namer → ["Kitchen", "Bedroom", ...]
-│     └─ room-level clustering    │  ├─ Layout Describer → {room_count, rooms[{name, position, size}]}
-│                                  │  ├─ Symbol Spotter → [{type: "Toilet", position: "bottom-left"}]
-│  Returns: CVResult               │  └─ Dimension Reader → [{text: "10'2\"x15'8\"", room: "Bedroom"}]
-│  (rooms w/ confidence+found_by)  │
-└──────────┬───────────────────────┘
-           ↓
-     Tier Rooms (src/ai/orchestrator.ts)
-       ├─ tierRooms(): split CV rooms by confidence
-       │   ├─ forAI: confidence >= 0.5 → sent to AI merge
-       │   └─ hintBank: confidence < 0.5 → held back
-           ↓
-     Merge (src/ai/merge.ts) — uses only forAI rooms
-       ├─ Centroid-distance matching: map AI rooms to CV rooms
-       ├─ Label normalization: "Toilet" → Bathroom, "Bed" → Bedroom
-       ├─ Deduplication: overlapping regions merged
-       ├─ Confidence scoring: CV confidence preserved (0.3-0.9), specialist agreement = +0.15-0.2
-       └─ Fallback: if CV finds 0 rooms, AI specialists provide all room data
-           ↓
-     Validate (src/ai/validate.ts)
-       └─ Optional feedback loop via validator specialist
-           ↓
-     Reconcile Hint Bank (src/ai/orchestrator.ts)
-       └─ reconcileHintBank(): add non-overlapping hint bank rooms (IoU < 0.3)
-           ↓
-     Returns: PipelineOutput JSON (ready for generate_floor_plan)
+CV Service (Hetzner): POST /analyze
+  └─ 23-strategy multi-merge → rooms, openings, adjacency, wall thickness
+  ↓
+cvToSketchInput() — deterministic conversion (src/ai/convert.ts)
+  ↓
+Returns to Claude: source image (MCP image block) + CV rooms + ready-to-use sketch input
+  ↓
+Claude interprets image, corrects CV data, drives sketch construction via generate_floor_plan
 ```
 
-### Specialist Details
-
-| Specialist | Model | Prompt Summary | Response Parser |
-|-----------|-------|----------------|-----------------|
-| Room Namer | `@cf/meta/llama-3.2-11b-vision-instruct` | "List every room label visible" | `parseRoomNamerResponse` |
-| Layout Describer | same | "Count rooms, describe position (3x3 grid) & size" | `parseLayoutDescriberResponse` |
-| Symbol Spotter | same | "Find fixtures: toilet, sink, bed, stove..." | `parseSymbolSpotterResponse` |
-| Dimension Reader | same | "Extract measurement text & room association" | `parseDimensionReaderResponse` |
-
-Routed through **AI Gateway** (`roomsketcher-ai`) for caching, retries, and rate limiting.
-
-**Error handling:** Each specialist has a 30s timeout. Bad JSON is repaired via `jsonrepair`. If a specialist fails, merge proceeds with partial data (returns `SpecialistFailure` with error message).
-
-### Merge Algorithm (`src/ai/merge.ts`)
-
-1. **Grid-based position mapping** — AI specialists report room positions on a 3x3 grid (top-left, center, bottom-right). These are mapped to pixel coordinates based on image dimensions.
-2. **Centroid-distance matching** — Each AI-identified room is matched to the nearest CV room by centroid distance. Unmatched AI rooms become new rooms (AI-only).
-3. **Label normalization** — `SYMBOL_ROOM_MAP` maps fixture names to room types (e.g., "Toilet" → "Bathroom", "Stove" → "Kitchen"). Fuzzy matching handles partial labels.
-4. **Confidence scoring** — CV rooms keep their multi-strategy confidence (0.3-0.9). Each specialist that corroborates a room adds +0.15-0.2, capped at 1.0.
-5. **Split hints** — When AI finds significantly more rooms than CV (3+ gap), remaining CV rooms get `split_hint: true` with evidence strings.
+**Why this is better:** Claude (frontier model) can see the floor plan image and has the visual intelligence to understand room boundaries, labels, and spatial relationships. CV provides measured geometry (pixel coordinates, polygons, scale). Each component does what it's best at.
 
 ### Neuron Budget Tracking
 
-Workers AI charges by "neurons" (compute units). The system tracks daily usage in `ai_neuron_usage` D1 table:
-- Budget: 50,000 neurons/day (configurable via `DEFAULT_CONFIG.neuronBudget`)
-- Buffer: 5,000 neurons (skip AI when within buffer of limit)
-- Each specialist call costs ~625 neurons (4 calls = ~2,500 per analysis)
-- Budget checked before each analysis; if exceeded, CV-only results returned
+Workers AI neuron budget tracking (`ai_neuron_usage` D1 table) remains in the codebase but is not consumed since the AI specialists are bypassed. It can be removed in a future cleanup.
 
 ### CV Preprocessing Strategies (2026-03-20)
 
@@ -667,38 +632,26 @@ The CV service has **28 preprocessing strategies** registered in `cv/strategies.
 }
 ```
 
-**Merge stats** added to `meta.merge_stats`:
-```json
-{"high": 5, "medium": 1, "low": 1, "total": 7}
-```
-
-### TypeScript Types (`src/ai/types.ts`)
+### TypeScript Types
 
 ```typescript
-// Specialist result types
-RoomNamerResult, LayoutDescriberResult, SymbolSpotterResult, DimensionReaderResult
-SpecialistFailure  // { ok: false, specialist, error }
-
-// CV service output
+// CV service output (src/ai/types.ts)
 CVRoom { label, x, y, width, depth, polygon?, confidence?, found_by? }
 CVResult { name, rooms: CVRoom[], meta: { ..., preprocessing?: { strategy_used, anchor_strategy?, strategies_run?, strategies_contributing? } } }
 
-// Merge output
+// Merge output (src/ai/types.ts — legacy, used by orchestrator.ts)
 MergedRoom { label, x, y, width, depth, type, confidence, sources[], split_hint?, split_evidence? }
+PipelineOutput { name, rooms: MergedRoom[], openings, adjacency, meta }
 
-// Full pipeline
-GatherResults { cv, roomNamer, layoutDescriber, symbolSpotter, dimensionReader }
-PipelineOutput { name, rooms: MergedRoom[], openings, adjacency, meta: { ..., specialists_succeeded, specialists_failed, merge_stats?, merge_time_ms? } }
-PipelineConfig { ai, db, cvServiceUrl, model, fallbackModel, timeouts, neuronBudget }
-
-// Orchestrator exports
-tierRooms(rooms: CVRoom[]) → { forAI: CVRoom[], hintBank: CVRoom[] }
-reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → MergedRoom[]
+// CV-direct converter (src/ai/convert.ts — active Copy Mode path)
+CVAnalyzeResult { name, rooms: Array<{ label, x, y, width, depth, polygon? }>, openings?, meta: { wall_thickness? } }
+cvToSketchInput(cv: CVAnalyzeResult) → SimpleFloorPlanInput  // polygon passthrough, wall thickness mapping
+pipelineToSketchInput(output: PipelineOutput) → SimpleFloorPlanInput  // legacy path
 ```
 
 ---
 
-## Known Issues & Status (as of 2026-03-21)
+## Known Issues & Status (as of 2026-03-22)
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
@@ -743,22 +696,17 @@ Multi-strategy merge improved room counts but quality issues remain:
 - **~~Logo/text regions detected as rooms~~** — MITIGATED (2026-03-21). `bbox_filter_pre` merge step computes consensus floor plan bbox (median of per-strategy bboxes) and removes rooms with centroids outside it, eliminating false rooms from logos, headers, and dimension text. `bbox_filter_post` re-checks after clustering as a safety net. **Validated (2026-03-21):** On 520 W 23rd, bbox_filter_pre correctly removes 44 margin artifacts (two clusters of ~22 rooms each at left/right margins, area ~590K px each — these are blank areas flanking the floor plan that every strategy detects as giant contours). The previous baseline of 5 rooms was wrong — 2 were margin artifacts. Correct baseline is 3 rooms. 547 W 47th: 0 rooms removed (all inside bbox), 8 rooms preserved.
 - **~~Large merged rooms~~** — FIXED (2026-03-21). `merge.py` now excludes rooms exceeding 50% of image area from clustering.
 
-### Quality: Sketch generation from CV+AI data
+### Quality: Sketch generation from CV data
 
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
-- **AI-only rooms use estimated geometry** — grid-cell positions (3x3) and estimated sizes, not real pixel coordinates
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Furniture placement is approximate** — Symbol Spotter detects fixtures but gives grid-cell positions, not pixel coords
-- **Wall thickness is hardcoded** — `compile-layout.ts` uses fixed 20cm exterior / 10cm interior walls regardless of CV-detected thickness. The CV pipeline now outputs `wall_thickness.thin_cm` and `wall_thickness.thick_cm` per floor plan, but the sketch compiler ignores it. Next step: pass `wallThickness` through `SimpleFloorPlanInput` and use detected values in wall generation (see design spec Part 3 at `docs/superpowers/specs/2026-03-21-wall-thickness-aware-room-detection-design.md`)
-
-### Resolved: Worker-side merge now uses CV confidence data
-
-FIXED (2026-03-21). `merge.ts` now uses `room.confidence ?? 0.3` as the starting confidence instead of hardcoded 0.3. CV rooms found by 5+ strategies (confidence 0.9) retain their high confidence through the AI merge layer.
+- **Wall thickness passthrough** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`.
+- **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
 ### Preprocessing metadata now flows through
 
-`meta.cv_preprocessing` in `PipelineOutput` contains `{ strategy_used, anchor_strategy, strategies_run, strategies_contributing }`. Specialist errors surfaced in `meta.specialist_errors`.
+`meta.cv_preprocessing` in `PipelineOutput` contains `{ strategy_used, anchor_strategy, strategies_run, strategies_contributing }`.
 
 ### Minor: Furniture catalog gaps
 
@@ -841,22 +789,22 @@ When a user provides a floor plan image to replicate:
 
 ```
 Step 1 — ANALYZE IMAGE
-  analyze_floor_plan_image(image_url) → CV extracts:
-    - rooms (rect or polygon format, coords normalized to origin)
+  analyze_floor_plan_image(image_url) → CV service extracts:
+    - rooms (rect or polygon format, coords in cm)
     - openings (doors between rooms, windows on exterior walls)
-    - adjacency (which rooms share walls, with orientation + length)
-    - meta (scale, counts)
-  Agent sees: source image (inline) + CV JSON
+    - meta (scale, scale_confidence, wall_thickness, counts)
+  Auto-converted to SimpleFloorPlanInput via cvToSketchInput()
+  Agent sees: source image (inline) + converted sketch input
+  ⚠ If scale_confidence="fallback", warning shown — agent should verify sizes
 
 Step 2 — REVIEW & ADJUST
   Agent compares CV output against source image visually
   Fixes: misdetected labels, merged open-plan rooms, scale errors
-  Uses adjacency data to verify room connectivity
   Uses polygon rooms for L-shaped/irregular spaces
   Rounds dimensions to nearest 10cm
 
 Step 3 — REFINE OPENINGS
-  CV now provides detected doors/windows — agent verifies and adjusts
+  CV provides detected doors/windows — agent verifies and adjusts
   Adds any missed openings based on source image
   Interior: {type, between: [room1, room2]}
   Exterior: {type, room, wall: "north"|...}
@@ -868,6 +816,8 @@ Step 4 — ADD FURNITURE
 Step 5 — GENERATE
   generate_floor_plan(adjusted data) → preview_sketch → verify → fix
 ```
+
+**Architecture note (2026-03-22):** Copy Mode was simplified to bypass the AI specialist layer (4× Llama 3.2 11B Vision models + merge/validate logic). `handleAnalyzeImage` now calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction. See `project_system_audit_mar22.md` for full rationale.
 
 ### Template Mode (Description → Floor Plan)
 

@@ -7,7 +7,7 @@ import numpy as np
 
 def detect_rooms(
     binary: np.ndarray,
-    min_room_ratio: float = 0.01,
+    min_room_ratio: float = 0.005,
 ) -> tuple[list[dict], np.ndarray]:
     """Detect room regions from a binary wall mask (walls=255, rooms=0).
 

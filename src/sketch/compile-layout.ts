@@ -127,6 +127,43 @@ function getRoomEdges(rect: Rect, idx: number): Edge[] {
   ];
 }
 
+/**
+ * Extract axis-aligned edges from a polygon's vertices.
+ * Used for polygon rooms to generate walls along the actual room boundary
+ * instead of the bounding box.
+ */
+function getPolygonEdges(polygon: Point[], rect: Rect, idx: number): Edge[] {
+  const edges: Edge[] = [];
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2;
+
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % polygon.length];
+    const dx = Math.abs(b.x - a.x);
+    const dy = Math.abs(b.y - a.y);
+
+    if (dx < SNAP_GRID && dy >= SNAP_GRID) {
+      // Vertical edge
+      const pos = snap((a.x + b.x) / 2);
+      const start = Math.min(a.y, b.y);
+      const end = Math.max(a.y, b.y);
+      const side = pos < cx ? 'left' : 'right';
+      edges.push({ axis: 'x', pos, start, end, roomIdx: idx, side: side as Edge['side'] });
+    } else if (dy < SNAP_GRID && dx >= SNAP_GRID) {
+      // Horizontal edge
+      const pos = snap((a.y + b.y) / 2);
+      const start = Math.min(a.x, b.x);
+      const end = Math.max(a.x, b.x);
+      const side = pos < cy ? 'top' : 'bottom';
+      edges.push({ axis: 'y', pos, start, end, roomIdx: idx, side: side as Edge['side'] });
+    }
+    // Non-axis-aligned edges are skipped (diagonal walls not yet supported)
+  }
+
+  return edges;
+}
+
 // ─── Shared edge detection ─────────────────────────────────────────────────
 
 function findSharedEdges(rects: Rect[], allEdges: Edge[][]): SharedEdge[] {
@@ -420,7 +457,16 @@ function convertFurniture(
 export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
   // 1. Snap & normalize rooms
   const rects = input.rooms.map(r => roomToRect(r));
-  const allEdges = rects.map((r, i) => getRoomEdges(r, i));
+  // Use polygon edges for polygon rooms, bounding box edges for rect rooms
+  const allEdges = rects.map((r, i) => {
+    const roomInput = input.rooms[i];
+    if ('polygon' in roomInput && roomInput.polygon && roomInput.polygon.length > 4) {
+      const polyEdges = getPolygonEdges(roomInput.polygon, r, i);
+      // Fall back to rect edges if polygon didn't produce enough axis-aligned edges
+      return polyEdges.length >= 3 ? polyEdges : getRoomEdges(r, i);
+    }
+    return getRoomEdges(r, i);
+  });
   const rectByLabel = new Map(rects.map((r, i) => [r.label, i]));
 
   // 2. Find shared edges

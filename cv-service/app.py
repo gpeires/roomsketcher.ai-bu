@@ -44,6 +44,7 @@ class WallThickness(BaseModel):
 class MetaOutput(BaseModel):
     image_size: tuple[int, int]
     scale_cm_per_px: float
+    scale_confidence: str = "measured"  # "measured" or "fallback"
     walls_detected: int
     rooms_detected: int
     text_regions: int

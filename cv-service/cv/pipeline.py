@@ -97,7 +97,18 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
         x, y, bw, bh = find_floor_plan_bbox(s["mask"])
         strategy_bboxes.append((x, y, x + bw, y + bh))  # convert to (x0, y0, x1, y1)
 
-    anchor_name = max(strategy_room_data, key=lambda s: s["count"])["strategy"]
+    # Select anchor strategy: pick the one closest to the median room count.
+    # Using max(count) risks selecting a noisy strategy with false positives.
+    counts = sorted(s["count"] for s in strategy_room_data if s["count"] > 0)
+    if counts:
+        median_count = counts[len(counts) // 2]
+    else:
+        median_count = 0
+    anchor_name = min(
+        (s for s in strategy_room_data if s["count"] > 0),
+        key=lambda s: abs(s["count"] - median_count),
+        default=max(strategy_room_data, key=lambda s: s["count"]),
+    )["strategy"]
     anchor_mask = next(s["mask"] for s in strategy_masks if s["strategy"] == anchor_name)
 
     merge_context = MergeContext(
@@ -189,7 +200,7 @@ def _run_pipeline(
     detected_rooms, closed_binary = detect_rooms(binary)
     rooms = rooms_override if rooms_override is not None else detected_rooms
     text_regions = extract_text_regions(image)
-    scale = _calibrate_scale(walls, text_regions, image_shape=(h, w))
+    scale, scale_confidence = _calibrate_scale(walls, text_regions, image_shape=(h, w))
     openings = detect_openings(binary, closed_binary, rooms, walls, scale)
     adjacency = detect_adjacency(rooms, binary)
     result = build_floor_plan_input(
@@ -202,6 +213,7 @@ def _run_pipeline(
     result["meta"] = {
         "image_size": (w, h),
         "scale_cm_per_px": scale,
+        "scale_confidence": scale_confidence,
         "walls_detected": len(walls),
         "rooms_detected": len(rooms),
         "text_regions": len(text_regions),
@@ -227,6 +239,11 @@ def _calibrate_scale(walls, text_regions, image_shape):
     We use perpendicular distance (not center-to-center) for matching,
     and require the text to fall within the wall's span along the
     parallel axis.
+
+    Returns:
+        Tuple of (scale_cm_per_px, scale_confidence) where confidence is:
+        - "measured": scale derived from matched dimension labels
+        - "fallback": no dimension labels matched, using 1000cm/image_width guess
     """
     matches = []
     for tr in text_regions:
@@ -278,8 +295,9 @@ def _calibrate_scale(walls, text_regions, image_shape):
 
     if matches:
         matches.sort()
-        return matches[len(matches) // 2]
-    return 1000.0 / image_shape[1]
+        return matches[len(matches) // 2], "measured"
+    log.warning("Scale calibration: no dimension labels matched walls, using fallback (1000cm/image_width)")
+    return 1000.0 / image_shape[1], "fallback"
 
 
 def run_single_strategy(
@@ -319,7 +337,7 @@ def run_single_strategy(
         rooms, closed_binary = detect_rooms(binary)
         # OCR needs the original color image, not the preprocessed one
         text_regions = extract_text_regions(image)
-        scale = _calibrate_scale(walls, text_regions, image_shape=(h, w))
+        scale, scale_confidence = _calibrate_scale(walls, text_regions, image_shape=(h, w))
         openings = detect_openings(binary, closed_binary, rooms, walls, scale)
         adjacency = detect_adjacency(rooms, binary)
 
@@ -333,6 +351,7 @@ def run_single_strategy(
         result["meta"] = {
             "image_size": (w, h),
             "scale_cm_per_px": scale,
+            "scale_confidence": scale_confidence,
             "walls_detected": len(walls),
             "rooms_detected": len(rooms),
             "text_regions": len(text_regions),

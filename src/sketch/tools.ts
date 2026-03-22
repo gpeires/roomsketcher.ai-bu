@@ -394,8 +394,8 @@ export async function handleAnalyzeImage(
   input: { image?: string; image_url?: string },
   name: string,
   cvServiceUrl: string,
-  ai?: Ai,
-  db?: D1Database,
+  _ai?: Ai,
+  _db?: D1Database,
   workerUrl?: string,
 ): Promise<ToolResult> {
   if (!input.image && !input.image_url) {
@@ -425,81 +425,7 @@ export async function handleAnalyzeImage(
     } catch { /* non-fatal */ }
   }
 
-  // If AI binding available, use the full pipeline; otherwise CV-only fallback
-  if (ai && db) {
-    try {
-      const { runPipeline } = await import('../ai/orchestrator');
-      const { DEFAULT_CONFIG } = await import('../ai/types');
-      const result = await runPipeline(input, name, {
-        ai,
-        db,
-        cvServiceUrl,
-        ...DEFAULT_CONFIG,
-      });
-
-      const pipelineLabel = result.meta.pipeline_version === '1.0-cv-only'
-        ? 'CV Analysis Complete (AI budget exhausted)'
-        : `AI-Enhanced Analysis Complete (pipeline v${result.meta.pipeline_version})`;
-
-      // Auto-convert pipeline output to ready-to-use sketch input
-      const { pipelineToSketchInput } = await import('../ai/convert');
-      const sketchInput = pipelineToSketchInput(result);
-
-      const summary = [
-        `**${pipelineLabel}** — ${result.rooms.length} rooms detected`,
-        `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px | Walls: ${result.meta.walls_detected}`,
-        `AI specialists: ${result.meta.specialists_succeeded.length} succeeded, ${result.meta.specialists_failed.length} failed`,
-        `Validation: ${result.meta.validation_passes} pass(es), ${result.meta.ai_corrections} correction(s)`,
-        '',
-        '## Pipeline output',
-        '```json',
-        JSON.stringify(result, null, 2),
-        '```',
-        '',
-        '## Ready-to-use input for generate_floor_plan',
-        'Pass this directly to generate_floor_plan — do NOT manually reconstruct room positions or sizes:',
-        '```json',
-        JSON.stringify(sketchInput, null, 2),
-        '```',
-      ].join('\n');
-
-      const content: ContentBlock[] = [];
-      if (imageBase64) {
-        content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
-      }
-      content.push({ type: 'text' as const, text: summary });
-      return { content };
-    } catch (err) {
-      // Pipeline failed — fall through to CV-only, but surface the error
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.error('AI pipeline failed, falling back to CV-only:', errMsg);
-      // Include pipeline error in CV-only response so we can debug
-      const content: ContentBlock[] = [];
-      if (imageBase64) {
-        content.push({ type: 'image' as const, data: imageBase64, mimeType: imageMime as 'image/png' });
-      }
-      content.push({ type: 'text' as const, text: `**AI Pipeline Error** (falling back to CV-only): \`${errMsg}\`` });
-      // Still do CV-only below, but prepend the error
-      try {
-        const cvBody: Record<string, string> = { name };
-        if (input.image) cvBody.image = input.image;
-        else cvBody.image_url = input.image_url!;
-        const cvResp = await fetch(`${cvServiceUrl}/analyze`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(cvBody),
-          signal: AbortSignal.timeout(30_000),
-        });
-        if (cvResp.ok) {
-          const cvResult = await cvResp.json() as Record<string, unknown>;
-          content.push({ type: 'text' as const, text: `\n\n**CV Fallback Result:**\n\`\`\`json\n${JSON.stringify(cvResult, null, 2)}\n\`\`\`` });
-        }
-      } catch { /* CV also failed, just show pipeline error */ }
-      return { content };
-    }
-  }
-
-  // CV-only fallback (same as original)
+  // CV-only analysis — Claude interprets the image directly
   const body: Record<string, string> = { name };
   if (input.image) body.image = input.image;
   else body.image_url = input.image_url!;
@@ -516,22 +442,46 @@ export async function handleAnalyzeImage(
     return { content: [{ type: 'text' as const, text: `CV analysis failed: ${err}` }] };
   }
 
-  const result = await resp.json() as {
+  const cvResult = await resp.json() as {
     name: string;
-    rooms: Array<{ label: string; x: number; y: number; width: number; depth: number }>;
-    meta: { walls_detected: number; rooms_detected: number; text_regions: number; scale_cm_per_px: number };
+    rooms: Array<{ label: string; x: number; y: number; width: number; depth: number; polygon?: Array<{ x: number; y: number }> }>;
+    openings?: Array<Record<string, unknown>>;
+    adjacency?: Array<Record<string, unknown>>;
+    meta: {
+      walls_detected: number;
+      rooms_detected: number;
+      text_regions: number;
+      scale_cm_per_px: number;
+      scale_confidence?: string;
+      wall_thickness?: { thin_cm: number; thick_cm: number };
+    };
   };
 
+  // Auto-convert CV output to ready-to-use sketch input
+  const { cvToSketchInput } = await import('../ai/convert');
+  const sketchInput = cvToSketchInput(cvResult);
+
+  const scaleWarning = cvResult.meta.scale_confidence === 'fallback'
+    ? '\n\n⚠️ **Scale Warning:** No dimension labels were matched to walls. Room sizes are estimated using a fallback scale and may be significantly wrong. Compare the rooms against the source image and adjust sizes as needed.'
+    : '';
+
   const summary = [
-    `**CV Analysis Complete** (no AI enhancement) — ${result.rooms.length} rooms detected`,
-    `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px`,
-    `Walls: ${result.meta.walls_detected}, Text regions: ${result.meta.text_regions}`,
+    `**CV Analysis Complete** — ${cvResult.rooms.length} rooms detected`,
+    `Scale: ${cvResult.meta.scale_cm_per_px.toFixed(2)} cm/px (${cvResult.meta.scale_confidence ?? 'measured'})`,
+    `Walls: ${cvResult.meta.walls_detected}, Text regions: ${cvResult.meta.text_regions}`,
+    ...(cvResult.meta.wall_thickness ? [`Wall thickness: interior ${cvResult.meta.wall_thickness.thin_cm}cm, exterior ${cvResult.meta.wall_thickness.thick_cm}cm`] : []),
+    scaleWarning,
     '',
+    '## CV detected rooms',
     '```json',
-    JSON.stringify(result, null, 2),
+    JSON.stringify(cvResult.rooms, null, 2),
     '```',
     '',
-    'Review the source image above against the CV output. Fix any misdetected labels or dimensions before passing to generate_floor_plan.',
+    '## Ready-to-use input for generate_floor_plan',
+    'Compare the source image above against the CV output below. Fix any wrong labels, missing rooms, or incorrect sizes before passing to generate_floor_plan:',
+    '```json',
+    JSON.stringify(sketchInput, null, 2),
+    '```',
   ].join('\n');
 
   const content: ContentBlock[] = [];
