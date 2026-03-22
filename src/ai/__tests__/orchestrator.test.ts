@@ -45,10 +45,9 @@ describe('buildPipelineOutput', () => {
         image_size: [800, 600],
         preprocessing: { strategy_used: 'multi_strategy_merge', anchor_strategy: 'enhanced', strategies_run: 21, strategies_contributing: 15 },
       },
+      openings: [{ type: 'door', x: 100, y: 200 }],
+      adjacency: [{ from: 'Kitchen', to: 'Living' }],
     };
-    // Simulate CV returning openings/adjacency (not in TS type but present at runtime)
-    (cv as Record<string, unknown>).openings = [{ type: 'door', x: 100, y: 200 }];
-    (cv as Record<string, unknown>).adjacency = [{ from: 'Kitchen', to: 'Living' }];
 
     const output = buildPipelineOutput('Test', rooms, cv, {
       corrections: 0, passes: 0, neuronsUsed: 0, succeeded: [], failed: [],

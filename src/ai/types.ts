@@ -70,6 +70,8 @@ export interface CVRoom {
 export interface CVResult {
   name: string;
   rooms: CVRoom[];
+  openings?: unknown[];
+  adjacency?: unknown[];
   meta: {
     walls_detected: number;
     rooms_detected: number;

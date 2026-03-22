@@ -207,8 +207,8 @@ export function buildPipelineOutput(
   return {
     name,
     rooms,
-    openings: (cv as Record<string, unknown>).openings as unknown[] ?? [],
-    adjacency: (cv as Record<string, unknown>).adjacency as unknown[] ?? [],
+    openings: cv.openings ?? [],
+    adjacency: cv.adjacency ?? [],
     meta: {
       image_size: [cv.meta.image_size?.[0] ?? cv.meta.image_width ?? 0, cv.meta.image_size?.[1] ?? cv.meta.image_height ?? 0],
       scale_cm_per_px: cv.meta.scale_cm_per_px,
