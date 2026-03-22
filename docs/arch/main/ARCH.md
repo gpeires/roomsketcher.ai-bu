@@ -80,7 +80,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 ```bash
 # Worker (Cloudflare)
 npm run dev                    # Local dev server (wrangler dev)
-npm test                       # Run vitest tests (187 tests)
+npm test                       # Run vitest tests (197 tests)
 bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
 
 # DB migrations
@@ -120,16 +120,16 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
-│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe)
-│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad
+│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe, computeEnvelope)
+│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
-│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (walls as <polygon>, junctions, thickness-aware openings)
+│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (envelope-based or legacy wall rendering)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
-│   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types)
+│   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types, incl. dishwasher, washer-dryer, aliases)
 │   ├── rasterize.ts            # svgToPng() via @cf-wasm/resvg (WASM) for preview_sketch
-│   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map
+│   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map + ENVELOPE_GAP_THRESHOLD
 │   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
 │   ├── templates/
 │   │   ├── studio.json         # v3 quality, fully furnished
@@ -260,6 +260,7 @@ FloorPlan
 │       ├── id, type (door|window|opening)
 │       ├── offset (along wall), width
 │       └── properties { swingDirection, sillHeight, windowType }
+├── envelope? [{x,y}...] (optional — outer building boundary polygon, computed by compileLayout)
 ├── rooms[]
 │   ├── id, label, type (living|bedroom|kitchen|...)
 │   ├── polygon [{x,y}...] (clockwise)
@@ -303,12 +304,28 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Browser-side** (`src/sketcher/html.ts`): Used by the interactive sketcher SPA. Vanilla JS (embedded in template string). Includes selection highlighting, drag handles, tool modes.
 
-**Wall rendering (as of 2026-03-22):**
-- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad offset perpendicular to centerline by `thickness/2`). Fill `#333`. Visually thick, matching professional floor plans.
-- Interior walls → `<line>` elements with `stroke-width="2"`. Thin baseline lines — only exterior walls get visual thickness.
-- Divider walls → `<line>` elements with dashed stroke (thin visual).
-- Junction circles at shared **exterior** wall endpoints fill corner gaps (`<circle>` with `r = max(thickness)/2`). Interior wall junctions don't get circles.
-- Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls. Window line offset = `thickness / 2` for exterior, `2` for interior.
+**Envelope rendering (as of 2026-03-22):**
+
+When `plan.envelope` exists, the renderer uses the **envelope-minus-rooms** model:
+1. **Structure layer** (`<g id="structure">`): Envelope polygon filled `#333` (structural mass), then room polygons filled with room colors on top (cutouts via painters model)
+2. **Walls layer** (`<g id="walls">`): Only interior/divider walls rendered as thin `<line>` elements — exterior walls are implicit in the envelope shape
+3. **Openings layer**: Openings on both interior and exterior walls cut gaps
+4. **Room labels layer** (`<g id="room-labels">`): Labels rendered separately (not embedded in room polygons)
+5. No junction circles needed — envelope provides continuous structural mass
+
+The envelope is computed by `computeEnvelope()` in `compile-layout.ts`:
+- Rasterize all room polygons onto a 10cm boolean grid
+- Morphological close (dilate then erode) on padded grid to bridge gaps < 50cm between rooms
+- Trace contour of the filled grid to extract axis-aligned polygon
+- Offset polygon outward by exterior wall thickness
+
+**Legacy rendering (fallback when no envelope):**
+- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad). Fill `#333`.
+- Interior walls → `<line>` elements with `stroke-width="2"`.
+- Divider walls → `<line>` elements with dashed stroke.
+- Junction circles at shared **exterior** wall endpoints fill corner gaps.
+- Room polygons rendered with fill + labels inline.
+- Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls.
 
 **Wall type classification** (`compile-layout.ts`):
 - Shared edges (two rooms touch at aligned edges) → `interior` walls. Detected via `findSharedEdges()` which finds overlapping opposing edges within `SNAP_TOLERANCE` (20cm).
@@ -322,7 +339,11 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Geometry utility** (`src/sketch/geometry.ts`):
 - `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon
-- `boundingBox(walls)` expands by max **exterior** wall thickness / 2 (interior walls are thin lines, don't expand bbox)
+- `boundingBox(walls, envelope?)` — when envelope present, uses envelope bounds (no thickness expansion needed); otherwise expands by max exterior wall thickness / 2
+- `polygonBoundingBox(polygon)` → `{ minX, minY, maxX, maxY }` — tight bounds on polygon vertices
+- `rasterizeToGrid(polygons, gridSize)` → boolean 2D array — rasterizes axis-aligned polygons via point-in-polygon at cell centers
+- `traceContour(grid, originX, originY, gridSize)` → `Point[]` — boundary-following on grid edges, produces axis-aligned polygon
+- `offsetAxisAlignedPolygon(polygon, distance)` → `Point[]` — outward expansion with winding-aware normal computation (handles both CW/CCW)
 - Browser renderer has vanilla JS equivalent: `wallQuadPoints(w)` → returns points string directly
 
 ### WebSocket Protocol
@@ -759,7 +780,7 @@ Multi-strategy merge improved room counts but quality issues remain:
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **wall thickness rendering is relative** — only exterior walls render as thick filled `<polygon>` elements using `wallQuad()`, with junction circles at shared exterior endpoints. Interior walls render as thin `<line>` elements (`stroke-width="2"`). This matches professional floor plans where the perimeter is visually prominent and interior partitions are thin lines.
+- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **envelope-based rendering** — `compileLayout()` computes a building envelope (union of room polygons expanded by exterior wall thickness) and stores it as `plan.envelope`. Both SVG renderers detect this field and use the envelope-minus-rooms model: structural mass as filled polygon, rooms as colored cutouts, interior walls as thin lines. Legacy sketches without `envelope` fall back to the old wall-based rendering (exterior wall polygons + junction circles).
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
 ### Preprocessing metadata now flows through
@@ -768,7 +789,7 @@ The generated sketches don't closely match source images:
 
 ### Minor: Furniture catalog gaps
 
-Missing items: dishwasher, oven, washer/dryer, kitchen island, fireplace, AC unit. Tracked in `project_furniture_catalog_gaps.md`.
+Added in this session: dishwasher, washer-dryer, plus aliases (refrigerator→fridge, range→stove, bathroom-sink→bathSink). Still missing: oven, kitchen island, fireplace, AC unit. Tracked in `project_furniture_catalog_gaps.md`.
 
 ### Minor: Uploaded images not cleaned up
 
