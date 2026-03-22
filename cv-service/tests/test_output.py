@@ -122,6 +122,56 @@ def test_multiple_labels_prefers_room_word():
     assert result["rooms"][0]["label"] == "Primary"
 
 
+class TestLabelFallbackSuppression:
+    """When all candidates for a room fail _is_room_label, the room should get 'Room N' instead of noise."""
+
+    def test_logo_only_room_gets_generic_label(self):
+        """Room with only 'COMPASS' text inside should get 'Room N', not 'COMPASS'."""
+        rooms = [
+            {"bbox": (10, 10, 200, 200), "area_px": 40000, "centroid": (110, 110), "mask": None},
+        ]
+        text_regions = [
+            {"text": "COMPASS", "center": (105, 115), "bbox": (80, 110, 50, 10), "confidence": 90},
+        ]
+        result = build_floor_plan_input(rooms, text_regions, (300, 300), scale_cm_per_px=1.0)
+        assert result["rooms"][0]["label"] == "Room 1"
+
+    def test_short_noise_room_gets_generic_label(self):
+        """Room with only OCR noise like 'ye' or 'Net' should get 'Room N'."""
+        rooms = [
+            {"bbox": (10, 10, 200, 200), "area_px": 40000, "centroid": (110, 110), "mask": None},
+        ]
+        text_regions = [
+            {"text": "ye", "center": (105, 115), "bbox": (80, 110, 20, 10), "confidence": 60},
+        ]
+        result = build_floor_plan_input(rooms, text_regions, (300, 300), scale_cm_per_px=1.0)
+        assert result["rooms"][0]["label"] == "Room 1"
+
+    def test_mixed_noise_and_valid_keeps_valid(self):
+        """Room with both noise and a valid label should keep the valid one."""
+        rooms = [
+            {"bbox": (10, 10, 200, 200), "area_px": 40000, "centroid": (110, 110), "mask": None},
+        ]
+        text_regions = [
+            {"text": "COMPASS", "center": (105, 100), "bbox": (80, 95, 50, 10), "confidence": 90},
+            {"text": "Kitchen", "center": (105, 130), "bbox": (80, 125, 50, 10), "confidence": 90},
+        ]
+        result = build_floor_plan_input(rooms, text_regions, (300, 300), scale_cm_per_px=1.0)
+        assert result["rooms"][0]["label"] == "Kitchen"
+
+    def test_address_text_gets_generic_label(self):
+        """Room with address-like text should get 'Room N'."""
+        rooms = [
+            {"bbox": (10, 10, 200, 200), "area_px": 40000, "centroid": (110, 110), "mask": None},
+        ]
+        # "Net" is 3 chars, title-case but not a room word — should be rejected
+        text_regions = [
+            {"text": "Net", "center": (105, 115), "bbox": (80, 110, 30, 10), "confidence": 60},
+        ]
+        result = build_floor_plan_input(rooms, text_regions, (300, 300), scale_cm_per_px=1.0)
+        assert result["rooms"][0]["label"] == "Room 1"
+
+
 class TestGhostRoomFiltering:
     """Rooms outside the floor plan or with garbage labels should be removed."""
 

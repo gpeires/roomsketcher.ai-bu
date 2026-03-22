@@ -249,6 +249,7 @@ def _calibrate_scale(walls, text_regions, image_shape):
         - "fallback": no dimension labels matched, using 1000cm/image_width guess
     """
     matches = []
+    max_dist = max(image_shape) * 0.20
     for tr in text_regions:
         cm = parse_dimension(tr["text"])
         if cm is None or cm <= 0:
@@ -256,6 +257,7 @@ def _calibrate_scale(walls, text_regions, image_shape):
         tx, ty = tr["center"]
         tw, th = tr["bbox"][2], tr["bbox"][3]
         label_horizontal = tw >= th
+        log.debug("Scale: dim %r → %.1fcm at (%d,%d) horiz=%s", tr["text"], cm, tx, ty, label_horizontal)
 
         best_wall = None
         best_dist = float("inf")
@@ -290,13 +292,24 @@ def _calibrate_scale(walls, text_regions, image_shape):
                 best_dist = perp_dist
                 best_wall = wall
 
-        max_dist = max(image_shape) * 0.20
         if best_wall is not None and best_dist <= max_dist:
             sx, sy = best_wall["start"]
             ex, ey = best_wall["end"]
             wall_px = math.hypot(ex - sx, ey - sy)
             if wall_px > 10:
-                matches.append(cm / wall_px)
+                scale_ratio = cm / wall_px
+                matches.append(scale_ratio)
+                log.debug("Scale: matched %r (%.1fcm) → wall (%d,%d)-(%d,%d) len=%.0fpx dist=%.0fpx → ratio=%.4f",
+                          tr["text"], cm, sx, sy, ex, ey, wall_px, best_dist, scale_ratio)
+            else:
+                log.debug("Scale: wall too short (%.0fpx) for %r", wall_px, tr["text"])
+        elif best_wall is not None:
+            sx, sy = best_wall["start"]
+            ex, ey = best_wall["end"]
+            log.debug("Scale: nearest wall for %r at dist=%.0fpx > max=%.0fpx (wall (%d,%d)-(%d,%d))",
+                      tr["text"], best_dist, max_dist, sx, sy, ex, ey)
+        else:
+            log.debug("Scale: no candidate wall for %r (no wall in span)", tr["text"])
 
     if matches:
         matches.sort()

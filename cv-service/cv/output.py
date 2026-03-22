@@ -277,9 +277,8 @@ def _assign_labels(rooms: list[dict], labels: list[dict]) -> list[dict]:
             candidates = room_labels[i]
             # Filter to room-name-like text
             filtered = [c for c in candidates if _is_room_label(c["text"])]
-            if not filtered:
-                filtered = candidates
-            r["label"] = _pick_best_label(filtered, room)
+            if filtered:
+                r["label"] = _pick_best_label(filtered, room)
         result.append(r)
     return result
 

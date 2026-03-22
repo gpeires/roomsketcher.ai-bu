@@ -5,6 +5,40 @@ import cv2
 import numpy as np
 
 
+def _estimate_wall_thickness(binary: np.ndarray, sample_rows: int = 50) -> float:
+    """Estimate median wall thickness from horizontal run-lengths of white pixels.
+
+    Samples evenly-spaced rows and measures runs of wall (255) pixels.
+    Returns median run length, or 0 if no wall runs found.
+    """
+    h, w = binary.shape
+    step = max(1, h // sample_rows)
+    runs = []
+    for y in range(0, h, step):
+        row = binary[y]
+        in_run = False
+        run_start = 0
+        for x in range(w):
+            if row[x] > 0:
+                if not in_run:
+                    in_run = True
+                    run_start = x
+            else:
+                if in_run:
+                    run_len = x - run_start
+                    if run_len >= 2:  # ignore single-pixel noise
+                        runs.append(run_len)
+                    in_run = False
+        if in_run:
+            run_len = w - run_start
+            if run_len >= 2:
+                runs.append(run_len)
+    if not runs:
+        return 0.0
+    runs.sort()
+    return float(runs[len(runs) // 2])
+
+
 def detect_rooms(
     binary: np.ndarray,
     min_room_ratio: float = 0.005,
@@ -20,6 +54,10 @@ def detect_rooms(
     4. Filter by minimum area and exclude large border-touching regions
        (the exterior of the building).
     5. Extract simplified polygons from each room's contour.
+
+    The closing kernel size adapts to detected wall thickness: thick walls
+    need smaller kernels to avoid merging adjacent small rooms (closets,
+    bathrooms).
 
     Args:
         binary: Binary wall mask from preprocess.prepare() (walls=255, rooms=0).
@@ -37,8 +75,25 @@ def detect_rooms(
     h, w = binary.shape
     min_area = int(h * w * min_room_ratio)
 
-    # Close door gaps in interior walls so each room is a separate component.
-    gap_size = max(15, min(80, max(h, w) // 10))
+    # Adapt closing kernel to wall thickness: thick walls need smaller kernels
+    # to avoid merging small rooms. Base gap_size on image size, then reduce
+    # if walls are thick relative to the image.
+    base_gap = max(15, min(80, max(h, w) // 10))
+    wall_thickness = _estimate_wall_thickness(binary)
+    if wall_thickness > 0:
+        # Ratio of wall thickness to image size; typical thin walls ~0.5-1%,
+        # thick walls ~2-4%. Scale down gap_size when walls are thick.
+        thickness_ratio = wall_thickness / max(h, w)
+        if thickness_ratio > 0.015:
+            # Thick walls: reduce gap to avoid merging small rooms
+            gap_size = max(15, int(base_gap * 0.6))
+        elif thickness_ratio > 0.01:
+            # Medium walls: slight reduction
+            gap_size = max(15, int(base_gap * 0.8))
+        else:
+            gap_size = base_gap
+    else:
+        gap_size = base_gap
     v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, gap_size))
     closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, v_kernel, iterations=1)
     h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (gap_size, 1))
