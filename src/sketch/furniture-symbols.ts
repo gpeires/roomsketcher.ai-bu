@@ -37,6 +37,11 @@ const SYMBOL_MAP: Record<string, (w: number, h: number) => string> = {
   'sideboard': sideboard,
   'shoe-rack': (w, h) => shelfUnit(w, h, 4),
   'coat-hook': coatHook,
+  'refrigerator': fridge,
+  'range': stove,
+  'dishwasher': dishwasher,
+  'bathroom-sink': bathSink,
+  'washer-dryer': washerDryer,
 }
 
 export const SYMBOL_TYPES: string[] = Object.keys(SYMBOL_MAP)
@@ -215,6 +220,13 @@ function stove(w: number, h: number): string {
   return [`<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`, ...burners].join('')
 }
 
+function dishwasher(w: number, h: number): string {
+  return [
+    `<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`,
+    `<text x="${w / 2}" y="${h / 2}" text-anchor="middle" dominant-baseline="central" font-size="${Math.min(w, h) * 0.3}" fill="#999" ${NS}>DW</text>`,
+  ].join('')
+}
+
 function diningChair(w: number, h: number): string {
   const backH = h * 0.18
   return [
@@ -267,6 +279,20 @@ function shower(w: number, h: number): string {
     `<rect x="0" y="0" width="${w}" height="${h}" rx="3" ${S}/>`,
     `<circle cx="${w / 2}" cy="${h / 2}" r="${drainR}" ${SF('#aaa')}/>`,
     `<circle cx="${w / 2}" cy="${h / 2}" r="${sprayR}" stroke="#999" fill="none" stroke-dasharray="4 3" ${NS}/>`,
+  ].join('')
+}
+
+// ── Utility ─────────────────────────────────────────────
+
+function washerDryer(w: number, h: number): string {
+  const r = Math.min(w, h) * 0.3
+  const cy1 = h * 0.35
+  const cy2 = h * 0.65
+  return [
+    `<rect x="0" y="0" width="${w}" height="${h}" ${S}/>`,
+    `<line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" ${S}/>`,
+    `<circle cx="${w / 2}" cy="${cy1}" r="${r}" ${S}/>`,
+    `<circle cx="${w / 2}" cy="${cy2}" r="${r}" ${S}/>`,
   ].join('')
 }
 
