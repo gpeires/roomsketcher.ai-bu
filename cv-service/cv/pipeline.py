@@ -98,21 +98,20 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
         strategy_bboxes.append((x, y, x + bw, y + bh))  # convert to (x0, y0, x1, y1)
 
     anchor_name = max(strategy_room_data, key=lambda s: s["count"])["strategy"]
+    anchor_mask = next(s["mask"] for s in strategy_masks if s["strategy"] == anchor_name)
 
     merge_context = MergeContext(
         image_shape=(h, w),
         strategy_bboxes=strategy_bboxes,
         strategy_masks=strategy_masks,
         anchor_strategy=anchor_name,
+        anchor_mask=anchor_mask,
     )
     clustered, merge_meta = run_merge_pipeline(strategy_room_data, merge_context)
 
     if not clustered:
         log.warning("Room clustering produced 0 rooms, falling back to raw pipeline")
         return _run_pipeline(image, name)
-
-    # Step 4: Pick anchor mask for walls/openings/scale
-    anchor_mask = next(s["mask"] for s in strategy_masks if s["strategy"] == anchor_name)
 
     # Step 5: Run full pipeline on anchor mask with clustered rooms
     result = _run_pipeline(image, name, binary_override=anchor_mask, rooms_override=clustered)

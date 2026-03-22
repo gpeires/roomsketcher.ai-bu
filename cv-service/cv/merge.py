@@ -16,14 +16,38 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class StructuralElement:
+    """A detected structural element (column, thick wall, or perimeter)."""
+    kind: str                          # "column" | "thick_wall" | "perimeter"
+    centroid: tuple[int, int]          # pixel position
+    bbox: tuple[int, int, int, int]   # x, y, w, h
+    area_px: int
+    thickness_px: float               # measured full thickness (2x distance transform value)
+    aspect_ratio: float
+
+
+@dataclass
+class ThicknessProfile:
+    """Wall thickness analysis result from structural detection."""
+    elements: list[StructuralElement]
+    thin_wall_px: float               # median thin-wall full thickness
+    thick_wall_px: float              # median thick-element full thickness
+    grid_detected: bool = False
+    grid_spacing_px: list[int] | None = None
+
+
+@dataclass
 class MergeContext:
     """Shared state bag passed through merge pipeline steps."""
     image_shape: tuple[int, int]
     strategy_bboxes: list[tuple[int, int, int, int]]
     consensus_bbox: tuple[int, int, int, int] | None = None
     anchor_strategy: str | None = None
+    anchor_mask: np.ndarray | None = None
     strategy_masks: list[dict] | None = None
-    columns: list[dict] | None = None
+    columns: list[dict] | None = None               # deprecated: use thickness_profile
+    thickness_profile: ThicknessProfile | None = None
+    structural_backend: str = "distance_transform"
 
 
 class MergeStepResult(NamedTuple):

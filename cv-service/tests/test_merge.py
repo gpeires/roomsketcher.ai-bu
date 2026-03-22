@@ -408,6 +408,32 @@ class TestMergePipeline:
         assert len(EXCLUDED_MERGE_STEPS) == 0
 
 
+class TestMergeContextFields:
+    def test_has_anchor_mask(self):
+        mask = np.zeros((100, 100), dtype=np.uint8)
+        ctx = MergeContext(
+            image_shape=(100, 100),
+            strategy_bboxes=[(0, 0, 100, 100)],
+            anchor_mask=mask,
+        )
+        assert ctx.anchor_mask is not None
+        assert ctx.anchor_mask.shape == (100, 100)
+
+    def test_has_thickness_profile(self):
+        ctx = MergeContext(
+            image_shape=(100, 100),
+            strategy_bboxes=[(0, 0, 100, 100)],
+        )
+        assert ctx.thickness_profile is None
+
+    def test_has_structural_backend(self):
+        ctx = MergeContext(
+            image_shape=(100, 100),
+            strategy_bboxes=[(0, 0, 100, 100)],
+        )
+        assert ctx.structural_backend == "distance_transform"
+
+
 class TestAssembleRooms:
     def test_converts_to_rectangles(self):
         rooms = [{"polygon": [(10, 10), (290, 10), (290, 190), (10, 190)]}]
