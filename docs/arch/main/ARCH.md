@@ -88,7 +88,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (227 tests)
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (235 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -187,7 +187,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── enhance.py              # Image enhancement (CLAHE + bilateral filter + unsharp mask)
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
 │   ├── walls.py                # Wall line detection via morphological extraction
-│   ├── rooms.py                # Room detection + polygon extraction + closed mask export
+│   ├── rooms.py                # Room detection (adaptive closing kernel) + polygon extraction + closed mask export
 │   ├── openings.py             # Door detection (wall-gap scanning) + window detection (exterior breaks)
 │   ├── topology.py             # Room adjacency via mask dilation overlap
 │   ├── ocr.py                  # Tesseract OCR + merge_nearby_text() for split dimension reassembly
@@ -416,6 +416,7 @@ _run_pipeline(image, binary_override?, rooms_override?)
   ├── detect_adjacency(rooms, binary)
   ├── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
   │   ├── _assign_labels() — mask containment + nearest centroid, picks best single label
+  │   │   └── No fallback: if all candidates fail _is_room_label(), room gets "Room N" (not noise text)
   │   ├── Ghost room filter — removes negative coords, <0.5% image area, centroid outside bbox
   │   └── _is_room_label() — rejects dimensions (_DIM_LIKE), fixture abbrevs, logos, all-caps non-room
   └── cap_wall_thickness_cm() on output: interior 5-20cm, exterior 10-40cm
@@ -480,7 +481,7 @@ Two-pass wall mask extraction:
 
 ### Room Detection (`cv-service/cv/rooms.py`)
 
-1. **Close door gaps** — morphological close with a kernel sized to span realistic door openings (15–80px, capped at image_dim/10). Returns `(rooms, closed_binary)` — the closed mask is reused by opening detection.
+1. **Close door gaps** — morphological close with an **adaptive** kernel sized to span realistic door openings. Base size: 15–80px (image_dim/10). `_estimate_wall_thickness()` samples 50 rows for median horizontal wall run-length, then reduces kernel when walls are thick relative to image size: >1.5% → 60% of base, >1% → 80% of base. This prevents thick-walled plans from having small rooms (closets, bathrooms) swallowed by the closing operation. Returns `(rooms, closed_binary)` — the closed mask is reused by opening detection.
 2. **Invert** — rooms become white regions
 3. **Connected components** — each region with area > 0.5% of image area becomes a room (lowered from 1% to recover closets and small bathrooms)
 4. **Polygon extraction** — `cv2.findContours` + `cv2.approxPolyDP` (epsilon = 1.5% of perimeter) extracts a simplified polygon from each room's mask. Vertices are snapped to a 5px grid and corrected to rectilinear (90-degree angles) via a two-pass snap that aligns near-horizontal/vertical edges. This captures L-shapes, T-shapes, and irregular rooms that a bounding box would miss.
@@ -532,14 +533,15 @@ Parses dimension strings into centimeters. Supported formats:
 ### Scale Calibration (`cv-service/cv/pipeline.py`)
 
 Matches dimension text labels to their nearest **parallel** wall using perpendicular distance:
-- A horizontal dimension label (wider than tall) matches only horizontal walls
+- A horizontal dimension label (wider than tall) prefers horizontal walls; orientation mismatch allowed with 2x distance penalty (compound dims like "10'-6" x 8'-10"" are always horizontal text but may label vertical walls)
 - The text must fall within the wall's span along the parallel axis (±20% margin)
-- Maximum perpendicular distance: 15% of image dimension (tighter than the previous 30%)
+- Maximum perpendicular distance: 20% of image dimension
 - Compute `cm / wall_pixel_length` for each match
 - Use the median as the scale factor to reject outliers
 - Returns `(scale, confidence)` tuple: `"measured"` when dimension labels matched, `"fallback"` when using default
 - Fallback: `1000 / image_width` (assumes 10m-wide floor plan) — **unreliable, produces wrong room sizes**
 - `scale_confidence` is exposed in the API response (`meta.scale_confidence`) so downstream can warn users
+- **Debug logging:** `log.debug()` traces every dimension→wall match attempt with distances, wall coordinates, and match/reject reasons. Enable with `DEBUG` log level to diagnose scale fallback issues.
 
 ### Deployment
 
@@ -705,10 +707,22 @@ Multi-strategy merge improved room counts but quality issues remain:
 - **~~Unrealistic wall thickness in output~~** — FIXED (2026-03-22). `cap_wall_thickness_cm()` clamps interior walls to 5-20cm, exterior to 10-40cm.
 - **~~Scale calibration orientation mismatch~~** — FIXED (2026-03-22). `_calibrate_scale()` now allows orientation-mismatched dimension-to-wall matching with 2x distance penalty. Max matching distance increased from 15% to 20% of image diagonal.
 
+- **~~Label fallback leaks noise~~** — FIXED (2026-03-22). `_assign_labels()` no longer falls back to unfiltered candidates. When all labels for a room fail `_is_room_label()`, the room gets a generic "Room N" label instead of noise like "COMPASS", "ye", or "Net". Confirmed on Shore Dr (COMPASS gone) and Res 507 (ye/Net gone).
+- **~~Adaptive room segmentation~~** — ADDED (2026-03-22). `detect_rooms()` now estimates wall thickness via `_estimate_wall_thickness()` and reduces the closing kernel for thick-walled plans. Helps on synthetic tests but real-world impact is limited — Apt 6C bedrooms still merge, Unit 2C still only 5 rooms. The root cause is at the contour-detection level, not just the closing kernel size.
+
 **Remaining quality issues (2026-03-22):**
-- **Label fallback leaks noise** — `_assign_labels()` falls back to unfiltered candidates when all labels for a detected room are rejected by `_is_room_label()`. This is how "COMPASS" and "9511 Shore Drive" still appear: the CV detects those regions as rooms, and the only text inside them is the logo/address text, so it's used as the label despite failing the filter. Fix: either suppress the fallback entirely (rooms get "Room N" generic labels) or add a post-label filter that removes rooms whose only label was rejected.
-- **Room segmentation upstream of merge** — thick walls cause adjacent rooms to merge at the contour-detection level. The dilation cap helps but the root issue is in `detect_rooms()` contour extraction. Both bedrooms in Apt 6C are still merged into one large room.
-- **Scale calibration still falls back on some images** — Res 507 has clear dimension labels ("10'- 6\" x 8'- 10\"") that parse correctly, but OCR may fragment compound text or the wall detector doesn't find walls close enough to match.
+- **Room segmentation upstream of merge** — thick walls cause adjacent rooms to merge at the contour-detection level. The adaptive closing kernel helps marginally but doesn't fix the fundamental issue. Both bedrooms in Apt 6C are still merged into one large room. Unit 2C detects only 5 rooms for a 9-room apartment. Potential approaches: watershed segmentation, skeleton-based room splitting, or using structural element data to identify merge boundaries.
+- **Scale calibration still falls back on some images** — Res 507 has clear dimension labels ("10'- 6\" x 8'- 10\"") that parse correctly, but OCR may fragment compound text or the wall detector doesn't find walls close enough to match. Debug logging now in place — enable `DEBUG` level on the CV service to trace dimension→wall matching.
+- **Many rooms get generic "Room N" labels** — Now that the fallback is suppressed, rooms without valid OCR text inside them get generic labels. This is correct behavior (better than noise labels) but means the agent must interpret the image to assign proper room names. Shore Dr: 10 of 13 rooms are "Room N". This is an OCR/text-assignment quality issue, not a labeling bug.
+
+**Latest CV test results (2026-03-22, 235 tests passing, deployed):**
+
+| Image | Rooms | Scale | Labels | Issues |
+|-------|-------|-------|--------|--------|
+| Unit 2C (520 W 23rd) | 5 | measured (0.46) | Room 1-5, no noise | Only 5 rooms for 9-room apt (heavy merging) |
+| Shore Dr (9511) | 13 | measured (0.62) | Bedroom, wic; 10 generic "Room N" | COMPASS gone; many unlabeled rooms |
+| Apt 6C (520 W 23rd) | 6 | measured (2.63) | FOYER, CL, BATH; 3 generic | Both bedrooms still merged |
+| Res 507 (547 W 47th) | 8 | fallback (0.85) | Bedroom, Foyer, Bed; 5 generic | Scale still fallback; ye/Net gone |
 
 ### Quality: Sketch generation from CV data
 
