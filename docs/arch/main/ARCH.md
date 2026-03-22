@@ -88,7 +88,7 @@ npm run db:migrate             # Apply schema locally
 npm run db:migrate:remote      # Apply schema to production D1
 
 # CV service (Hetzner)
-cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (172 tests)
+cd cv-service && .venv/bin/python -m pytest -v  # Run CV pipeline tests (227 tests)
 cd cv-service && docker compose up --build   # Run locally
 bash cv-service/deploy-hetzner.sh <server-ip> [ssh-key]  # Deploy to Hetzner
 ```
@@ -183,7 +183,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── __init__.py
 │   ├── pipeline.py             # Orchestrator — multi-strategy merge, EXCLUDED_STRATEGIES, sweep
 │   ├── strategies.py           # 28 preprocessing strategies (STRATEGIES registry, StrategyResult)
-│   ├── merge.py                # Composable merge pipeline — step registry, structural detection (distance transform), polygon refinement
+│   ├── merge.py                # Composable merge pipeline — step registry, structural detection (distance transform), polygon refinement, wall thickness capping (cap_wall_thickness_cm), dilation capping (_safe_dilation)
 │   ├── enhance.py              # Image enhancement (CLAHE + bilateral filter + unsharp mask)
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
 │   ├── walls.py                # Wall line detection via morphological extraction
@@ -192,12 +192,12 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── topology.py             # Room adjacency via mask dilation overlap
 │   ├── ocr.py                  # Tesseract OCR + merge_nearby_text() for split dimension reassembly
 │   ├── dimensions.py           # Parse metric/imperial/compound dimensions to cm
-│   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon)
+│   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon), label filtering (_is_room_label, _DIM_LIKE, _FIXTURE_ABBREVS, _LOGO_WORDS), ghost room filtering
 ├── tests/
 │   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped, low-contrast)
 │   ├── test_app.py             # FastAPI endpoint tests
 │   ├── test_enhance.py         # Enhancement algorithm + pick_winner tests (10 tests)
-│   ├── test_merge.py           # Room clustering, bbox IoU, assemble_rooms, merge pipeline tests (42 tests)
+│   ├── test_merge.py           # Room clustering, bbox IoU, assemble_rooms, merge pipeline, wall thickness capping, dilation capping tests
 │   ├── test_strategies.py      # Strategy output format/shape tests
 │   ├── test_sweep.py           # Sweep endpoint + single-strategy pipeline tests
 │   ├── test_pipeline.py        # Pipeline integration tests (incl. multi-strategy merge, confidence)
@@ -396,8 +396,8 @@ analyze_image(image)
   │   │   └── Confidence: 5+ strategies=0.9, 3-4=0.7, 2=0.5, 1=0.3
   │   ├── bbox_filter_post — safety net re-check of clustered room centroids
   │   ├── structural_detect — distance-transform wall thickness profiling, column/thick-wall/perimeter classification
-  │   └── polygon_refine — dilate thick wall regions, re-trace room contours, split merged rooms
-  │                        analysis. Diagnostic metadata only, does NOT filter rooms.
+  │   └── polygon_refine — dilate thick wall regions (capped at 8px via _safe_dilation),
+  │                        re-trace room contours, split merged rooms
   │   MergeContext carries shared state: strategy bboxes, consensus bbox, anchor, columns
   │   MergeStepResult reports rooms kept, removed, per-step diagnostics
   │   Steps excludable via EXCLUDED_MERGE_STEPS for debugging/testing
@@ -414,7 +414,11 @@ _run_pipeline(image, binary_override?, rooms_override?)
   ├── _calibrate_scale(walls, text_regions) → cm-per-pixel scale factor
   ├── detect_openings(binary, closed, rooms, walls, scale)
   ├── detect_adjacency(rooms, binary)
-  └── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
+  ├── build_floor_plan_input(rooms, text, scale, openings, adjacency) → JSON
+  │   ├── _assign_labels() — mask containment + nearest centroid, picks best single label
+  │   ├── Ghost room filter — removes negative coords, <0.5% image area, centroid outside bbox
+  │   └── _is_room_label() — rejects dimensions (_DIM_LIKE), fixture abbrevs, logos, all-caps non-room
+  └── cap_wall_thickness_cm() on output: interior 5-20cm, exterior 10-40cm
 ```
 
 **Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 3 real rooms (earlier baseline of 5 included 2 margin artifacts that `bbox_filter_pre` now correctly removes).
@@ -687,7 +691,7 @@ pipelineToSketchInput(output: PipelineOutput) → SimpleFloorPlanInput  // legac
 | Plan 3 | 8 | 21/22 | 2 rooms |
 | New plan | 5 | 21/22 | 2 rooms |
 
-**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `structural_detect` replaces old `column_detect` — uses distance transform to profile wall thickness, classifying elements as columns, thick walls, or perimeter. `polygon_refine` dilates thick wall regions and re-traces contours, splitting rooms that were merged by thick structural junctions. Wall thickness data (`thin_cm`, `thick_cm`, structural elements) is included in the API response. **Remaining opportunities:** Using structural element data for perimeter anchoring and grid overlay, and wall-vs-furniture classification.
+**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `structural_detect` replaces old `column_detect` — uses distance transform to profile wall thickness, classifying elements as columns, thick walls, or perimeter. `polygon_refine` dilates thick wall regions (capped at 8px via `_safe_dilation()` to avoid swallowing small rooms) and re-traces contours, splitting rooms that were merged by thick structural junctions. Wall thickness data (`thin_cm`, `thick_cm`, structural elements) is included in the API response, capped at realistic residential bounds via `cap_wall_thickness_cm()` (interior 5-20cm, exterior 10-40cm). **Remaining opportunities:** Using structural element data for perimeter anchoring and grid overlay, and wall-vs-furniture classification.
 
 ### Quality: CV room detection still imperfect
 
@@ -695,6 +699,16 @@ Multi-strategy merge improved room counts but quality issues remain:
 - **~~OCR label concatenation~~** — FIXED (2026-03-21). `output.py` now picks the single best label per room (prefers known room words, breaks ties by centroid proximity) instead of concatenating all matches.
 - **~~Logo/text regions detected as rooms~~** — MITIGATED (2026-03-21). `bbox_filter_pre` merge step computes consensus floor plan bbox (median of per-strategy bboxes) and removes rooms with centroids outside it, eliminating false rooms from logos, headers, and dimension text. `bbox_filter_post` re-checks after clustering as a safety net. **Validated (2026-03-21):** On 520 W 23rd, bbox_filter_pre correctly removes 44 margin artifacts (two clusters of ~22 rooms each at left/right margins, area ~590K px each — these are blank areas flanking the floor plan that every strategy detects as giant contours). The previous baseline of 5 rooms was wrong — 2 were margin artifacts. Correct baseline is 3 rooms. 547 W 47th: 0 rooms removed (all inside bbox), 8 rooms preserved.
 - **~~Large merged rooms~~** — FIXED (2026-03-21). `merge.py` now excludes rooms exceeding 50% of image area from clustering.
+- **~~Dimension text as room labels~~** — FIXED (2026-03-22). `_DIM_LIKE` regex expanded to catch OCR-garbled imperial dimensions (degree symbols, dashes, spaces). `_FIXTURE_ABBREVS` blocklist rejects "DW", "Ref", "W/D", "LC", "P". `_LOGO_WORDS` blocklist rejects "COMPASS", "Hanna", brokerage names. `_is_room_label()` now rejects all-caps non-room words. Added "WIC" and "CL" to `_ROOM_WORDS` (walk-in closet, closet).
+- **~~Ghost rooms at negative coordinates~~** — FIXED (2026-03-22). `build_floor_plan_input()` now filters rooms with negative coordinates, area < 0.5% of image, or centroids outside floor plan bbox.
+- **~~Excessive polygon dilation~~** — FIXED (2026-03-22). `_safe_dilation()` caps polygon refinement dilation at 8px max, preventing thick wall measurements from swallowing small rooms.
+- **~~Unrealistic wall thickness in output~~** — FIXED (2026-03-22). `cap_wall_thickness_cm()` clamps interior walls to 5-20cm, exterior to 10-40cm.
+- **~~Scale calibration orientation mismatch~~** — FIXED (2026-03-22). `_calibrate_scale()` now allows orientation-mismatched dimension-to-wall matching with 2x distance penalty. Max matching distance increased from 15% to 20% of image diagonal.
+
+**Remaining quality issues (2026-03-22):**
+- **Label fallback leaks noise** — `_assign_labels()` falls back to unfiltered candidates when all labels for a detected room are rejected by `_is_room_label()`. This is how "COMPASS" and "9511 Shore Drive" still appear: the CV detects those regions as rooms, and the only text inside them is the logo/address text, so it's used as the label despite failing the filter. Fix: either suppress the fallback entirely (rooms get "Room N" generic labels) or add a post-label filter that removes rooms whose only label was rejected.
+- **Room segmentation upstream of merge** — thick walls cause adjacent rooms to merge at the contour-detection level. The dilation cap helps but the root issue is in `detect_rooms()` contour extraction. Both bedrooms in Apt 6C are still merged into one large room.
+- **Scale calibration still falls back on some images** — Res 507 has clear dimension labels ("10'- 6\" x 8'- 10\"") that parse correctly, but OCR may fragment compound text or the wall detector doesn't find walls close enough to match.
 
 ### Quality: Sketch generation from CV data
 
