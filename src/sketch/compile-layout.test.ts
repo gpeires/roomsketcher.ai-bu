@@ -335,7 +335,7 @@ describe('compileLayout', () => {
       const svg = floorPlanToSvg(plan);
       expect(svg).toContain('<svg');
       expect(svg).toContain('</svg>');
-      expect(svg).toContain('id="rooms"');
+      expect(svg).toContain('id="structure"');
       expect(svg).toContain('id="walls"');
     });
   });
