@@ -11,8 +11,8 @@ type RectRoom = z.infer<typeof SimpleRectRoomSchema>;
 function isRectRoom(room: SimpleRoomInput): room is RectRoom {
   return 'x' in room && 'width' in room;
 }
-import { ROOM_COLORS, WALL_THICKNESS, DEFAULT_HEIGHT } from './defaults';
-import { shoelaceArea, boundingBox, wallLength } from './geometry';
+import { ROOM_COLORS, WALL_THICKNESS, DEFAULT_HEIGHT, ENVELOPE_GAP_THRESHOLD } from './defaults';
+import { shoelaceArea, boundingBox, wallLength, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon } from './geometry';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -489,14 +489,94 @@ function convertFurniture(
   });
 }
 
+// ─── Envelope computation ────────────────────────────────────────────────────
+
+function dilateGrid(grid: boolean[][], rows: number, cols: number): boolean[][] {
+  const result = grid.map(row => [...row]);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (grid[r][c]) continue;
+      if ((r > 0 && grid[r - 1][c]) || (r < rows - 1 && grid[r + 1][c]) ||
+          (c > 0 && grid[r][c - 1]) || (c < cols - 1 && grid[r][c + 1])) {
+        result[r][c] = true;
+      }
+    }
+  }
+  return result;
+}
+
+function erodeGrid(grid: boolean[][], rows: number, cols: number): boolean[][] {
+  const result = grid.map(row => [...row]);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!grid[r][c]) continue;
+      if (r === 0 || !grid[r - 1][c] || r === rows - 1 || !grid[r + 1][c] ||
+          c === 0 || !grid[r][c - 1] || c === cols - 1 || !grid[r][c + 1]) {
+        result[r][c] = false;
+      }
+    }
+  }
+  return result;
+}
+
+function computeEnvelope(
+  rooms: Room[],
+  exteriorThickness: number,
+  gridSize: number = SNAP_GRID,
+): Point[] | undefined {
+  if (rooms.length === 0) return undefined;
+
+  const polygons = rooms.map(r => r.polygon);
+
+  // 1. Rasterize all room polygons onto a grid
+  const { grid, originX, originY, cols, rows } = rasterizeToGrid(polygons, gridSize);
+
+  // 2. Bridge small gaps via morphological close
+  //    Pad the grid so dilate/erode don't lose shape at boundaries
+  const dilateSteps = Math.ceil(ENVELOPE_GAP_THRESHOLD / gridSize / 2);
+  const pad = dilateSteps;
+  const paddedRows = rows + pad * 2;
+  const paddedCols = cols + pad * 2;
+  let closed: boolean[][] = Array.from({ length: paddedRows }, (_, r) =>
+    Array.from({ length: paddedCols }, (_, c) => {
+      const origR = r - pad;
+      const origC = c - pad;
+      return origR >= 0 && origR < rows && origC >= 0 && origC < cols && grid[origR][origC];
+    })
+  );
+  for (let step = 0; step < dilateSteps; step++) {
+    closed = dilateGrid(closed, paddedRows, paddedCols);
+  }
+  for (let step = 0; step < dilateSteps; step++) {
+    closed = erodeGrid(closed, paddedRows, paddedCols);
+  }
+  // Remove padding
+  const unpadded = closed.slice(pad, pad + rows).map(row => row.slice(pad, pad + cols));
+
+  // 3. Trace the outer boundary contour
+  const contour = traceContour(unpadded, gridSize, originX, originY);
+  if (contour.length < 3) return undefined;
+
+  // 4. Offset outward by exterior wall thickness
+  return offsetAxisAlignedPolygon(contour, exteriorThickness / 2);
+}
+
 // ─── Main compiler ──────────────────────────────────────────────────────────
 
 export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
+  // 0. Snap polygon vertices to grid
+  const snappedRooms = input.rooms.map(r => {
+    if ('polygon' in r && r.polygon) {
+      return { ...r, polygon: r.polygon.map(p => ({ x: snap(p.x), y: snap(p.y) })) };
+    }
+    return r;
+  });
+
   // 1. Snap & normalize rooms
-  const rects = input.rooms.map(r => roomToRect(r));
+  const rects = snappedRooms.map(r => roomToRect(r));
   // Use polygon edges for polygon rooms, bounding box edges for rect rooms
   const allEdges = rects.map((r, i) => {
-    const roomInput = input.rooms[i];
+    const roomInput = snappedRooms[i];
     if ('polygon' in roomInput && roomInput.polygon && roomInput.polygon.length > 4) {
       const polyEdges = getPolygonEdges(roomInput.polygon, r, i);
       // Fall back to rect edges if polygon didn't produce enough axis-aligned edges
@@ -513,16 +593,20 @@ export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
   const walls = generateWalls(rects, sharedEdges, allEdges, input.wallThickness);
 
   // 4. Generate room polygons
-  const rooms = rects.map((rect, i) => generateRoom(rect, input.rooms[i]));
+  const rooms = rects.map((rect, i) => generateRoom(rect, snappedRooms[i]));
 
-  // 5. Place openings
+  // 5. Compute building envelope
+  const exteriorThickness = input.wallThickness?.exterior ?? WALL_THICKNESS.exterior;
+  const envelope = computeEnvelope(rooms, exteriorThickness);
+
+  // 6. Place openings
   placeOpenings(walls, input.openings, rects, sharedEdges, rectByLabel);
 
-  // 6. Convert furniture
+  // 7. Convert furniture
   const furniture = convertFurniture(input.furniture, rects, rectByLabel);
 
-  // 7. Compute canvas from bounding box
-  const bb = boundingBox(walls);
+  // 8. Compute canvas from bounding box
+  const bb = boundingBox(walls, envelope);
   const pad = 100;
 
   return {
@@ -537,6 +621,7 @@ export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
     },
     walls,
     rooms,
+    envelope,
     furniture,
     annotations: [],
     metadata: {

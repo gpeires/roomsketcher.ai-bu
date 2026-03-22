@@ -64,10 +64,10 @@ export function wallQuad(wall: Wall): [Point, Point, Point, Point] {
 /**
  * Bounding box of all wall endpoints, expanded by wall thickness.
  */
-export function boundingBox(walls: Wall[]): {
+export function boundingBox(walls: Wall[], envelope?: Point[]): {
   minX: number; minY: number; maxX: number; maxY: number;
 } {
-  if (walls.length === 0) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  if (walls.length === 0 && !envelope) return { minX: 0, minY: 0, maxX: 0, maxY: 0 };
 
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const wall of walls) {
@@ -78,10 +78,21 @@ export function boundingBox(walls: Wall[]): {
       if (p.y > maxY) maxY = p.y;
     }
   }
+
+  // Also include envelope points if provided
+  if (envelope) {
+    for (const p of envelope) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+  }
+
   // Expand by max exterior wall thickness to account for wall quads extending beyond centerline
   const exteriorThicknesses = walls.filter(w => w.type === 'exterior').map(w => w.thickness);
   const maxThickness = exteriorThicknesses.length > 0 ? Math.max(...exteriorThicknesses) : 0;
-  const expand = maxThickness / 2;
+  const expand = envelope ? 0 : maxThickness / 2; // Envelope already includes wall thickness
   return { minX: minX - expand, minY: minY - expand, maxX: maxX + expand, maxY: maxY + expand };
 }
 
@@ -252,6 +263,7 @@ export function offsetAxisAlignedPolygon(polygon: Point[], distance: number): Po
   if (n < 3) return [...polygon];
 
   // Compute outward normal for each edge
+  // Formula (dy/len, -dx/len) = 90° CW rotation — correct for CW winding in screen coords (Y down)
   const normals: Point[] = [];
   for (let i = 0; i < n; i++) {
     const a = polygon[i];
@@ -260,7 +272,6 @@ export function offsetAxisAlignedPolygon(polygon: Point[], distance: number): Po
     const dy = b.y - a.y;
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len === 0) { normals.push({ x: 0, y: 0 }); continue; }
-    // Outward normal (for CCW winding): rotate edge direction 90° clockwise
     normals.push({ x: dy / len, y: -dx / len });
   }
 
