@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad } from './geometry';
+import {
+  shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad,
+  polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon,
+} from './geometry';
 import type { Point, Wall } from './types';
 
 describe('shoelaceArea', () => {
@@ -133,4 +136,118 @@ describe('pointInPolygon', () => {
     expect(pointInPolygon({ x: 150, y: 100 }, tri)).toBe(true)
     expect(pointInPolygon({ x: 0, y: 300 }, tri)).toBe(false)
   })
+})
+
+describe('polygonBoundingBox', () => {
+  it('computes bounding box of a simple rectangle polygon', () => {
+    const polygon = [
+      { x: 100, y: 50 },
+      { x: 400, y: 50 },
+      { x: 400, y: 300 },
+      { x: 100, y: 300 },
+    ];
+    expect(polygonBoundingBox(polygon)).toEqual({
+      minX: 100, minY: 50, maxX: 400, maxY: 300,
+    });
+  });
+
+  it('computes bounding box of an L-shaped polygon', () => {
+    const polygon = [
+      { x: 0, y: 0 }, { x: 300, y: 0 },
+      { x: 300, y: 200 }, { x: 500, y: 200 },
+      { x: 500, y: 400 }, { x: 0, y: 400 },
+    ];
+    expect(polygonBoundingBox(polygon)).toEqual({
+      minX: 0, minY: 0, maxX: 500, maxY: 400,
+    });
+  });
+});
+
+describe('rasterizeToGrid', () => {
+  it('rasterizes a single rectangle to a grid', () => {
+    const polygon = [
+      { x: 0, y: 0 }, { x: 30, y: 0 },
+      { x: 30, y: 20 }, { x: 0, y: 20 },
+    ];
+    const { grid, originX, originY } = rasterizeToGrid([polygon], 10);
+    expect(grid.length).toBe(2);
+    expect(grid[0].length).toBe(3);
+    expect(grid[0][0]).toBe(true);
+    expect(grid[1][2]).toBe(true);
+  });
+
+  it('rasterizes two non-overlapping rectangles', () => {
+    const poly1 = [
+      { x: 0, y: 0 }, { x: 20, y: 0 },
+      { x: 20, y: 20 }, { x: 0, y: 20 },
+    ];
+    const poly2 = [
+      { x: 40, y: 0 }, { x: 60, y: 0 },
+      { x: 60, y: 20 }, { x: 40, y: 20 },
+    ];
+    const { grid } = rasterizeToGrid([poly1, poly2], 10);
+    expect(grid[0][0]).toBe(true);
+    expect(grid[0][1]).toBe(true);
+    expect(grid[0][2]).toBe(false);
+    expect(grid[0][3]).toBe(false);
+    expect(grid[0][4]).toBe(true);
+    expect(grid[0][5]).toBe(true);
+  });
+});
+
+describe('traceContour', () => {
+  it('traces a single filled rectangle', () => {
+    const grid = [
+      [true, true, true],
+      [true, true, true],
+    ];
+    const contour = traceContour(grid, 10, 0, 0);
+    expect(contour.length).toBeGreaterThanOrEqual(4);
+    const xs = contour.map(p => p.x);
+    const ys = contour.map(p => p.y);
+    expect(Math.min(...xs)).toBe(0);
+    expect(Math.max(...xs)).toBe(30);
+    expect(Math.min(...ys)).toBe(0);
+    expect(Math.max(...ys)).toBe(20);
+  });
+
+  it('traces an L-shaped region', () => {
+    const grid = [
+      [true, true, true],
+      [true, false, false],
+      [true, false, false],
+    ];
+    const contour = traceContour(grid, 10, 0, 0);
+    expect(contour.length).toBe(6);
+  });
+});
+
+describe('offsetAxisAlignedPolygon', () => {
+  it('expands a rectangle outward by 10cm', () => {
+    const rect = [
+      { x: 100, y: 100 }, { x: 400, y: 100 },
+      { x: 400, y: 300 }, { x: 100, y: 300 },
+    ];
+    const expanded = offsetAxisAlignedPolygon(rect, 10);
+    const bb = polygonBoundingBox(expanded);
+    expect(bb.minX).toBe(90);
+    expect(bb.minY).toBe(90);
+    expect(bb.maxX).toBe(410);
+    expect(bb.maxY).toBe(310);
+  });
+
+  it('handles L-shaped polygon with concave corner', () => {
+    const L = [
+      { x: 0, y: 0 }, { x: 200, y: 0 },
+      { x: 200, y: 200 }, { x: 400, y: 200 },
+      { x: 400, y: 400 }, { x: 0, y: 400 },
+    ];
+    const expanded = offsetAxisAlignedPolygon(L, 10);
+    expect(expanded.length).toBeGreaterThanOrEqual(6);
+    const bb = polygonBoundingBox(expanded);
+    expect(bb.minX).toBe(-10);
+    expect(bb.minY).toBe(-10);
+    expect(bb.maxX).toBe(410);
+    expect(bb.maxY).toBe(410);
+  });
 })

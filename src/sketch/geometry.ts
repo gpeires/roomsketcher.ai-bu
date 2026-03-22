@@ -96,6 +96,212 @@ export function totalArea(rooms: Room[]): number {
  * Ray-casting point-in-polygon test.
  * Returns true if point is inside the polygon (edge behavior is undefined).
  */
+// ─── Envelope geometry functions ────────────────────────────────────────────
+
+export function polygonBoundingBox(polygon: Point[]): {
+  minX: number; minY: number; maxX: number; maxY: number;
+} {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of polygon) {
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+export interface GridResult {
+  grid: boolean[][];
+  originX: number;
+  originY: number;
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Rasterize axis-aligned polygons onto a boolean grid.
+ * Each cell is true if the cell center is inside any polygon.
+ */
+export function rasterizeToGrid(polygons: Point[][], gridSize: number): GridResult {
+  // Find global bounding box
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const poly of polygons) {
+    for (const p of poly) {
+      if (p.x < minX) minX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y > maxY) maxY = p.y;
+    }
+  }
+
+  const originX = Math.floor(minX / gridSize) * gridSize;
+  const originY = Math.floor(minY / gridSize) * gridSize;
+  const cols = Math.ceil((maxX - originX) / gridSize);
+  const rows = Math.ceil((maxY - originY) / gridSize);
+
+  const grid: boolean[][] = Array.from({ length: rows }, () =>
+    Array.from({ length: cols }, () => false)
+  );
+
+  // For each cell, test if its center is inside any polygon
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cx = originX + c * gridSize + gridSize / 2;
+      const cy = originY + r * gridSize + gridSize / 2;
+      for (const poly of polygons) {
+        if (pointInPolygon({ x: cx, y: cy }, poly)) {
+          grid[r][c] = true;
+          break;
+        }
+      }
+    }
+  }
+
+  return { grid, originX, originY, cols, rows };
+}
+
+/**
+ * Trace the outer boundary of filled cells in a boolean grid.
+ * Returns an axis-aligned polygon (vertices in order).
+ * Uses a boundary-following algorithm on the grid edges.
+ */
+export function traceContour(
+  grid: boolean[][], gridSize: number, originX: number, originY: number,
+): Point[] {
+  const rows = grid.length;
+  const cols = rows > 0 ? grid[0].length : 0;
+  if (rows === 0 || cols === 0) return [];
+
+  // Helper: is cell (r,c) filled?
+  const filled = (r: number, c: number) =>
+    r >= 0 && r < rows && c >= 0 && c < cols && grid[r][c];
+
+  // Collect all boundary edges between filled and unfilled cells.
+  // Each edge is a segment between two grid-corner points.
+  // Grid corners are at (originX + c*gridSize, originY + r*gridSize).
+  type BEdge = { x1: number; y1: number; x2: number; y2: number };
+  const edges: BEdge[] = [];
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (!grid[r][c]) continue;
+      const x = originX + c * gridSize;
+      const y = originY + r * gridSize;
+      const s = gridSize;
+      // Top edge: if cell above is not filled
+      if (!filled(r - 1, c)) edges.push({ x1: x, y1: y, x2: x + s, y2: y });
+      // Bottom edge
+      if (!filled(r + 1, c)) edges.push({ x1: x + s, y1: y + s, x2: x, y2: y + s });
+      // Left edge
+      if (!filled(r, c - 1)) edges.push({ x1: x, y1: y + s, x2: x, y2: y });
+      // Right edge
+      if (!filled(r, c + 1)) edges.push({ x1: x + s, y1: y, x2: x + s, y2: y + s });
+    }
+  }
+
+  if (edges.length === 0) return [];
+
+  // Chain edges into a polygon: each edge's end point matches the next edge's start point
+  const edgeMap = new Map<string, BEdge[]>();
+  for (const e of edges) {
+    const key = `${e.x1},${e.y1}`;
+    if (!edgeMap.has(key)) edgeMap.set(key, []);
+    edgeMap.get(key)!.push(e);
+  }
+
+  const used = new Set<number>();
+  const polygon: Point[] = [];
+  let current = edges[0];
+  used.add(0);
+  polygon.push({ x: current.x1, y: current.y1 });
+
+  for (let i = 0; i < edges.length - 1; i++) {
+    const nextKey = `${current.x2},${current.y2}`;
+    const candidates = edgeMap.get(nextKey);
+    if (!candidates) break;
+    const next = candidates.find((candidate) => {
+      const globalIdx = edges.indexOf(candidate);
+      return !used.has(globalIdx);
+    });
+    if (!next) break;
+    used.add(edges.indexOf(next));
+    // Only add point if direction changes (avoid collinear points)
+    const prev = polygon[polygon.length - 1];
+    const mid = { x: current.x2, y: current.y2 };
+    const nxt = { x: next.x2, y: next.y2 };
+    const sameLine = (prev.x === mid.x && mid.x === nxt.x) ||
+                     (prev.y === mid.y && mid.y === nxt.y);
+    if (!sameLine) {
+      polygon.push(mid);
+    }
+    current = next;
+  }
+
+  return polygon;
+}
+
+/**
+ * Offset an axis-aligned polygon outward by `distance`.
+ * Each edge shifts outward along its normal. At convex corners edges meet naturally.
+ * At concave corners (inward notch), an extra vertex is inserted.
+ * Polygon must be wound counter-clockwise (standard SVG winding).
+ */
+export function offsetAxisAlignedPolygon(polygon: Point[], distance: number): Point[] {
+  const n = polygon.length;
+  if (n < 3) return [...polygon];
+
+  // Compute outward normal for each edge
+  const normals: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % n];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len === 0) { normals.push({ x: 0, y: 0 }); continue; }
+    // Outward normal (for CCW winding): rotate edge direction 90° clockwise
+    normals.push({ x: dy / len, y: -dx / len });
+  }
+
+  // Offset each edge and find intersections at corners
+  const result: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const prevIdx = (i - 1 + n) % n;
+    const prevNormal = normals[prevIdx];
+    const currNormal = normals[i];
+
+    const p = polygon[i];
+
+    // For axis-aligned polygons, normals are either (0,1), (0,-1), (1,0), (-1,0)
+    // Cross product determines convex vs concave
+    const cross = prevNormal.x * currNormal.y - prevNormal.y * currNormal.x;
+
+    if (Math.abs(cross) < 0.001) {
+      // Collinear edges — just offset
+      result.push({ x: p.x + currNormal.x * distance, y: p.y + currNormal.y * distance });
+    } else if (cross > 0) {
+      // Convex corner — single offset point at intersection
+      result.push({
+        x: p.x + (prevNormal.x + currNormal.x) * distance,
+        y: p.y + (prevNormal.y + currNormal.y) * distance,
+      });
+    } else {
+      // Concave corner — insert two points (one per edge) to avoid self-intersection
+      result.push({
+        x: p.x + prevNormal.x * distance,
+        y: p.y + prevNormal.y * distance,
+      });
+      result.push({
+        x: p.x + currNormal.x * distance,
+        y: p.y + currNormal.y * distance,
+      });
+    }
+  }
+
+  return result;
+}
+
 export function pointInPolygon(point: Point, polygon: Point[]): boolean {
   if (polygon.length < 3) return false
   let inside = false
