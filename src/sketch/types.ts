@@ -247,6 +247,10 @@ export const SimpleFloorPlanInputSchema = z.object({
   rooms: z.array(SimpleRoomInputSchema).min(1),
   openings: z.array(SimpleOpeningInputSchema).optional(),
   furniture: z.array(SimpleFurnitureInputSchema).optional(),
+  wallThickness: z.object({
+    exterior: z.number().optional(),  // cm, overrides default 20
+    interior: z.number().optional(),  // cm, overrides default 10
+  }).optional(),
 });
 export type SimpleFloorPlanInput = z.infer<typeof SimpleFloorPlanInputSchema>;
 

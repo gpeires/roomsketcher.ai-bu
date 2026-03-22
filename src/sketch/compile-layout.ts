@@ -179,12 +179,15 @@ function findSharedEdges(rects: Rect[], allEdges: Edge[][]): SharedEdge[] {
 
 function makeWall(
   start: Point, end: Point, type: 'exterior' | 'interior' | 'divider',
+  thicknessOverrides?: { exterior?: number; interior?: number },
 ): Wall {
+  const thickness = thicknessOverrides?.[type as 'exterior' | 'interior']
+    ?? WALL_THICKNESS[type] ?? 10;
   return {
     id: nanoid(),
     start,
     end,
-    thickness: WALL_THICKNESS[type] ?? 10,
+    thickness,
     height: DEFAULT_HEIGHT,
     type,
     openings: [],
@@ -211,7 +214,10 @@ function subtractSegments(
   return result;
 }
 
-function generateWalls(rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[][]): Wall[] {
+function generateWalls(
+  rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[][],
+  thicknessOverrides?: { exterior?: number; interior?: number },
+): Wall[] {
   const walls: Wall[] = [];
 
   // Interior walls from shared edges
@@ -226,7 +232,7 @@ function generateWalls(rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[
       start = { x: se.overlapStart, y: se.pos };
       end = { x: se.overlapEnd, y: se.pos };
     }
-    walls.push(makeWall(start, end, 'interior'));
+    walls.push(makeWall(start, end, 'interior', thicknessOverrides));
   }
 
   // Exterior walls: each room edge minus shared edge coverage
@@ -257,7 +263,7 @@ function generateWalls(rects: Rect[], sharedEdges: SharedEdge[], allEdges: Edge[
           start = { x: seg.start, y: edge.pos };
           end = { x: seg.end, y: edge.pos };
         }
-        walls.push(makeWall(start, end, 'exterior'));
+        walls.push(makeWall(start, end, 'exterior', thicknessOverrides));
       }
     }
   }
@@ -421,7 +427,7 @@ export function compileLayout(input: SimpleFloorPlanInput): FloorPlan {
   const sharedEdges = findSharedEdges(rects, allEdges);
 
   // 3. Generate walls
-  const walls = generateWalls(rects, sharedEdges, allEdges);
+  const walls = generateWalls(rects, sharedEdges, allEdges, input.wallThickness);
 
   // 4. Generate room polygons
   const rooms = rects.map((rect, i) => generateRoom(rect, input.rooms[i]));
