@@ -80,7 +80,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 ```bash
 # Worker (Cloudflare)
 npm run dev                    # Local dev server (wrangler dev)
-npm test                       # Run vitest tests
+npm test                       # Run vitest tests (187 tests)
 bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
 
 # DB migrations
@@ -121,10 +121,10 @@ src/
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
 │   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls)
-│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon
+│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad
 │   ├── changes.ts              # applyChanges() — immutable state machine
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
-│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer
+│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (walls as <polygon>, junctions, thickness-aware openings)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
 │   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types)
@@ -294,6 +294,30 @@ FloorPlan
 | `remove_furniture` | furniture_id |
 
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
+
+### SVG Rendering (Two Renderers)
+
+Both renderers must stay in sync — they render the same FloorPlan data.
+
+**Server-side** (`src/sketch/svg.ts`): Used by `floorPlanToSvg()` → `preview_sketch` (rasterized to PNG via resvg) and `export_sketch`. Pure string concatenation.
+
+**Browser-side** (`src/sketcher/html.ts`): Used by the interactive sketcher SPA. Vanilla JS (embedded in template string). Includes selection highlighting, drag handles, tool modes.
+
+**Wall rendering (as of 2026-03-22):**
+- Exterior/interior walls → `<polygon>` elements using `wallQuad()` (4-point quad offset perpendicular to centerline by `thickness/2`). Fill `#333`.
+- Divider walls → `<line>` elements with dashed stroke (thin visual).
+- Junction circles at shared wall endpoints fill corner gaps (`<circle>` with `r = max(thickness)/2`).
+- Openings (doors/windows/plain) use `wall.thickness + 2` for gap width, `wall.thickness / 2` for window line offset.
+
+**Element attributes:** All SVG elements have `data-id` (element ID) and `data-type` (`"wall"`, `"room"`, `"opening"`, `"furniture"`). These are required for:
+- Incremental updates via `update_sketch` (agent can target specific elements)
+- Browser sketcher selection/interaction (CSS selectors use `[data-type="wall"]`)
+- Drag handle logic (polygon walls update `points` attribute, divider lines update `x1/y1/x2/y2`)
+
+**Geometry utility** (`src/sketch/geometry.ts`):
+- `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon
+- `boundingBox(walls)` expands by `max(thickness)/2` to account for wall quads
+- Browser renderer has vanilla JS equivalent: `wallQuadPoints(w)` → returns points string directly
 
 ### WebSocket Protocol
 
@@ -729,7 +753,7 @@ Multi-strategy merge improved room counts but quality issues remain:
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Wall thickness passthrough** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`.
+- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **wall thickness is visually rendered** — `svg.ts` and `html.ts` render exterior/interior walls as filled `<polygon>` elements using `wallQuad()`, with junction circles at shared endpoints. This means CV-detected thick walls now appear visually thick in sketches.
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
 ### Preprocessing metadata now flows through
@@ -800,8 +824,16 @@ Single-file HTML page at `/upload` with:
 - Clipboard paste support
 - File picker (PNG, JPG, max 10MB)
 - Image preview
-- Copy-to-clipboard URL output
+- Copy-to-clipboard URL output with canonical `WORKER_URL` prefix
 - Hint text directing users to paste URL in Claude conversation
+
+**URL architecture (2026-03-22):**
+- Fetch uses **relative** path (`/api/upload-image`) — no CORS issues regardless of which domain serves the page
+- API returns **relative** URL: `{ url: "/api/images/{uuid}" }`
+- Upload page prepends `WORKER_URL` (from `env.WORKER_URL`, fallback `url.origin`) for display
+- This ensures the user always copies the canonical URL (e.g., `https://roomsketcher.kworq.com/api/images/...`), matching what MCP tools use
+
+**MCP image-in-chat limitation:** When users paste images directly into Claude chat, the agent can see them via vision but cannot pass the bytes to MCP tools (MCP protocol limitation). Tool descriptions for `analyze_floor_plan_image` and `generate_floor_plan` explicitly instruct the agent to direct users to `/upload` in this case.
 
 ### Image Storage
 
