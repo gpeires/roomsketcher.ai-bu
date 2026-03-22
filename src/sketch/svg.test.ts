@@ -26,15 +26,25 @@ describe('floorPlanToSvg', () => {
     expect(svg).toContain('xmlns="http://www.w3.org/2000/svg"');
   });
 
-  it('renders walls as lines', () => {
+  it('renders exterior/interior walls as filled polygons', () => {
     const svg = floorPlanToSvg(makePlan({
       walls: [
         { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
       ],
     }));
+    expect(svg).toContain('<polygon');
+    expect(svg).toContain('fill="#333"');
+    expect(svg).toContain('data-id="w1"');
+  });
+
+  it('renders divider walls as dashed lines', () => {
+    const svg = floorPlanToSvg(makePlan({
+      walls: [
+        { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 5, height: 250, type: 'divider', openings: [] },
+      ],
+    }));
     expect(svg).toContain('<line');
-    expect(svg).toContain('x1="0"');
-    expect(svg).toContain('x2="600"');
+    expect(svg).toContain('stroke-dasharray="6,4"');
   });
 
   it('renders rooms as polygons with fill', () => {
@@ -102,9 +112,10 @@ describe('floorPlanToSvg', () => {
         { id: 'w2', start: { x: 500, y: 100 }, end: { x: 500, y: 400 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
       ],
     }));
-    // Bounding box: 100,100 → 500,400. With 50cm padding: 50,50 → 550,450
-    // viewBox="50 50 500 400"
-    expect(svg).toContain('viewBox="50 50 500 400"');
+    // Bounding box: 100,100 → 500,400. Thickness 20cm → expand by 10.
+    // Expanded: 90,90 → 510,410. With 50cm padding: 40,40 → 560,460
+    // viewBox="40 40 520 420"
+    expect(svg).toContain('viewBox="40 40 520 420"');
   });
 
   it('renders furniture as architectural symbols', () => {
@@ -137,6 +148,37 @@ describe('floorPlanToSvg', () => {
     const wallsIdx = svg.indexOf('id="walls"');
     expect(furnitureIdx).toBeGreaterThan(roomsIdx);
     expect(furnitureIdx).toBeGreaterThan(wallsIdx);
+  });
+
+  it('includes data-type attributes on all element types', () => {
+    const plan = makePlan({
+      walls: [
+        {
+          id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior',
+          openings: [
+            { id: 'd1', type: 'door', offset: 100, width: 90, properties: { swingDirection: 'left' } },
+            { id: 'win1', type: 'window', offset: 300, width: 120, properties: {} },
+          ],
+        },
+      ],
+      rooms: [
+        { id: 'r1', label: 'Room', type: 'bedroom', polygon: [{ x: 0, y: 0 }, { x: 600, y: 0 }, { x: 600, y: 400 }, { x: 0, y: 400 }], color: '#E3F2FD' },
+      ],
+    });
+    plan.furniture = [
+      { id: 'f1', type: 'bed-double', position: { x: 50, y: 50 }, rotation: 0, width: 160, depth: 200, label: 'Bed' },
+    ];
+    const svg = floorPlanToSvg(plan);
+    // Walls
+    expect(svg).toContain('data-id="w1" data-type="wall"');
+    // Rooms
+    expect(svg).toContain('data-id="r1" data-type="room"');
+    // Door opening
+    expect(svg).toContain('data-id="d1" data-type="opening"');
+    // Window opening
+    expect(svg).toContain('data-id="win1" data-type="opening"');
+    // Furniture
+    expect(svg).toContain('data-id="f1" data-type="furniture"');
   });
 
   it('applies rotation transform to furniture', () => {

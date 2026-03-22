@@ -64,7 +64,7 @@ export function uploadHtml(workerUrl: string): string {
   </div>
 </div>
 <script>
-const WORKER = ${JSON.stringify(workerUrl)};
+const WORKER_URL = ${JSON.stringify(workerUrl)};
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('fileInput');
 const preview = document.getElementById('preview');
@@ -111,14 +111,14 @@ async function uploadFile(file) {
   document.getElementById('error').style.display = 'none';
   document.getElementById('result').style.display = 'none';
   try {
-    const resp = await fetch(WORKER + '/api/upload-image', {
+    const resp = await fetch('/api/upload-image', {
       method: 'POST',
       headers: { 'Content-Type': file.type },
       body: file,
     });
     if (!resp.ok) throw new Error(await resp.text());
     const data = await resp.json();
-    document.getElementById('urlField').value = data.url;
+    document.getElementById('urlField').value = WORKER_URL + data.url;
     document.getElementById('result').style.display = 'block';
   } catch (err) {
     showError(err.message);

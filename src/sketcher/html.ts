@@ -70,9 +70,10 @@ export function sketcherHtml(sketchId: string): string {
   .footer a:hover { text-decoration: underline; color: var(--rs-teal); }
 
   /* SVG interactive styles */
-  svg line[data-id] { cursor: pointer; }
-  svg line[data-id]:hover { stroke: var(--rs-teal) !important; }
-  svg line.selected { stroke: var(--rs-danger) !important; }
+  svg [data-type] { cursor: pointer; }
+  svg [data-type="wall"]:hover { stroke: var(--rs-teal) !important; }
+  svg [data-type="wall"].selected { stroke: var(--rs-danger) !important; }
+  svg [data-type="opening"]:hover { stroke: var(--rs-teal) !important; }
   .drag-handle { cursor: grab; }
   .drag-handle:active { cursor: grabbing; }
   .dimmed { opacity: 0.2; pointer-events: none; }
@@ -222,6 +223,19 @@ export function sketcherHtml(sketchId: string): string {
   const WS_URL = WS_PROTO + '//' + location.host + '/ws/' + SKETCH_ID;
 
   // --- State ---
+  // Compute wall quad points string for polygon rendering
+  function wallQuadPoints(w) {
+    var dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (len === 0) return null;
+    var nx = -dy / len * (w.thickness / 2);
+    var ny = dx / len * (w.thickness / 2);
+    return (w.start.x + nx) + ',' + (w.start.y + ny) + ' ' +
+           (w.end.x + nx) + ',' + (w.end.y + ny) + ' ' +
+           (w.end.x - nx) + ',' + (w.end.y - ny) + ' ' +
+           (w.start.x - nx) + ',' + (w.start.y - ny);
+  }
+
   var plan = null;
   var tool = 'select';          // active tool: select|wall|door|window|room|furniture
   var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|dragging_furniture|drawing_wall|panning|placing_opening|rotating_furniture
@@ -816,14 +830,40 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
-    // Walls
+    // Walls — exterior/interior as filled polygons, dividers as dashed lines
     html += '<g id="walls"' + (dimWalls ? ' class="dimmed"' : '') + '>';
     for (var wi = 0; wi < plan.walls.length; wi++) {
       var w = plan.walls[wi];
-      var sw = w.type === 'exterior' ? 4 : w.type === 'interior' ? 2 : 1;
-      var dash = w.type === 'divider' ? ' stroke-dasharray="6,4"' : '';
       var sel = (selected && selected.type === 'wall' && selected.id === w.id) ? ' class="selected"' : '';
-      html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="' + sw + '" stroke-linecap="round"' + dash + ' data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+      if (w.type === 'divider') {
+        html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+      } else {
+        var pts = wallQuadPoints(w);
+        if (pts) {
+          html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+        }
+      }
+    }
+    // Junction circles at shared wall endpoints
+    var junctions = {};
+    var jCounts = {};
+    for (var ji = 0; ji < plan.walls.length; ji++) {
+      var jw = plan.walls[ji];
+      if (jw.type === 'divider') continue;
+      var endpoints = [jw.start, jw.end];
+      for (var je = 0; je < endpoints.length; je++) {
+        var jkey = endpoints[je].x + ',' + endpoints[je].y;
+        jCounts[jkey] = (jCounts[jkey] || 0) + 1;
+        if (!junctions[jkey] || jw.thickness > junctions[jkey].t) {
+          junctions[jkey] = { x: endpoints[je].x, y: endpoints[je].y, t: jw.thickness };
+        }
+      }
+    }
+    for (var jk in junctions) {
+      if (jCounts[jk] >= 2) {
+        var jn = junctions[jk];
+        html += '<circle cx="' + jn.x + '" cy="' + jn.y + '" r="' + (jn.t / 2) + '" fill="#333"/>';
+      }
     }
     html += '</g>';
 
@@ -841,8 +881,9 @@ export function sketcherHtml(sketchId: string): string {
         var ey = oy + sin * o.width;
         var oSel = (selected && selected.type === 'opening' && selected.id === o.id);
         var oAttrs = ' data-id="' + o.id + '" data-type="opening" data-wall-id="' + w.id + '" style="cursor:pointer"';
-        // White gap (wall break)
-        html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="6"' + oAttrs + '/>';
+        // White gap (wall break) — width matches wall thickness
+        var gapW = (w.thickness || 6) + 2;
+        html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="' + gapW + '"' + oAttrs + '/>';
         if (o.type === 'door') {
           var dir = o.properties.swingDirection === 'right' ? 1 : -1;
           var r = o.width;
@@ -854,7 +895,8 @@ export function sketcherHtml(sketchId: string): string {
           var wt = (o.properties && o.properties.windowType) || 'double';
           var wColor = oSel ? '#D84200' : '#4FC3F7';
           var wStroke = oSel ? 3 : 2;
-          var nx = -sin * 4, ny = cos * 4;
+          var wOff = (w.thickness || 8) / 2;
+          var nx = -sin * wOff, ny = cos * wOff;
           // Transparent hit area
           html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="transparent" stroke-width="14"' + oAttrs + '/>';
           if (wt === 'single') {
@@ -1638,12 +1680,16 @@ export function sketcherHtml(sketchId: string): string {
     else wall.end = pt;
 
     // Direct DOM update (no full render — performance)
-    var wallEl = svg.querySelector('line[data-id="' + dragState.wallId + '"]');
+    var wallEl = svg.querySelector('[data-type="wall"][data-id="' + dragState.wallId + '"]');
     if (wallEl) {
-      wallEl.setAttribute('x1', wall.start.x);
-      wallEl.setAttribute('y1', wall.start.y);
-      wallEl.setAttribute('x2', wall.end.x);
-      wallEl.setAttribute('y2', wall.end.y);
+      if (wallEl.tagName === 'polygon') {
+        wallEl.setAttribute('points', wallQuadPoints(wall));
+      } else {
+        wallEl.setAttribute('x1', wall.start.x);
+        wallEl.setAttribute('y1', wall.start.y);
+        wallEl.setAttribute('x2', wall.end.x);
+        wallEl.setAttribute('y2', wall.end.y);
+      }
     }
 
     // Update drag handle positions
@@ -1662,12 +1708,16 @@ export function sketcherHtml(sketchId: string): string {
         if (conn.endpoint === 'start') cw.start = { x: pt.x, y: pt.y };
         else cw.end = { x: pt.x, y: pt.y };
 
-        var cwEl = svg.querySelector('line[data-id="' + conn.wallId + '"]');
+        var cwEl = svg.querySelector('[data-type="wall"][data-id="' + conn.wallId + '"]');
         if (cwEl) {
-          cwEl.setAttribute('x1', cw.start.x);
-          cwEl.setAttribute('y1', cw.start.y);
-          cwEl.setAttribute('x2', cw.end.x);
-          cwEl.setAttribute('y2', cw.end.y);
+          if (cwEl.tagName === 'polygon') {
+            cwEl.setAttribute('points', wallQuadPoints(cw));
+          } else {
+            cwEl.setAttribute('x1', cw.start.x);
+            cwEl.setAttribute('y1', cw.start.y);
+            cwEl.setAttribute('x2', cw.end.x);
+            cwEl.setAttribute('y2', cw.end.y);
+          }
         }
       }
     }

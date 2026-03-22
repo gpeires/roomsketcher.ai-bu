@@ -342,6 +342,9 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
+Step 0 — GET THE IMAGE URL:
+If the user pasted/attached a floor plan image in the chat, you can see it but CANNOT pass the bytes to tools (MCP limitation). Direct them to upload it at /upload, copy the returned URL, and paste it back. If they already provided a URL, skip this step.
+
 Step 1 — ANALYZE IMAGE:
 Call analyze_floor_plan_image with image_url (preferred) or image (base64). Just pass the URL directly — the CV service fetches it server-side. If the user uploaded an image, use the /api/images/ URL returned by the upload page. The CV service extracts room geometries, labels, and dimensions automatically. Review the returned JSON — fix any misdetected labels or dimensions before proceeding.
 
@@ -464,8 +467,14 @@ After generating, call preview_sketch to verify. Check for overlapping walls, mi
         description: `Analyze a floor plan image using computer vision to extract room geometries. Returns structured JSON with room positions, dimensions, and labels that can be passed to generate_floor_plan. Use this BEFORE generate_floor_plan when the user provides a floor plan image to copy.
 
 Requires image_url — a URL to the floor plan image. The CV service fetches it server-side.
-If the user has a local image file, direct them to upload it at the /upload page first, then use the returned URL.
-Do NOT attempt to pass large images as base64 — use the upload page to get a URL instead.`,
+
+IMPORTANT: If the user has shared or pasted a floor plan image directly in the chat, you can SEE it but CANNOT pass the image bytes to this tool (MCP protocol limitation). You must ask the user to upload it first:
+1. Provide them with the upload page link: /upload
+2. Ask them to drop or paste their image there
+3. They will get a URL — ask them to copy and paste it back in the chat
+4. Then call this tool with that URL as image_url
+
+Do NOT attempt to pass large images as base64 — always use the upload page to get a URL instead.`,
         inputSchema: {
           image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG) — only for small images; prefer image_url via /upload'),
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
@@ -805,9 +814,9 @@ export default {
       return new Response(setupHtml(`${workerUrl}/mcp`), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
-    // Upload page — use actual origin so fetch stays same-origin
+    // Upload page — fetch is relative (same-origin), display URL uses canonical WORKER_URL
     if (url.pathname === '/upload') {
-      return new Response(uploadHtml(url.origin), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+      return new Response(uploadHtml(env.WORKER_URL || url.origin), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
     }
 
     // Upload image API — stores temporarily for CV analysis
@@ -839,7 +848,7 @@ export default {
       await env.DB.prepare(
         'INSERT INTO uploaded_images (id, data, content_type, created_at) VALUES (?, ?, ?, ?)'
       ).bind(id, base64, contentType, new Date().toISOString()).run();
-      const imageUrl = `${url.origin}/api/images/${id}`;
+      const imageUrl = `/api/images/${id}`;
       return Response.json({ url: imageUrl, id }, { headers: corsHeaders });
     }
 

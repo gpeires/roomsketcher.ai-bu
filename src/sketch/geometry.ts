@@ -41,7 +41,28 @@ export function centroid(polygon: Point[]): Point {
 }
 
 /**
- * Bounding box of all wall endpoints.
+ * Compute the 4-corner polygon for a wall based on its centerline and thickness.
+ * Returns [startLeft, endLeft, endRight, startRight] offset perpendicular to the wall.
+ */
+export function wallQuad(wall: Wall): [Point, Point, Point, Point] {
+  const dx = wall.end.x - wall.start.x;
+  const dy = wall.end.y - wall.start.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len === 0) {
+    return [wall.start, wall.start, wall.end, wall.end];
+  }
+  const nx = -dy / len * (wall.thickness / 2);
+  const ny = dx / len * (wall.thickness / 2);
+  return [
+    { x: wall.start.x + nx, y: wall.start.y + ny },
+    { x: wall.end.x + nx, y: wall.end.y + ny },
+    { x: wall.end.x - nx, y: wall.end.y - ny },
+    { x: wall.start.x - nx, y: wall.start.y - ny },
+  ];
+}
+
+/**
+ * Bounding box of all wall endpoints, expanded by wall thickness.
  */
 export function boundingBox(walls: Wall[]): {
   minX: number; minY: number; maxX: number; maxY: number;
@@ -57,7 +78,10 @@ export function boundingBox(walls: Wall[]): {
       if (p.y > maxY) maxY = p.y;
     }
   }
-  return { minX, minY, maxX, maxY };
+  // Expand by max wall thickness to account for wall quads extending beyond centerline
+  const maxThickness = Math.max(...walls.map(w => w.thickness), 0);
+  const expand = maxThickness / 2;
+  return { minX: minX - expand, minY: minY - expand, maxX: maxX + expand, maxY: maxY + expand };
 }
 
 /**

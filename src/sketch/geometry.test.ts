@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { shoelaceArea, centroid, boundingBox, pointInPolygon } from './geometry';
+import { shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad } from './geometry';
 import type { Point, Wall } from './types';
 
 describe('shoelaceArea', () => {
@@ -65,12 +65,42 @@ describe('boundingBox', () => {
       { id: 'w2', start: { x: 500, y: 50 }, end: { x: 500, y: 400 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
     ];
     const bb = boundingBox(walls);
-    expect(bb).toEqual({ minX: 100, minY: 50, maxX: 500, maxY: 400 });
+    // Expanded by max thickness/2 = 10
+    expect(bb).toEqual({ minX: 90, minY: 40, maxX: 510, maxY: 410 });
   });
 
   it('returns zero box for empty walls', () => {
     const bb = boundingBox([]);
     expect(bb).toEqual({ minX: 0, minY: 0, maxX: 0, maxY: 0 });
+  });
+});
+
+describe('wallQuad', () => {
+  it('computes quad for horizontal wall', () => {
+    const wall: Wall = { id: 'w', start: { x: 0, y: 100 }, end: { x: 400, y: 100 }, thickness: 20, height: 250, type: 'exterior', openings: [] };
+    const quad = wallQuad(wall);
+    // Horizontal wall: perpendicular offset is vertical (±10)
+    expect(quad[0]).toEqual({ x: 0, y: 110 });
+    expect(quad[1]).toEqual({ x: 400, y: 110 });
+    expect(quad[2]).toEqual({ x: 400, y: 90 });
+    expect(quad[3]).toEqual({ x: 0, y: 90 });
+  });
+
+  it('computes quad for vertical wall', () => {
+    const wall: Wall = { id: 'w', start: { x: 200, y: 0 }, end: { x: 200, y: 300 }, thickness: 10, height: 250, type: 'interior', openings: [] };
+    const quad = wallQuad(wall);
+    // Vertical wall: perpendicular offset is horizontal (±5)
+    expect(quad[0]).toEqual({ x: 195, y: 0 });
+    expect(quad[1]).toEqual({ x: 195, y: 300 });
+    expect(quad[2]).toEqual({ x: 205, y: 300 });
+    expect(quad[3]).toEqual({ x: 205, y: 0 });
+  });
+
+  it('handles zero-length wall', () => {
+    const wall: Wall = { id: 'w', start: { x: 50, y: 50 }, end: { x: 50, y: 50 }, thickness: 20, height: 250, type: 'exterior', openings: [] };
+    const quad = wallQuad(wall);
+    // All points collapse to the same location
+    expect(quad[0]).toEqual({ x: 50, y: 50 });
   });
 });
 
