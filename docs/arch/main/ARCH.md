@@ -191,7 +191,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── __init__.py
 │   ├── pipeline.py             # Orchestrator — multi-strategy merge, EXCLUDED_STRATEGIES, sweep
 │   ├── strategies.py           # 28 preprocessing strategies (STRATEGIES registry, StrategyResult)
-│   ├── merge.py                # Composable merge pipeline — step registry, pre/post-cluster phases, column detect
+│   ├── merge.py                # Composable merge pipeline — step registry, structural detection (distance transform), polygon refinement
 │   ├── enhance.py              # Image enhancement (CLAHE + bilateral filter + unsharp mask)
 │   ├── preprocess.py           # Binary wall mask extraction (threshold + edge fallback)
 │   ├── walls.py                # Wall line detection via morphological extraction
@@ -386,7 +386,7 @@ Agent calls analyze_floor_plan_image → Worker fetches image from D1
 
 ### CV Pipeline (`cv-service/cv/pipeline.py`)
 
-The pipeline uses **multi-strategy room-level merging**: run 23 preprocessing strategies in parallel, detect rooms per strategy, run the composable merge pipeline (bbox filtering, clustering, column detection), then run the full pipeline once on an anchor strategy's binary mask.
+The pipeline uses **multi-strategy room-level merging**: run 23 preprocessing strategies in parallel, detect rooms per strategy, run the composable merge pipeline (bbox filtering, clustering, structural detection via distance transform, polygon refinement at thick walls), then run the full pipeline once on an anchor strategy's binary mask. Wall thickness data (`wall_thickness`) is included in the API response.
 
 ```
 analyze_image(image)
@@ -403,7 +403,8 @@ analyze_image(image)
   │   │   ├── Greedy clustering: IoU >= 0.3 or centroid distance < 15% diagonal
   │   │   └── Confidence: 5+ strategies=0.9, 3-4=0.7, 2=0.5, 1=0.3
   │   ├── bbox_filter_post — safety net re-check of clustered room centroids
-  │   └── column_detect — find small square components (structural columns), grid regularity
+  │   ├── structural_detect — distance-transform wall thickness profiling, column/thick-wall/perimeter classification
+  │   └── polygon_refine — dilate thick wall regions, re-trace room contours, split merged rooms
   │                        analysis. Diagnostic metadata only, does NOT filter rooms.
   │   MergeContext carries shared state: strategy bboxes, consensus bbox, anchor, columns
   │   MergeStepResult reports rooms kept, removed, per-step diagnostics
@@ -701,7 +702,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
-**Fixed by multi-strategy merge.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 23-strategy room-level merge recovers rooms from multiple preprocessing strategies. On the critical 520 W 23rd image: old pipeline found 0, multi-strategy merge finds 3 CV rooms (was 5 before bbox_filter_pre corrected 2 margin artifacts) + AI enrichment.
+**Fixed by multi-strategy merge + polygon refinement.** The old raw+enhanced pipeline found 0 rooms on complex floor plans. The new 23-strategy room-level merge recovers rooms from multiple preprocessing strategies. Polygon refinement splits rooms merged by thick walls. On 520 W 23rd: 7 rooms (up from 3). On 547 W 47th: 9 rooms. Plan 3: 9 rooms. New Plan: 7 rooms.
 
 ### Resolved: Letterboxed images caused 0 rooms in threshold strategies
 
@@ -733,7 +734,7 @@ reconcileHintBank(merged: MergedRoom[], hintBank: CVRoom[], imageSize) → Merge
 | Plan 3 | 8 | 21/22 | 2 rooms |
 | New plan | 5 | 21/22 | 2 rooms |
 
-**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `column_detect` merge step identifies structural columns as diagnostic metadata with grid regularity analysis. **Remaining opportunities:** Using column data for perimeter anchoring and structural grid overlay, and wall-vs-furniture classification based on connected component shape analysis.
+**Implemented since:** `distance_wall_fill` strategy bridges thick wall pairs via distance transform (threshold 8px). `structural_detect` replaces old `column_detect` — uses distance transform to profile wall thickness, classifying elements as columns, thick walls, or perimeter. `polygon_refine` dilates thick wall regions and re-traces contours, splitting rooms that were merged by thick structural junctions. Wall thickness data (`thin_cm`, `thick_cm`, structural elements) is included in the API response. **Remaining opportunities:** Using structural element data for perimeter anchoring and grid overlay, and wall-vs-furniture classification.
 
 ### Quality: CV room detection still imperfect
 
