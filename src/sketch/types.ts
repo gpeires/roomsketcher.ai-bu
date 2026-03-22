@@ -102,6 +102,7 @@ export const FloorPlanSchema = z.object({
   }),
   walls: z.array(WallSchema),
   rooms: z.array(RoomSchema),
+  envelope: z.array(PointSchema).optional(),
   furniture: z.array(FurnitureItemSchema),
   annotations: z.array(AnnotationSchema),
   metadata: z.object({
@@ -180,6 +181,7 @@ export const FloorPlanInputSchema = z.object({
   }).optional(),
   walls: z.array(WallInputSchema),
   rooms: z.array(RoomInputSchema),
+  envelope: z.array(PointSchema).optional(),
   furniture: z.array(FurnitureItemInputSchema),
   annotations: z.array(AnnotationSchema),
   metadata: z.object({
