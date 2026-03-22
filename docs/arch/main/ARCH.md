@@ -304,10 +304,11 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 **Browser-side** (`src/sketcher/html.ts`): Used by the interactive sketcher SPA. Vanilla JS (embedded in template string). Includes selection highlighting, drag handles, tool modes.
 
 **Wall rendering (as of 2026-03-22):**
-- Exterior/interior walls → `<polygon>` elements using `wallQuad()` (4-point quad offset perpendicular to centerline by `thickness/2`). Fill `#333`.
+- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad offset perpendicular to centerline by `thickness/2`). Fill `#333`. Visually thick, matching professional floor plans.
+- Interior walls → `<line>` elements with `stroke-width="2"`. Thin baseline lines — only exterior walls get visual thickness.
 - Divider walls → `<line>` elements with dashed stroke (thin visual).
-- Junction circles at shared wall endpoints fill corner gaps (`<circle>` with `r = max(thickness)/2`).
-- Openings (doors/windows/plain) use `wall.thickness + 2` for gap width, `wall.thickness / 2` for window line offset.
+- Junction circles at shared **exterior** wall endpoints fill corner gaps (`<circle>` with `r = max(thickness)/2`). Interior wall junctions don't get circles.
+- Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls. Window line offset = `thickness / 2` for exterior, `2` for interior.
 
 **Element attributes:** All SVG elements have `data-id` (element ID) and `data-type` (`"wall"`, `"room"`, `"opening"`, `"furniture"`). These are required for:
 - Incremental updates via `update_sketch` (agent can target specific elements)
@@ -316,7 +317,7 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Geometry utility** (`src/sketch/geometry.ts`):
 - `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon
-- `boundingBox(walls)` expands by `max(thickness)/2` to account for wall quads
+- `boundingBox(walls)` expands by max **exterior** wall thickness / 2 (interior walls are thin lines, don't expand bbox)
 - Browser renderer has vanilla JS equivalent: `wallQuadPoints(w)` → returns points string directly
 
 ### WebSocket Protocol
@@ -753,7 +754,7 @@ Multi-strategy merge improved room counts but quality issues remain:
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **wall thickness is visually rendered** — `svg.ts` and `html.ts` render exterior/interior walls as filled `<polygon>` elements using `wallQuad()`, with junction circles at shared endpoints. This means CV-detected thick walls now appear visually thick in sketches.
+- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **wall thickness rendering is relative** — only exterior walls render as thick filled `<polygon>` elements using `wallQuad()`, with junction circles at shared exterior endpoints. Interior walls render as thin `<line>` elements (`stroke-width="2"`). This matches professional floor plans where the perimeter is visually prominent and interior partitions are thin lines.
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
 ### Preprocessing metadata now flows through
@@ -843,52 +844,68 @@ Images stored as base64 text in D1 `uploaded_images` table. Served via `GET /api
 
 ## Agent Workflows
 
+### Image Handling (MCP Protocol Limitation)
+
+MCP cannot pass images from chat to tools. The agent's behavior depends on how the user provides the image:
+
+1. **User provides a URL** → Agent calls `analyze_floor_plan_image` immediately with that URL. No questions asked.
+2. **User pastes/attaches an image in chat** → Agent can SEE the image but MUST NOT eyeball the layout. Must direct user to upload at `{WORKER_URL}/upload`, then use the returned URL.
+
+**Why CV is mandatory:** The agent cannot accurately estimate room dimensions, wall coordinates, or spatial relationships by looking at an image. The CV pipeline uses edge detection, OCR, and geometric analysis to extract exact measurements in centimeters. Tool descriptions reinforce this: `analyze_floor_plan_image` says "NEVER skip this tool", `generate_floor_plan` says "MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan".
+
 ### Copy Mode (Reference Image → Floor Plan)
 
-When a user provides a floor plan image to replicate:
+Two-phase approach: get visible fast, then refine with visual feedback.
 
 ```
-Step 1 — ANALYZE IMAGE
-  analyze_floor_plan_image(image_url) → CV service extracts:
-    - rooms (rect or polygon format, coords in cm)
-    - openings (doors between rooms, windows on exterior walls)
-    - meta (scale, scale_confidence, wall_thickness, counts)
-  Auto-converted to SimpleFloorPlanInput via cvToSketchInput()
-  Agent sees: source image (inline) + converted sketch input
-  ⚠ If scale_confidence="fallback", warning shown — agent should verify sizes
+PHASE 1 — GET THE LAYOUT VISIBLE FAST:
 
-Step 2 — REVIEW & ADJUST
-  Agent compares CV output against source image visually
-  Fixes: misdetected labels, merged open-plan rooms, scale errors
-  Uses polygon rooms for L-shaped/irregular spaces
-  Rounds dimensions to nearest 10cm
+  Step 1: ANALYZE
+    analyze_floor_plan_image(image_url) → CV service extracts:
+      - rooms (rect or polygon format, coords in cm)
+      - openings (doors between rooms, windows on exterior walls)
+      - meta (scale, scale_confidence, wall_thickness, counts)
+    Auto-converted to SimpleFloorPlanInput via cvToSketchInput()
+    Agent sees: source image (inline) + converted sketch input
+    Fix obvious label errors, merge open-plan rooms. Don't perfectionist.
 
-Step 3 — REFINE OPENINGS
-  CV provides detected doors/windows — agent verifies and adjusts
-  Adds any missed openings based on source image
-  Interior: {type, between: [room1, room2]}
-  Exterior: {type, room, wall: "north"|...}
+  Step 2: GENERATE ROOMS ONLY
+    generate_floor_plan with rooms + basic exterior openings, NO furniture.
+    Get the skeleton built.
 
-Step 4 — ADD FURNITURE
-  Agent places only furniture visible in reference image
-  Positions relative to room top-left corner
+  Step 3: PREVIEW IMMEDIATELY
+    preview_sketch — agent is BLIND until it sees the rendered output.
+    Compare against source image. Check room sizes, wall positions, overlaps.
 
-Step 5 — GENERATE
-  generate_floor_plan(adjusted data) → preview_sketch → verify → fix
+PHASE 2 — REFINE BASED ON WHAT YOU SEE:
+
+  Step 4: FIX LAYOUT
+    update_sketch to fix room geometry. Preview again after fixes.
+
+  Step 5: ADD OPENINGS
+    update_sketch to add doors/windows. Preview to verify placement.
+
+  Step 6: ADD FURNITURE
+    update_sketch to add furniture visible in reference image. Preview to verify.
 ```
 
-**Architecture note (2026-03-22):** Copy Mode was simplified to bypass the AI specialist layer (4× Llama 3.2 11B Vision models + merge/validate logic). `handleAnalyzeImage` now calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction. See `project_system_audit_mar22.md` for full rationale.
+**Architecture note:** Copy Mode bypasses the AI specialist layer (4× Llama 3.2 11B Vision models removed). `handleAnalyzeImage` calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction. See `project_system_audit_mar22.md` for full rationale.
 
 ### Template Mode (Description → Floor Plan)
 
-When a user describes what they want:
+Same two-phase approach — get visible first, refine after.
 
 ```
-search_design_knowledge (per room type)
-  → list_templates → pick closest match
-  → get_template → adapt dimensions/rooms/furniture
-  → generate_floor_plan → preview_sketch (visual verification)
-  → fix issues via update_sketch → preview_sketch again if needed
+PHASE 1:
+  search_design_knowledge (per room type)
+    → list_templates → pick closest match
+    → generate_floor_plan with rooms + basic openings, NO furniture
+    → preview_sketch IMMEDIATELY
+
+PHASE 2:
+  → fix layout via update_sketch + preview
+  → add remaining openings + preview
+  → add furniture + preview
   → suggest_improvements (spatial data + design knowledge)
 ```
 
@@ -909,8 +926,9 @@ get_sketch → read current state
 `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block.
 
 Tool descriptions enforce the loop:
-- `generate_floor_plan` marks the loop as **required** — agents must not present a plan they haven't visually verified
+- `generate_floor_plan` says "CRITICAL: Do NOT skip preview_sketch after generating. You have no idea if your output is correct until you see the rasterized result."
 - `preview_sketch` describes itself as "your eyes" with a 5-point checklist (wall overlaps, furniture placement, missing openings, room sizing, label readability)
+- The two-phase workflow means the agent previews BEFORE investing in openings and furniture, catching layout errors early
 - `update_sketch` requires preview after structural changes but allows skipping for cosmetic edits
 - **Iteration budget:** If the user provided a reference image or detailed measurements, 1 preview check suffices. For vague descriptions, expect 1–2 fix rounds. Max 3 iterations total to keep wait time under ~30 seconds.
 
@@ -1174,8 +1192,8 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
 **Tools:** Select, Wall, Door, Window, Room, Furniture
-**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, room polygon propagation, furniture rotation handles
-**State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `undoStack`, `redoStack`, `interactionMode`
+**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation, furniture rotation handles
+**State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `wallDragState`, `undoStack`, `redoStack`, `interactionMode`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 
 **Client-side change handling:** The SPA implements all 13 change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
@@ -1191,6 +1209,8 @@ The sketcher uses an `interactionMode` variable to manage input state:
 | `idle` | Default | No active interaction |
 | `selecting` | mousedown on element/handle | Waiting for click vs drag threshold (3px) |
 | `dragging_endpoint` | Drag past threshold on handle | Wall endpoint drag in progress |
+| `dragging_wall` | Drag past threshold on wall body | Wall-segment translation in progress |
+| `dragging_furniture` | Drag past threshold on furniture | Furniture translation in progress |
 | `rotating_furniture` | Drag on rotation handle | Furniture rotation in progress |
 | `panning` | Drag on empty canvas | ViewBox translation |
 
@@ -1203,6 +1223,20 @@ Drag handles (teal circles, r=6 desktop / r=14 mobile) appear at wall endpoints 
 3. **Multi-snap system** — During drag, `computeSnap()` tests snap targets in priority order: endpoint (15px) > perpendicular (10px) > alignment (10px) > midpoint (10px) > grid (always). Snap guide lines render as an SVG overlay.
 4. **Direct DOM update** — During drag, only `setAttribute()` calls on wall `<line>` and handle `<circle>` elements (no full `render()`). WebSocket broadcast throttled to 10fps via `sendWsThrottled()`.
 5. **Commit on mouseup** — `commitEndpointDrag()` builds change + inverse-change arrays for the undo stack, propagates room polygons, clears snap guides, and does a full `render()`.
+
+### Wall-Segment Dragging
+
+Grabbing a wall body (not its endpoint handles) and dragging translates the entire wall segment. This is a higher-level abstraction built on top of endpoint dragging — the underlying flexibility is preserved.
+
+1. **Perpendicular constraint** — Movement is projected onto the wall's perpendicular axis. You cannot slide a wall along its length, only push it sideways. This matches intuitive behavior (making a room wider/narrower).
+2. **Grid snap** — The projected delta is snapped to 10cm increments.
+3. **Connected wall auto-follow** — Walls connected at both endpoints have their shared endpoints moved. Connected walls stretch/shrink to follow. Uses `findConnectedEndpoints()` for both start and end.
+4. **Room polygon propagation** — Vertices near either original endpoint of the dragged wall are moved by the same delta, same as endpoint dragging.
+5. **Direct DOM update** — During drag, only `setAttribute()` calls (no full render). WebSocket broadcast throttled.
+6. **Undo** — One undo step covers the main wall + all connected walls + room polygon updates.
+7. **Cursor** — Walls show `cursor: move` to indicate they're draggable.
+
+State: `wallDragState = { wallId, origStart, origEnd, grabPoint, connectedStart[], connectedEnd[], originalPositions }`.
 
 ### Room Polygon Propagation
 
