@@ -776,7 +776,17 @@ export function sketcherHtml(sketchId: string): string {
           if (p.y > maxY) maxY = p.y;
         }
       }
-      if (plan.walls.length === 0) {
+      // Include envelope points in bounding box
+      if (plan.envelope) {
+        for (var ei = 0; ei < plan.envelope.length; ei++) {
+          var ep = plan.envelope[ei];
+          if (ep.x < minX) minX = ep.x;
+          if (ep.y < minY) minY = ep.y;
+          if (ep.x > maxX) maxX = ep.x;
+          if (ep.y > maxY) maxY = ep.y;
+        }
+      }
+      if (plan.walls.length === 0 && !plan.envelope) {
         minX = 0; minY = 0; maxX = plan.canvas.width; maxY = plan.canvas.height;
       }
       var pad = 80;
@@ -818,21 +828,38 @@ export function sketcherHtml(sketchId: string): string {
     var dimOpenings = (tool === 'wall' || tool === 'room' || tool === 'furniture');
     var dimFurniture = (tool !== 'select' && tool !== 'furniture');
 
-    // Rooms
-    html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
-    for (var ri = 0; ri < plan.rooms.length; ri++) {
-      var room = plan.rooms[ri];
-      var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
-      var cx = room.polygon.reduce(function(s, p) { return s + p.x; }, 0) / room.polygon.length;
-      var cy = room.polygon.reduce(function(s, p) { return s + p.y; }, 0) / room.polygon.length;
-      var area = computeArea(room.polygon);
-      html += '<polygon points="' + pts + '" fill="' + room.color + '" fill-opacity="0.5" stroke="none" data-id="' + room.id + '" data-type="room"/>';
-      html += '<text x="' + cx + '" y="' + (cy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(room.label) + '</text>';
-      html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\\u00B2</text>';
-    }
-    html += '</g>';
+    var useEnvelope = !!(plan.envelope);
 
-    // Walls — exterior as thick polygons, interior as thin lines, dividers as dashed lines
+    // Structure layer: envelope + room cutouts (new) or legacy rooms
+    if (useEnvelope) {
+      html += '<g id="structure"' + (dimRooms ? ' class="dimmed"' : '') + '>';
+      // Envelope as filled structural mass
+      var envPts = plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      html += '<polygon points="' + envPts + '" fill="#333" stroke="none"/>';
+      // Room polygons as colored cutouts on top
+      for (var ri = 0; ri < plan.rooms.length; ri++) {
+        var room = plan.rooms[ri];
+        var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+        html += '<polygon points="' + pts + '" fill="' + room.color + '" stroke="none" data-id="' + room.id + '" data-type="room"/>';
+      }
+      html += '</g>';
+    } else {
+      // Legacy: Rooms with labels inline
+      html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
+      for (var ri = 0; ri < plan.rooms.length; ri++) {
+        var room = plan.rooms[ri];
+        var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+        var cx = room.polygon.reduce(function(s, p) { return s + p.x; }, 0) / room.polygon.length;
+        var cy = room.polygon.reduce(function(s, p) { return s + p.y; }, 0) / room.polygon.length;
+        var area = computeArea(room.polygon);
+        html += '<polygon points="' + pts + '" fill="' + room.color + '" fill-opacity="0.5" stroke="none" data-id="' + room.id + '" data-type="room"/>';
+        html += '<text x="' + cx + '" y="' + (cy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(room.label) + '</text>';
+        html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\\u00B2</text>';
+      }
+      html += '</g>';
+    }
+
+    // Walls — envelope mode: only interior/divider; legacy: all walls
     html += '<g id="walls"' + (dimWalls ? ' class="dimmed"' : '') + '>';
     for (var wi = 0; wi < plan.walls.length; wi++) {
       var w = plan.walls[wi];
@@ -840,34 +867,39 @@ export function sketcherHtml(sketchId: string): string {
       if (w.type === 'divider') {
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
       } else if (w.type === 'exterior') {
-        var pts = wallQuadPoints(w);
-        if (pts) {
-          html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+        if (!useEnvelope) {
+          var pts = wallQuadPoints(w);
+          if (pts) {
+            html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+          }
         }
+        // In envelope mode, exterior walls are data-only (not rendered as thick polygons)
       } else {
         // Interior walls as thin lines
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="2" stroke-linecap="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
       }
     }
-    // Junction circles at shared exterior wall endpoints only
-    var junctions = {};
-    var jCounts = {};
-    for (var ji = 0; ji < plan.walls.length; ji++) {
-      var jw = plan.walls[ji];
-      if (jw.type !== 'exterior') continue;
-      var endpoints = [jw.start, jw.end];
-      for (var je = 0; je < endpoints.length; je++) {
-        var jkey = endpoints[je].x + ',' + endpoints[je].y;
-        jCounts[jkey] = (jCounts[jkey] || 0) + 1;
-        if (!junctions[jkey] || jw.thickness > junctions[jkey].t) {
-          junctions[jkey] = { x: endpoints[je].x, y: endpoints[je].y, t: jw.thickness };
+    if (!useEnvelope) {
+      // Junction circles at shared exterior wall endpoints only (legacy mode)
+      var junctions = {};
+      var jCounts = {};
+      for (var ji = 0; ji < plan.walls.length; ji++) {
+        var jw = plan.walls[ji];
+        if (jw.type !== 'exterior') continue;
+        var endpoints = [jw.start, jw.end];
+        for (var je = 0; je < endpoints.length; je++) {
+          var jkey = endpoints[je].x + ',' + endpoints[je].y;
+          jCounts[jkey] = (jCounts[jkey] || 0) + 1;
+          if (!junctions[jkey] || jw.thickness > junctions[jkey].t) {
+            junctions[jkey] = { x: endpoints[je].x, y: endpoints[je].y, t: jw.thickness };
+          }
         }
       }
-    }
-    for (var jk in junctions) {
-      if (jCounts[jk] >= 2) {
-        var jn = junctions[jk];
-        html += '<circle cx="' + jn.x + '" cy="' + jn.y + '" r="' + (jn.t / 2) + '" fill="#333"/>';
+      for (var jk in junctions) {
+        if (jCounts[jk] >= 2) {
+          var jn = junctions[jk];
+          html += '<circle cx="' + jn.x + '" cy="' + jn.y + '" r="' + (jn.t / 2) + '" fill="#333"/>';
+        }
       }
     }
     html += '</g>';
@@ -935,10 +967,26 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
+    // Room labels (envelope mode — labels are separate from structure layer)
+    if (useEnvelope) {
+      html += '<g id="room-labels">';
+      for (var rli = 0; rli < plan.rooms.length; rli++) {
+        var rlRoom = plan.rooms[rli];
+        var rlCx = rlRoom.polygon.reduce(function(s, p) { return s + p.x; }, 0) / rlRoom.polygon.length;
+        var rlCy = rlRoom.polygon.reduce(function(s, p) { return s + p.y; }, 0) / rlRoom.polygon.length;
+        var rlArea = computeArea(rlRoom.polygon);
+        html += '<text x="' + rlCx + '" y="' + (rlCy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(rlRoom.label) + '</text>';
+        html += '<text x="' + rlCx + '" y="' + (rlCy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + rlArea.toFixed(1) + ' m\\u00B2</text>';
+      }
+      html += '</g>';
+    }
+
     // Dimensions
     html += '<g id="dimensions">';
     for (var di = 0; di < plan.walls.length; di++) {
       var w = plan.walls[di];
+      // In envelope mode, only show dimensions for interior/divider walls
+      if (useEnvelope && w.type === 'exterior') continue;
       var dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
       var len = Math.sqrt(dx*dx + dy*dy);
       if (len < 1) continue;
