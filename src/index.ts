@@ -333,7 +333,7 @@ export class RoomSketcherHelpMCP extends McpAgent<Env, SketchSession, {}> {
     this.server.registerTool(
       'generate_floor_plan',
       {
-        description: `Generate a complete floor plan. Returns a furnished plan with SVG preview.
+        description: `Generate a floor plan. Returns a plan with SVG preview.
 
 IMPORTANT: If a sketch already exists in this conversation (the user already has a sketch_id), do NOT call this tool. Use update_sketch instead to modify the existing plan. Only use generate_floor_plan when creating a brand-new floor plan from scratch.
 
@@ -342,39 +342,50 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-Step 0 — GET THE IMAGE URL:
-If the user pasted/attached a floor plan image in the chat, you can see it but CANNOT pass the bytes to tools (MCP limitation). Direct them to upload it at /upload, copy the returned URL, and paste it back. If they already provided a URL, skip this step.
+MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. The CV pipeline extracts precise room coordinates, dimensions, and labels that you cannot accurately estimate by looking at the image. Do NOT skip this step and eyeball the layout — your dimension estimates will be wrong. If the user pasted an image without a URL, direct them to upload it at ${this.getWorkerUrl()}/upload first.
 
-Step 1 — ANALYZE IMAGE:
-Call analyze_floor_plan_image with image_url (preferred) or image (base64). Just pass the URL directly — the CV service fetches it server-side. If the user uploaded an image, use the /api/images/ URL returned by the upload page. The CV service extracts room geometries, labels, and dimensions automatically. Review the returned JSON — fix any misdetected labels or dimensions before proceeding.
+PHASE 1 — GET THE LAYOUT VISIBLE FAST:
 
-Step 2 — REVIEW & ADJUST:
-Check the CV output against the source image. Fix room labels, merge rooms that should be open-plan (kitchen/living/dining with no wall = ONE room), adjust dimensions if the CV missed scale markers. Round to nearest 10cm.
+Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Use the CV output as your source of truth for room positions and sizes. Fix obvious label errors and merge open-plan rooms.
 
-Step 3 — ADD OPENINGS:
-Use {type, between: [room1, room2]} for interior doors. Use {type, room, wall: "north"|"south"|"east"|"west"} for exterior doors/windows. Default position is centered; set position: 0.0-1.0 to shift along the wall.
+Step 2: GENERATE ROOMS ONLY — Call generate_floor_plan with rooms from the CV output. Add basic exterior doors/windows you can see in the image but do NOT add furniture yet. Get the skeleton built.
 
-Step 4 — ADD FURNITURE:
-Positions are RELATIVE to the room's top-left corner: {type, room: "Bedroom", x: 20, y: 30, width, depth}. Place ONLY furniture visible in the reference image.
+Step 3: PREVIEW IMMEDIATELY — Call preview_sketch right after generating. You are BLIND until you see the rendered output. Look at the preview and compare it to the source image. Check: are rooms the right size and position? Are walls where they should be? Is anything overlapping or missing?
 
-Step 5 — GENERATE:
-Call generate_floor_plan with the adjusted rooms, openings, and furniture. The system generates all walls, room polygons, colors, and canvas automatically. Then call preview_sketch to verify.
+PHASE 2 — REFINE BASED ON WHAT YOU SEE:
+
+Step 4: FIX LAYOUT — If rooms are wrong (wrong size, overlapping, missing), fix with update_sketch. Preview again after fixes.
+
+Step 5: ADD OPENINGS — Now add doors and windows using update_sketch. Use {type, between: [room1, room2]} for interior doors, {type, room, wall: "north"|"south"|"east"|"west"} for exterior. Preview to verify placement.
+
+Step 6: ADD FURNITURE — Add furniture visible in the reference image. Positions are RELATIVE to room top-left: {type, room: "Bedroom", x: 20, y: 30, width, depth}. Preview to verify.
 
 WORKED EXAMPLE — 2 rooms side by side:
 Input: {name: "Test", rooms: [{label: "Kitchen", x: 0, y: 0, width: 300, depth: 250}, {label: "Living", x: 300, y: 0, width: 400, depth: 300}], openings: [{type: "door", between: ["Kitchen", "Living"]}, {type: "window", room: "Kitchen", wall: "north"}]}
 Result: Interior wall at x=300 between the rooms, exterior walls around the perimeter, door centered on shared wall, window centered on Kitchen's north wall.
 
 ═══ DESIGN MODE (user described a floor plan in words) ═══
-Start from a template. Call list_templates to find the closest match, then adapt dimensions, rooms, openings, and furniture. You can use either the room-first format (recommended) or the full schema with explicit walls/polygons. For best results, call search_design_knowledge first.
+
+PHASE 1 — GET THE LAYOUT VISIBLE FAST:
+
+Step 1: Find a starting point. Call list_templates, pick the closest match, and adapt room sizes to the user's description. For best results, call search_design_knowledge first.
+
+Step 2: GENERATE ROOMS ONLY — Call generate_floor_plan with rooms and basic openings. Do NOT add furniture yet. Get the skeleton built.
+
+Step 3: PREVIEW IMMEDIATELY — Call preview_sketch right after generating. You are BLIND until you see the rendered output. Check: are rooms the right size? Is the layout sensible? Does it match what the user asked for?
+
+PHASE 2 — REFINE BASED ON WHAT YOU SEE:
+
+Step 4: FIX LAYOUT — If rooms are wrong, fix with update_sketch. Preview again.
+
+Step 5: ADD OPENINGS — Add remaining doors/windows. Every room needs a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right). Preview to verify.
+
+Step 6: ADD FURNITURE — Place essential furniture in every room. Arrange along walls with 60cm clearance. Preview to verify.
 
 STANDARD DIMENSIONS (cm):
 - Doors: standard 80, bathroom 70, front 90
 - Windows: standard 120, kitchen 100, bathroom 60
 - Min room sizes: bedroom 9sqm, bathroom 4sqm, kitchen 6sqm, living 15sqm
-
-DOOR RULES: Every room gets a door. Front door on the longest exterior wall. Bathroom doors swing outward (left). Bedroom doors swing inward (right).
-
-FURNITURE: Place essential furniture in every room. Arrange along walls with 60cm clearance. Use catalog dimensions.
 
 ═══ SHARED RULES (both modes) ═══
 
@@ -382,8 +393,7 @@ COORDINATE SYSTEM: Origin (0,0) top-left. X right, Y down. All values in cm. 10c
 
 The system auto-generates: walls (exterior=20cm, interior=10cm), room polygons, room colors (by label keyword), canvas size, and metadata.
 
-VISUAL FEEDBACK LOOP (required):
-After generating, call preview_sketch to verify. Check for overlapping walls, misplaced furniture, missing doors/windows. Fix with update_sketch. Max 3 iterations.`,
+CRITICAL: Do NOT skip preview_sketch after generating. You have no idea if your output is correct until you see the rasterized result. Preview early, preview often.`,
         inputSchema: {
           plan: SimpleFloorPlanInputSchema.describe('Room-first floor plan input (recommended). Also accepts full FloorPlanInput with version/walls/rooms.'),
         },
@@ -464,17 +474,22 @@ After generating, call preview_sketch to verify. Check for overlapping walls, mi
     this.server.registerTool(
       'analyze_floor_plan_image',
       {
-        description: `Analyze a floor plan image using computer vision to extract room geometries. Returns structured JSON with room positions, dimensions, and labels that can be passed to generate_floor_plan. Use this BEFORE generate_floor_plan when the user provides a floor plan image to copy.
+        description: `Analyze a floor plan image using computer vision to extract PRECISE room geometries, pixel-accurate dimensions, wall positions, and text labels. Returns structured JSON that is FAR more accurate than what you can estimate by looking at an image.
 
-Requires image_url — a URL to the floor plan image. The CV service fetches it server-side.
+WHY THIS TOOL IS MANDATORY: You cannot accurately estimate room dimensions, wall coordinates, or spatial relationships by looking at an image. The CV pipeline uses edge detection, OCR, and geometric analysis to extract exact measurements in centimeters. Skipping this step and eyeballing the image will produce inaccurate floor plans with wrong room sizes and positions. NEVER skip this tool when the user provides a floor plan image.
 
-IMPORTANT: If the user has shared or pasted a floor plan image directly in the chat, you can SEE it but CANNOT pass the image bytes to this tool (MCP protocol limitation). You must ask the user to upload it first:
-1. Provide them with the upload page link: /upload
-2. Ask them to drop or paste their image there
-3. They will get a URL — ask them to copy and paste it back in the chat
-4. Then call this tool with that URL as image_url
+TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
-Do NOT attempt to pass large images as base64 — always use the upload page to get a URL instead.`,
+1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url. Do not ask questions, do not wait. Just call it.
+
+2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → You can SEE the image but you MUST NOT try to recreate it by eye. The CV pipeline will extract precise data you cannot. Direct the user to upload it:
+   "I can see your floor plan! To get accurate room dimensions and positions, I need to run it through our computer vision pipeline. Please upload it so I can analyze it:
+   1. Open the upload page: ${this.getWorkerUrl()}/upload
+   2. Drop or paste your image there
+   3. Copy the URL it gives you and paste it back here"
+   Then STOP and wait for the URL. Do NOT proceed to generate_floor_plan without CV output.
+
+Do NOT attempt to pass images as base64 — always use the upload page to get a URL.`,
         inputSchema: {
           image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG) — only for small images; prefer image_url via /upload'),
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),

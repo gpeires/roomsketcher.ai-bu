@@ -78,8 +78,9 @@ export function boundingBox(walls: Wall[]): {
       if (p.y > maxY) maxY = p.y;
     }
   }
-  // Expand by max wall thickness to account for wall quads extending beyond centerline
-  const maxThickness = Math.max(...walls.map(w => w.thickness), 0);
+  // Expand by max exterior wall thickness to account for wall quads extending beyond centerline
+  const exteriorThicknesses = walls.filter(w => w.type === 'exterior').map(w => w.thickness);
+  const maxThickness = exteriorThicknesses.length > 0 ? Math.max(...exteriorThicknesses) : 0;
   const expand = maxThickness / 2;
   return { minX: minX - expand, minY: minY - expand, maxX: maxX + expand, maxY: maxY + expand };
 }

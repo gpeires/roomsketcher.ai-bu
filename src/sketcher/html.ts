@@ -71,6 +71,7 @@ export function sketcherHtml(sketchId: string): string {
 
   /* SVG interactive styles */
   svg [data-type] { cursor: pointer; }
+  svg [data-type="wall"] { cursor: move; }
   svg [data-type="wall"]:hover { stroke: var(--rs-teal) !important; }
   svg [data-type="wall"].selected { stroke: var(--rs-danger) !important; }
   svg [data-type="opening"]:hover { stroke: var(--rs-teal) !important; }
@@ -238,10 +239,11 @@ export function sketcherHtml(sketchId: string): string {
 
   var plan = null;
   var tool = 'select';          // active tool: select|wall|door|window|room|furniture
-  var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|dragging_furniture|drawing_wall|panning|placing_opening|rotating_furniture
+  var interactionMode = 'idle';  // idle|selecting|dragging_endpoint|dragging_wall|dragging_furniture|drawing_wall|panning|placing_opening|rotating_furniture
   var selected = null;           // { type, id }
   var drawStart = null;          // wall drawing start point
   var dragState = null;          // { wallId, endpoint, startPoint, connectedWalls, originalPositions, detached }
+  var wallDragState = null;      // { wallId, origStart, origEnd, perpAxis, connectedStart[], connectedEnd[], originalPositions, grabPoint }
   var furnitureDragState = null;  // { furnitureId, originalPos, grabOffset }
   var snapResult = null;         // { point, guides[] }
   var undoStack = [];            // [{ changes[], inverseChanges[] }]
@@ -830,26 +832,29 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
-    // Walls — exterior/interior as filled polygons, dividers as dashed lines
+    // Walls — exterior as thick polygons, interior as thin lines, dividers as dashed lines
     html += '<g id="walls"' + (dimWalls ? ' class="dimmed"' : '') + '>';
     for (var wi = 0; wi < plan.walls.length; wi++) {
       var w = plan.walls[wi];
       var sel = (selected && selected.type === 'wall' && selected.id === w.id) ? ' class="selected"' : '';
       if (w.type === 'divider') {
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
-      } else {
+      } else if (w.type === 'exterior') {
         var pts = wallQuadPoints(w);
         if (pts) {
           html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
         }
+      } else {
+        // Interior walls as thin lines
+        html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="2" stroke-linecap="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
       }
     }
-    // Junction circles at shared wall endpoints
+    // Junction circles at shared exterior wall endpoints only
     var junctions = {};
     var jCounts = {};
     for (var ji = 0; ji < plan.walls.length; ji++) {
       var jw = plan.walls[ji];
-      if (jw.type === 'divider') continue;
+      if (jw.type !== 'exterior') continue;
       var endpoints = [jw.start, jw.end];
       for (var je = 0; je < endpoints.length; je++) {
         var jkey = endpoints[je].x + ',' + endpoints[je].y;
@@ -881,8 +886,8 @@ export function sketcherHtml(sketchId: string): string {
         var ey = oy + sin * o.width;
         var oSel = (selected && selected.type === 'opening' && selected.id === o.id);
         var oAttrs = ' data-id="' + o.id + '" data-type="opening" data-wall-id="' + w.id + '" style="cursor:pointer"';
-        // White gap (wall break) — width matches wall thickness
-        var gapW = (w.thickness || 6) + 2;
+        // White gap (wall break) — thick for exterior polygons, thin for interior lines
+        var gapW = w.type === 'exterior' ? (w.thickness || 20) + 2 : 6;
         html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="white" stroke-width="' + gapW + '"' + oAttrs + '/>';
         if (o.type === 'door') {
           var dir = o.properties.swingDirection === 'right' ? 1 : -1;
@@ -895,7 +900,7 @@ export function sketcherHtml(sketchId: string): string {
           var wt = (o.properties && o.properties.windowType) || 'double';
           var wColor = oSel ? '#D84200' : '#4FC3F7';
           var wStroke = oSel ? 3 : 2;
-          var wOff = (w.thickness || 8) / 2;
+          var wOff = w.type === 'exterior' ? (w.thickness || 20) / 2 : 2;
           var nx = -sin * wOff, ny = cos * wOff;
           // Transparent hit area
           html += '<line x1="' + ox + '" y1="' + oy + '" x2="' + ex + '" y2="' + ey + '" stroke="transparent" stroke-width="14"' + oAttrs + '/>';
@@ -1404,11 +1409,14 @@ export function sketcherHtml(sketchId: string): string {
           beginEndpointDrag(mouseDownTarget.wallId, mouseDownTarget.endpoint);
           // Alt/Option key = detach mode (don't move connected walls)
           if (e.altKey && dragState) dragState.detached = true;
+        } else if (mouseDownTarget && mouseDownTarget.type === 'wall' && (tool === 'select')) {
+          interactionMode = 'dragging_wall';
+          beginWallDrag(mouseDownTarget.id, e);
         } else if (mouseDownTarget && mouseDownTarget.type === 'furniture' && (tool === 'select' || tool === 'furniture')) {
           interactionMode = 'dragging_furniture';
           beginFurnitureDrag(mouseDownTarget.id, e);
         } else {
-          // Not on a handle or furniture — fall through to panning
+          // Not on a handle, wall, or furniture — fall through to panning
           interactionMode = 'panning';
           panStart = { x: e.clientX, y: e.clientY };
         }
@@ -1417,6 +1425,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (interactionMode === 'dragging_endpoint') {
       updateEndpointDrag(e);
+    }
+
+    if (interactionMode === 'dragging_wall') {
+      updateWallDrag(e);
     }
 
     if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
@@ -1467,6 +1479,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (interactionMode === 'dragging_endpoint') {
       commitEndpointDrag();
+    }
+
+    if (interactionMode === 'dragging_wall') {
+      commitWallDrag();
     }
 
     if (interactionMode === 'rotating_furniture' && mouseDownTarget) {
@@ -1935,6 +1951,191 @@ export function sketcherHtml(sketchId: string): string {
 
     isDragging = false;
     dragState = null;
+    render();
+    showProperties();
+  }
+
+  // ── Wall-segment drag (translate entire wall perpendicular to its axis) ──
+
+  function beginWallDrag(wallId, e) {
+    var wall = plan.walls.find(function(w) { return w.id === wallId; });
+    if (!wall) return;
+    var grabPt = svgPointRaw({ clientX: mouseDownPoint.x, clientY: mouseDownPoint.y });
+    wallDragState = {
+      wallId: wallId,
+      origStart: { x: wall.start.x, y: wall.start.y },
+      origEnd: { x: wall.end.x, y: wall.end.y },
+      grabPoint: grabPt,
+      connectedStart: findConnectedEndpoints(wallId, 'start'),
+      connectedEnd: findConnectedEndpoints(wallId, 'end'),
+      originalPositions: {}
+    };
+    // Save original positions of this wall and all connected walls
+    wallDragState.originalPositions[wallId] = {
+      start: { x: wall.start.x, y: wall.start.y },
+      end: { x: wall.end.x, y: wall.end.y }
+    };
+    var allConnected = wallDragState.connectedStart.concat(wallDragState.connectedEnd);
+    for (var i = 0; i < allConnected.length; i++) {
+      var cw = plan.walls.find(function(w) { return w.id === allConnected[i].wallId; });
+      if (cw) {
+        wallDragState.originalPositions[allConnected[i].wallId] = {
+          start: { x: cw.start.x, y: cw.start.y },
+          end: { x: cw.end.x, y: cw.end.y }
+        };
+      }
+    }
+    isDragging = true;
+  }
+
+  function updateWallDrag(e) {
+    if (!wallDragState || !plan) return;
+    var rawPt = svgPointRaw(e);
+    var wall = plan.walls.find(function(w) { return w.id === wallDragState.wallId; });
+    if (!wall) return;
+
+    // Compute full delta from grab point
+    var fullDx = rawPt.x - wallDragState.grabPoint.x;
+    var fullDy = rawPt.y - wallDragState.grabPoint.y;
+
+    // Project delta onto perpendicular axis of the wall
+    var wdx = wallDragState.origEnd.x - wallDragState.origStart.x;
+    var wdy = wallDragState.origEnd.y - wallDragState.origStart.y;
+    var wlen = Math.sqrt(wdx * wdx + wdy * wdy);
+    var dx, dy;
+    if (wlen < 1) {
+      // Degenerate wall — allow free movement
+      dx = fullDx;
+      dy = fullDy;
+    } else {
+      // Perpendicular unit vector
+      var px = -wdy / wlen;
+      var py = wdx / wlen;
+      // Project mouse delta onto perpendicular
+      var proj = fullDx * px + fullDy * py;
+      dx = px * proj;
+      dy = py * proj;
+    }
+
+    // Grid snap the delta
+    dx = Math.round(dx / 10) * 10;
+    dy = Math.round(dy / 10) * 10;
+
+    // Move both endpoints of the dragged wall
+    wall.start = { x: wallDragState.origStart.x + dx, y: wallDragState.origStart.y + dy };
+    wall.end = { x: wallDragState.origEnd.x + dx, y: wallDragState.origEnd.y + dy };
+
+    // Direct DOM update for the dragged wall
+    var wallEl = svg.querySelector('[data-type="wall"][data-id="' + wallDragState.wallId + '"]');
+    if (wallEl) {
+      if (wallEl.tagName === 'polygon') {
+        wallEl.setAttribute('points', wallQuadPoints(wall));
+      } else {
+        wallEl.setAttribute('x1', wall.start.x);
+        wallEl.setAttribute('y1', wall.start.y);
+        wallEl.setAttribute('x2', wall.end.x);
+        wallEl.setAttribute('y2', wall.end.y);
+      }
+    }
+
+    // Move connected walls — their shared endpoint follows
+    function moveConnected(conns, newPt) {
+      for (var i = 0; i < conns.length; i++) {
+        var conn = conns[i];
+        var cw = plan.walls.find(function(w) { return w.id === conn.wallId; });
+        if (!cw) continue;
+        if (conn.endpoint === 'start') cw.start = { x: newPt.x, y: newPt.y };
+        else cw.end = { x: newPt.x, y: newPt.y };
+        var cwEl = svg.querySelector('[data-type="wall"][data-id="' + conn.wallId + '"]');
+        if (cwEl) {
+          if (cwEl.tagName === 'polygon') {
+            cwEl.setAttribute('points', wallQuadPoints(cw));
+          } else {
+            cwEl.setAttribute('x1', cw.start.x);
+            cwEl.setAttribute('y1', cw.start.y);
+            cwEl.setAttribute('x2', cw.end.x);
+            cwEl.setAttribute('y2', cw.end.y);
+          }
+        }
+      }
+    }
+    moveConnected(wallDragState.connectedStart, wall.start);
+    moveConnected(wallDragState.connectedEnd, wall.end);
+
+    // Throttled WebSocket broadcast
+    sendWsThrottled({ type: 'move_wall', wall_id: wallDragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
+  }
+
+  function commitWallDrag() {
+    if (!wallDragState || !plan) { isDragging = false; wallDragState = null; return; }
+    var wall = plan.walls.find(function(w) { return w.id === wallDragState.wallId; });
+    if (!wall) { isDragging = false; wallDragState = null; return; }
+
+    var changes = [];
+    var inverseChanges = [];
+
+    // Main wall
+    var orig = wallDragState.originalPositions[wallDragState.wallId];
+    changes.push({ type: 'move_wall', wall_id: wallDragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
+    inverseChanges.push({ type: 'move_wall', wall_id: wallDragState.wallId, start: orig.start, end: orig.end });
+
+    // Connected walls
+    var allConnected = wallDragState.connectedStart.concat(wallDragState.connectedEnd);
+    for (var ci = 0; ci < allConnected.length; ci++) {
+      var conn = allConnected[ci];
+      var cw = plan.walls.find(function(w) { return w.id === conn.wallId; });
+      var corig = wallDragState.originalPositions[conn.wallId];
+      if (cw && corig) {
+        changes.push({ type: 'move_wall', wall_id: conn.wallId, start: { x: cw.start.x, y: cw.start.y }, end: { x: cw.end.x, y: cw.end.y } });
+        inverseChanges.push({ type: 'move_wall', wall_id: conn.wallId, start: corig.start, end: corig.end });
+      }
+    }
+
+    // Room polygon propagation — move vertices near either endpoint
+    var dxS = wall.start.x - wallDragState.origStart.x;
+    var dyS = wall.start.y - wallDragState.origStart.y;
+    if (dxS !== 0 || dyS !== 0) {
+      var maxThick = 0;
+      for (var ti = 0; ti < plan.walls.length; ti++) {
+        if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
+      }
+      var roomThreshold = maxThick + 5;
+      var origStartPt = wallDragState.origStart;
+      var origEndPt = wallDragState.origEnd;
+      for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+        var room = plan.rooms[rpi];
+        var roomChanged = false;
+        var newPolygon = room.polygon.map(function(v) {
+          // Check if vertex is near either original endpoint of the dragged wall
+          var nearStart = Math.abs(v.x - origStartPt.x) <= roomThreshold && Math.abs(v.y - origStartPt.y) <= roomThreshold;
+          var nearEnd = Math.abs(v.x - origEndPt.x) <= roomThreshold && Math.abs(v.y - origEndPt.y) <= roomThreshold;
+          if (nearStart || nearEnd) {
+            roomChanged = true;
+            return { x: v.x + dxS, y: v.y + dyS };
+          }
+          return { x: v.x, y: v.y };
+        });
+        if (roomChanged) {
+          var oldPolygon = room.polygon.map(function(v) { return { x: v.x, y: v.y }; });
+          room.polygon = newPolygon;
+          room.area = computeArea(newPolygon);
+          changes.push({ type: 'update_room', room_id: room.id, polygon: newPolygon });
+          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: oldPolygon });
+        }
+      }
+    }
+
+    if (changes.length > 0) {
+      pushUndo(changes, inverseChanges);
+      changes.forEach(function(c) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(c));
+        }
+      });
+    }
+
+    isDragging = false;
+    wallDragState = null;
     render();
     showProperties();
   }

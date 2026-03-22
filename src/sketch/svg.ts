@@ -19,41 +19,39 @@ function formatDimension(cm: number, units: 'metric' | 'imperial'): string {
 function renderWalls(walls: Wall[]): string {
   return walls.map(w => {
     if (w.type === 'divider') {
-      // Dividers stay as thin dashed lines
       return `<line x1="${w.start.x}" y1="${w.start.y}" x2="${w.end.x}" y2="${w.end.y}" ` +
         `stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4"` +
         ` data-id="${w.id}" data-type="wall"/>`;
     }
-    // Exterior/interior walls rendered as filled polygons using actual thickness
-    const quad = wallQuad(w);
-    const points = quad.map(p => `${p.x},${p.y}`).join(' ');
-    return `<polygon points="${points}" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round"` +
+    if (w.type === 'exterior') {
+      // Exterior walls rendered as thick filled polygons
+      const quad = wallQuad(w);
+      const points = quad.map(p => `${p.x},${p.y}`).join(' ');
+      return `<polygon points="${points}" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round"` +
+        ` data-id="${w.id}" data-type="wall"/>`;
+    }
+    // Interior walls rendered as thin lines
+    return `<line x1="${w.start.x}" y1="${w.start.y}" x2="${w.end.x}" y2="${w.end.y}" ` +
+      `stroke="#333" stroke-width="2" stroke-linecap="round"` +
       ` data-id="${w.id}" data-type="wall"/>`;
   }).join('\n    ');
 }
 
 function renderJunctions(walls: Wall[]): string {
-  // At shared endpoints, render filled circles to close diagonal notch gaps
+  // At shared exterior wall endpoints, render filled circles to close corner gaps
+  const exteriorWalls = walls.filter(w => w.type === 'exterior');
   const junctions = new Map<string, { x: number; y: number; maxThickness: number }>();
-  for (const w of walls) {
-    if (w.type === 'divider') continue;
+  const counts = new Map<string, number>();
+  for (const w of exteriorWalls) {
     for (const p of [w.start, w.end]) {
       const key = `${p.x},${p.y}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
       const existing = junctions.get(key);
       if (existing) {
         existing.maxThickness = Math.max(existing.maxThickness, w.thickness);
       } else {
         junctions.set(key, { x: p.x, y: p.y, maxThickness: w.thickness });
       }
-    }
-  }
-  // Only render junctions where 2+ walls meet
-  const counts = new Map<string, number>();
-  for (const w of walls) {
-    if (w.type === 'divider') continue;
-    for (const p of [w.start, w.end]) {
-      const key = `${p.x},${p.y}`;
-      counts.set(key, (counts.get(key) || 0) + 1);
     }
   }
   const parts: string[] = [];
@@ -75,11 +73,13 @@ function renderOpening(wall: Wall, opening: Opening): string {
   const ox = wall.start.x + cos * opening.offset;
   const oy = wall.start.y + sin * opening.offset;
 
+  // Gap width: thick for exterior walls (cut through polygon), thin for interior (cover line)
+  const gapWidth = wall.type === 'exterior' ? wall.thickness + 2 : 6;
+
   if (opening.type === 'door') {
     // Draw gap (white line over wall) + swing arc
     const ex = ox + cos * opening.width;
     const ey = oy + sin * opening.width;
-    const gapWidth = wall.thickness + 2;
     const gap = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="${gapWidth}" data-id="${opening.id}" data-type="opening"/>`;
 
     // Arc for door swing
@@ -98,10 +98,9 @@ function renderOpening(wall: Wall, opening: Opening): string {
     // Draw gap + parallel lines at wall faces
     const ex = ox + cos * opening.width;
     const ey = oy + sin * opening.width;
-    const offset = wall.thickness / 2;
+    const offset = wall.type === 'exterior' ? wall.thickness / 2 : 2;
     const nx = -sin * offset;
     const ny = cos * offset;
-    const gapWidth = wall.thickness + 2;
     const oAttrs = ` data-id="${opening.id}" data-type="opening"`;
     const gap = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="${gapWidth}"${oAttrs}/>`;
     const line1 = `<line x1="${ox + nx}" y1="${oy + ny}" x2="${ex + nx}" y2="${ey + ny}" stroke="#4FC3F7" stroke-width="2"${oAttrs}/>`;
@@ -112,7 +111,6 @@ function renderOpening(wall: Wall, opening: Opening): string {
   // Plain opening: just a gap
   const ex = ox + cos * opening.width;
   const ey = oy + sin * opening.width;
-  const gapWidth = wall.thickness + 2;
   return `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="${gapWidth}" data-id="${opening.id}" data-type="opening"/>`;
 }
 
