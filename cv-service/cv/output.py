@@ -11,13 +11,32 @@ _ROOM_WORDS = {
     "den", "family", "master", "primary", "guest", "powder", "dressing",
     "walk-in", "pantry", "nook", "breakfast", "sunroom", "lounge",
     "vestibule", "corridor", "mudroom", "ensuite", "wc", "toilet",
-    "room", "area",
+    "room", "area", "wic", "cl",
 }
 
 # Regex for things that look like dimensions/coordinates, not labels
 _DIM_LIKE = re.compile(
-    r"^\d+[\.\',\"x×]|^[x×]$|^\d+$|^[a-zA-Z]$|^[\W]+$",
+    r"^\d+[\.\',\"°x×\-]"   # starts with digits + punctuation
+    r"|^[x×]$"               # bare separator
+    r"|^\d+$"                # pure digits
+    r"|^[a-zA-Z]$"           # single letter
+    r"|^[\W]+$"              # non-word only
+    r"|^\d+\s*[\-]\s*\d+"    # digit-dash-digit (e.g. "8-7")
+    r"|\d+['\u2019\u2032°]"  # contains feet mark or degree (OCR garble)
+    r'|\d+["\u201d\u2033]'   # contains inch mark
 )
+
+# Common fixture abbreviations and non-room text that OCR detects.
+# Do NOT include room abbreviations here (CL=closet, WIC=walk-in closet).
+_FIXTURE_ABBREVS = {
+    "dw", "ref", "w/d", "wd", "lc", "p", "ac",
+}
+
+# Known non-room proper nouns (logos, brands, brokerage names)
+_LOGO_WORDS = {
+    "compass", "douglas", "elliman", "corcoran", "halstead",
+    "sotheby", "streeteasy", "zillow", "redfin", "howard", "hanna",
+}
 
 
 def _to_cm_grid(px: float, scale: float, grid: int = 10) -> int:
@@ -270,18 +289,42 @@ def _pick_best_label(candidates: list[dict], room: dict) -> str:
 
 def _is_room_label(text: str) -> bool:
     """Check if text looks like a room label rather than noise."""
-    t = text.strip().lower()
+    t = text.strip()
     if len(t) < 2:
         return False
-    # Known room words
-    if t in _ROOM_WORDS:
+    low = t.lower()
+
+    # Reject fixture abbreviations
+    if low in _FIXTURE_ABBREVS:
+        return False
+
+    # Reject if any word is a known logo/brand
+    words = low.split()
+    if any(w in _LOGO_WORDS for w in words):
+        return False
+
+    # Reject dimension-like text
+    if _DIM_LIKE.match(t):
+        return False
+
+    # Known room words — accept
+    if low in _ROOM_WORDS:
         return True
-    # Multi-word text where at least one word is a known room word
-    words = t.split()
     if any(w in _ROOM_WORDS for w in words):
         return True
-    # Title-case alphabetic words of reasonable length (e.g. "Dressing", "Primary")
-    clean = text.replace(" ", "").replace("-", "")
-    if len(clean) >= 4 and text[0].isupper() and clean.isalpha():
+
+    # Multi-word with separator (e.g. "Living / Dining", "Living & Dining")
+    parts = re.split(r"[/&]", low)
+    if len(parts) >= 2 and any(
+        any(w in _ROOM_WORDS for w in p.split()) for p in parts
+    ):
         return True
+
+    # Title-case alphabetic word ≥4 chars — only if NOT all-caps
+    # (all-caps catches logos like "COMPASS")
+    clean = text.replace(" ", "").replace("-", "")
+    if (len(clean) >= 4 and text[0].isupper() and clean.isalpha()
+            and not text.isupper()):
+        return True
+
     return False

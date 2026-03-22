@@ -1,4 +1,55 @@
-from cv.output import build_floor_plan_input
+import pytest
+from cv.output import build_floor_plan_input, _is_room_label, _DIM_LIKE
+
+
+class TestDimensionFiltering:
+    """Dimension text and OCR garbage must not become room labels."""
+
+    @pytest.mark.parametrize("text", [
+        "14°4\"",       # OCR-garbled imperial
+        "8-7\"",        # partial imperial
+        "5'9\"",        # clean imperial
+        "10'2\"",       # clean imperial
+        "11'11\"",      # clean imperial
+        "3.00m",        # metric
+        "3.50",         # bare metric
+        "x",            # separator
+        "×",            # separator
+        "P",            # single letter (OCR noise)
+        "DW",           # fixture abbreviation
+        "Ref",          # fixture abbreviation
+        "W/D",          # fixture abbreviation
+        "LC",           # fixture abbreviation
+    ])
+    def test_dim_like_rejects_noise(self, text):
+        assert not _is_room_label(text), f"Should reject: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        "COMPASS",      # logo text (all-caps non-room word)
+        "Hanna",        # person name (in _LOGO_WORDS)
+        "9511",         # house number (pure digits)
+    ])
+    def test_rejects_non_room_proper_nouns(self, text):
+        assert not _is_room_label(text), f"Should reject: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        "Kitchen",
+        "Living Room",
+        "Primary Bedroom",
+        "Bath",
+        "Foyer",
+        "Hall",
+        "Dining Room",
+        "Dressing Area",
+        "WIC",
+        "CL",
+        "Walk-in",
+        "Living / Dining",
+        "Living & Dining",
+    ])
+    def test_accepts_valid_room_labels(self, text):
+        assert _is_room_label(text), f"Should accept: {text!r}"
+
 
 def test_build_basic_output():
     rooms = [
