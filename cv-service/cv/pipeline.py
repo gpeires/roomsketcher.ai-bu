@@ -16,7 +16,7 @@ from cv.dimensions import parse_dimension
 from cv.openings import detect_openings
 from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
-from cv.merge import run_merge_pipeline, MergeContext
+from cv.merge import run_merge_pipeline, MergeContext, cap_wall_thickness_cm
 import cv.enhance as _enhance_mod
 
 log = logging.getLogger(__name__)
@@ -149,9 +149,12 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     if merge_context.thickness_profile:
         tp = merge_context.thickness_profile
         scale = result.get("meta", {}).get("scale_cm_per_px", 1.0)
+        raw_thin = round(tp.thin_wall_px * scale, 1)
+        raw_thick = round(tp.thick_wall_px * scale, 1)
+        thin_cm, thick_cm = cap_wall_thickness_cm(raw_thin, raw_thick)
         wall_thickness = {
-            "thin_cm": round(tp.thin_wall_px * scale, 1),
-            "thick_cm": round(tp.thick_wall_px * scale, 1),
+            "thin_cm": thin_cm,
+            "thick_cm": thick_cm,
             "structural_elements": [
                 {
                     "kind": e.kind,

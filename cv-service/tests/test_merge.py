@@ -626,3 +626,26 @@ class TestAssembleRooms:
         assembled = assemble_rooms(rooms, confidence_scores=[0.7, 0.5], scale_cm_per_px=1.0)
         assert assembled[0]["label"] == "Room 1"
         assert assembled[1]["label"] == "Room 2"
+
+
+class TestWallThicknessCapping:
+    """Wall thickness values must be capped at realistic residential bounds."""
+
+    def test_thin_wall_capped(self):
+        from cv.merge import cap_wall_thickness_cm
+        # Raw values of 39.5cm interior and 79cm exterior are unrealistic
+        thin_cm, thick_cm = cap_wall_thickness_cm(39.5, 79.0)
+        assert thin_cm <= 20, f"Interior wall {thin_cm}cm exceeds 20cm cap"
+        assert thick_cm <= 40, f"Exterior wall {thick_cm}cm exceeds 40cm cap"
+
+    def test_normal_thickness_unchanged(self):
+        from cv.merge import cap_wall_thickness_cm
+        thin_cm, thick_cm = cap_wall_thickness_cm(10.0, 20.0)
+        assert thin_cm == 10.0
+        assert thick_cm == 20.0
+
+    def test_minimum_thickness_enforced(self):
+        from cv.merge import cap_wall_thickness_cm
+        thin_cm, thick_cm = cap_wall_thickness_cm(0.5, 1.0)
+        assert thin_cm >= 5, f"Interior wall {thin_cm}cm below 5cm minimum"
+        assert thick_cm >= 10, f"Exterior wall {thick_cm}cm below 10cm minimum"
