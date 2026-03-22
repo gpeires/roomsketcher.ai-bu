@@ -158,6 +158,7 @@ export interface PipelineOutput {
     specialists_failed: string[];
     specialist_errors?: Record<string, string>;
     specialist_data?: Record<string, unknown>;  // parsed specialist outputs for debugging
+    wall_thickness?: { thin_cm: number; thick_cm: number };
     // Raw CV data for pipeline diagnostics
     cv_rooms_raw?: CVRoom[];
     cv_rooms_detected?: number;

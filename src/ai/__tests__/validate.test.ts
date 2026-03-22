@@ -24,7 +24,19 @@ describe('applyCorrections', () => {
     expect(result.applied).toBe(0);
   });
 
-  it('flags missing room corrections without adding geometry', () => {
+  it('adds missing room when structured format and imageSize provided', () => {
+    const corrections: ValidatorResult['corrections'] = [
+      { type: 'missing_room', description: 'Missing: Closet at top-right, size: small' },
+    ];
+    const result = applyCorrections([baseRoom], corrections, [900, 900]);
+    expect(result.rooms).toHaveLength(2);
+    expect(result.rooms[1].label).toBe('Closet');
+    expect(result.rooms[1].confidence).toBe(0.4);
+    expect(result.rooms[1].sources).toEqual(['validator']);
+    expect(result.applied).toBe(1);
+  });
+
+  it('unapplies missing room when no imageSize provided', () => {
     const corrections: ValidatorResult['corrections'] = [
       { type: 'missing_room', description: 'Missing Bathroom between Kitchen and Bedroom' },
     ];

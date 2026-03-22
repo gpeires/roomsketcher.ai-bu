@@ -16,10 +16,10 @@ export const ROOM_NAMER_PROMPT =
   'You are a JSON API. Analyze this floor plan image and list every room label visible. Use standard names: Bedroom, Bathroom, Kitchen, Living Room, Dining Room, Foyer, Hall, Corridor, Walk-In Closet, Dressing Room, Laundry Room, Utility Room, Storage, Balcony, Terrace, Office, Garage, WC, Half Bath, Pantry, Family room, Primary Bedroom, Guestroom, Childrens room. Respond with ONLY a JSON array, no other text. Example: ["Kitchen", "Bedroom", "Bathroom"]';
 
 export const LAYOUT_DESCRIBER_PROMPT =
-  'You are a JSON API. Count the rooms in this floor plan and describe each room\'s position and size. Positions: top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right. Sizes: small, medium, large. Respond with ONLY JSON, no other text. Example: {"room_count": 3, "rooms": [{"name": "Kitchen", "position": "top-left", "size": "medium"}]}';
+  'You are a JSON API. Count ALL rooms in this floor plan including closets, hallways, foyers, and dressing rooms — each is a separate room. Describe each room\'s position and size. Positions: top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right. Size guide: bathroom=small, closet=small, hallway=small, bedroom=medium-large, living room=large, kitchen=medium. Respond with ONLY JSON, no other text. Example: {"room_count": 5, "rooms": [{"name": "Kitchen", "position": "top-left", "size": "medium"}, {"name": "Closet", "position": "center", "size": "small"}]}';
 
 export const SYMBOL_SPOTTER_PROMPT =
-  'You are a JSON API. List every fixture and symbol in this floor plan. Look for: Toilet, Sink, Bathtub, Shower, Fridge, Stove/Range, Dishwasher, Oven, Washer/Dryer, Kitchen Island, Bed, Sofa, Dining Table, Desk, Closet rod, Fireplace. Respond with ONLY a JSON array, no other text. Example: [{"type": "Toilet", "position": "top-right"}, {"type": "Bed", "position": "center-left"}]';
+  'You are a JSON API. List every fixture and symbol in this floor plan. Look for: Toilet, Sink, Bathtub, Shower, Fridge, Stove/Range, Dishwasher, Oven, Washer/Dryer, Kitchen Island, Bed, Sofa, Dining Table, Desk, Closet rod, Fireplace. Report the grid position where each fixture\'s CENTER is located (not where the room label text is). Positions: top-left, top-center, top-right, center-left, center, center-right, bottom-left, bottom-center, bottom-right. Respond with ONLY a JSON array, no other text. Example: [{"type": "Toilet", "position": "top-right"}, {"type": "Bed", "position": "center-left"}]';
 
 export const DIMENSION_READER_PROMPT =
   'You are a JSON API. List every dimension measurement visible in this floor plan. Include the text exactly as shown and which room it refers to. Respond with ONLY a JSON array, no other text. Example: [{"text": "12\'-6\\" x 10\'-3\\"", "room_or_area": "Bedroom"}]';
@@ -29,7 +29,7 @@ export function buildValidatorPrompt(rooms: MergedRoom[]): string {
     .map((r, i) => `Room ${i + 1}: ${r.label} at (${r.x},${r.y}), ${r.width}×${r.depth}cm, confidence=${r.confidence.toFixed(2)}`)
     .join('\n');
 
-  return `Here is a floor plan image. We analyzed it and found these rooms:\n${roomList}\n\nDoes this match the image? List any: (a) missing rooms, (b) wrong labels, (c) rooms that should be merged or split. Return as JSON: {"correct": true/false, "corrections": [{"type": "missing_room|wrong_label|merge|split", "description": "..."}]}`;
+  return `Here is a floor plan image. We analyzed it and found these rooms:\n${roomList}\n\nDoes this match the image? List any: (a) missing rooms, (b) wrong labels, (c) rooms that should be merged or split.\nReturn as JSON: {"correct": true/false, "corrections": [...]}\nUse these EXACT formats for descriptions:\n- Missing room: {"type": "missing_room", "description": "Missing: Closet at top-right, size: small"}\n- Wrong label: {"type": "wrong_label", "description": "Bathroom should be Bedroom"}\n- Split needed: {"type": "split", "description": "Living Room appears to contain two separate spaces"}\n- Merge needed: {"type": "merge", "description": "Merge Room 1 and Room 2 into Kitchen"}`;
 }
 
 // ─── Response parsers ────────────────────────────────────────────────────────

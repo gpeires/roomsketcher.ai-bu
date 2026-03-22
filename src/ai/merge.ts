@@ -64,7 +64,7 @@ function roomToGridPosition(
   return GRID_POSITIONS[row * 3 + col];
 }
 
-function normalizePosition(pos: string): GridPosition {
+export function normalizePosition(pos: string): GridPosition {
   const normalized = pos.toLowerCase().replace(/\s+/g, '-');
   if (GRID_POSITIONS.includes(normalized as GridPosition)) {
     return normalized as GridPosition;
@@ -110,7 +110,7 @@ function symbolNearRoom(
   imageHeight: number,
 ): boolean {
   const symCenter = positionToCentroid(symPosition, imageWidth, imageHeight);
-  const margin = Math.min(imageWidth, imageHeight) * 0.1;
+  const margin = Math.min(imageWidth, imageHeight) * 0.05;
   return (
     symCenter.cx >= room.x - margin &&
     symCenter.cx <= room.x + room.width + margin &&
@@ -138,7 +138,7 @@ function normalizeFragmentLabel(label: string): string {
 
 const SIZE_FACTORS: Record<string, number> = { small: 0.6, medium: 1.0, large: 1.5 };
 
-function estimateRoomGeometry(
+export function estimateRoomGeometry(
   position: GridPosition,
   size: 'small' | 'medium' | 'large',
   imageWidth: number,
@@ -306,7 +306,7 @@ export function mergeResults(gather: GatherResults): MergedRoom[] {
     // 3. Layout Describer matching — centroid distance + label scoring
     if (layoutDescriber) {
       const cvCenter = roomCentroid(room);
-      const maxDist = Math.sqrt(imageWidth ** 2 + imageHeight ** 2); // image diagonal
+      const maxDist = Math.min(imageWidth, imageHeight) / 2; // half the shorter dimension
       let bestLayoutIdx = -1;
       let bestScore = 0;
 
@@ -334,16 +334,12 @@ export function mergeResults(gather: GatherResults): MergedRoom[] {
         }
       }
 
-      if (bestLayoutIdx >= 0 && bestScore >= 2) {
+      if (bestLayoutIdx >= 0 && bestScore >= 3) {
         matchedLayoutIndices.add(bestLayoutIdx);
         const lr = layoutDescriber.rooms[bestLayoutIdx];
         const normalizedName = normalizeFragmentLabel(lr.name);
-        // Use layout name if current label is generic and this label isn't claimed
+        // Use layout name only if current label is generic — never override OCR-confirmed labels
         if (isGenericLabel(label) && !claimedLabels.has(normalizedName.toLowerCase())) {
-          label = normalizedName;
-          claimedLabels.add(normalizedName.toLowerCase());
-        } else if (bestScore >= 5 && !claimedLabels.has(normalizedName.toLowerCase())) {
-          // Very strong match — override even named labels
           label = normalizedName;
           claimedLabels.add(normalizedName.toLowerCase());
         }

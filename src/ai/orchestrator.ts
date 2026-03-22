@@ -222,6 +222,10 @@ export function buildPipelineOutput(
       specialists_failed: stats.failed,
       ...(stats.errors && Object.keys(stats.errors).length > 0 && { specialist_errors: stats.errors }),
       ...(stats.specialistData && Object.keys(stats.specialistData).length > 0 && { specialist_data: stats.specialistData }),
+      ...(() => {
+        const cvMeta = (cv as unknown as { meta: { wall_thickness?: { thin_cm: number; thick_cm: number } } }).meta;
+        return cvMeta.wall_thickness ? { wall_thickness: cvMeta.wall_thickness } : {};
+      })(),
       // Raw CV data for pipeline diagnostics
       cv_rooms_raw: cv.rooms,
       cv_rooms_detected: cv.meta.rooms_detected,
@@ -304,6 +308,10 @@ export async function runPipeline(
   const merged = mergeResults(tieredGather);
 
   // 5. Validate — AI feedback loop
+  const imageSize: [number, number] = [
+    gather.cv.meta.image_size?.[0] ?? gather.cv.meta.image_width ?? 900,
+    gather.cv.meta.image_size?.[1] ?? gather.cv.meta.image_height ?? 900,
+  ];
   const { rooms: validated, totalCorrections, passes } = await validateMergedResults(
     merged,
     imageBytes,
@@ -311,13 +319,10 @@ export async function runPipeline(
     config.model,
     config.aiTimeoutMs,
     config.maxValidationPasses,
+    imageSize,
   );
 
   // 6. Reconcile hint bank — add non-overlapping low-confidence rooms
-  const imageSize: [number, number] = [
-    gather.cv.meta.image_size?.[0] ?? gather.cv.meta.image_width ?? 900,
-    gather.cv.meta.image_size?.[1] ?? gather.cv.meta.image_height ?? 900,
-  ];
   const reconciled = reconcileHintBank(validated, hintBank, imageSize);
 
   // 7. Build output + record neuron usage

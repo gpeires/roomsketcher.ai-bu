@@ -441,17 +441,26 @@ export async function handleAnalyzeImage(
         ? 'CV Analysis Complete (AI budget exhausted)'
         : `AI-Enhanced Analysis Complete (pipeline v${result.meta.pipeline_version})`;
 
+      // Auto-convert pipeline output to ready-to-use sketch input
+      const { pipelineToSketchInput } = await import('../ai/convert');
+      const sketchInput = pipelineToSketchInput(result);
+
       const summary = [
         `**${pipelineLabel}** — ${result.rooms.length} rooms detected`,
         `Scale: ${result.meta.scale_cm_per_px.toFixed(2)} cm/px | Walls: ${result.meta.walls_detected}`,
         `AI specialists: ${result.meta.specialists_succeeded.length} succeeded, ${result.meta.specialists_failed.length} failed`,
         `Validation: ${result.meta.validation_passes} pass(es), ${result.meta.ai_corrections} correction(s)`,
         '',
+        '## Pipeline output',
         '```json',
         JSON.stringify(result, null, 2),
         '```',
         '',
-        'Review the source image above against the AI-enhanced output. The confidence scores indicate how certain each room detection is.',
+        '## Ready-to-use input for generate_floor_plan',
+        'Pass this directly to generate_floor_plan — do NOT manually reconstruct room positions or sizes:',
+        '```json',
+        JSON.stringify(sketchInput, null, 2),
+        '```',
       ].join('\n');
 
       const content: ContentBlock[] = [];

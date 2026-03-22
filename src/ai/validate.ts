@@ -1,12 +1,14 @@
 // src/ai/validate.ts
-import type { MergedRoom, ValidatorResult, SpecialistFailure } from './types';
+import type { MergedRoom, ValidatorResult, SpecialistFailure, GridPosition } from './types';
 import { buildValidatorPrompt, callVisionSpecialist, parseValidatorResponse } from './specialists';
+import { normalizePosition, estimateRoomGeometry } from './merge';
 
 // ─── Correction application (deterministic, testable) ────────────────────────
 
 export function applyCorrections(
   rooms: MergedRoom[],
   corrections: ValidatorResult['corrections'],
+  imageSize?: [number, number],
 ): { rooms: MergedRoom[]; applied: number; unapplied: ValidatorResult['corrections'] } {
   let applied = 0;
   const unapplied: ValidatorResult['corrections'] = [];
@@ -46,7 +48,42 @@ export function applyCorrections(
         }
         break;
       }
-      case 'missing_room':
+      case 'missing_room': {
+        // Parse: "Missing: {name} at {position}, size: {small|medium|large}"
+        // Also handle freeform: "Missing {name}" or "{name} is missing"
+        const structuredMatch = correction.description.match(
+          /Missing:\s*(.+?)\s+at\s+([\w-]+)(?:,\s*size:\s*(small|medium|large))?/i,
+        );
+        const freeformMatch = !structuredMatch
+          ? correction.description.match(/(?:Missing\s+|missing\s+)(.+?)(?:\s+at\s+([\w-]+))?$/i)
+          : null;
+
+        const match = structuredMatch || freeformMatch;
+        if (match && imageSize) {
+          const [, roomName, posStr, sizeStr] = match;
+          const position = normalizePosition(posStr || 'center');
+          const size = (sizeStr as 'small' | 'medium' | 'large') || 'small';
+          const geo = estimateRoomGeometry(position, size, imageSize[0], imageSize[1]);
+
+          // Don't add if a room with this label already exists
+          const alreadyExists = updatedRooms.some(
+            (r) => r.label.toLowerCase() === roomName.trim().toLowerCase(),
+          );
+          if (!alreadyExists) {
+            updatedRooms.push({
+              label: roomName.trim(),
+              ...geo,
+              type: roomName.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_'),
+              confidence: 0.4,
+              sources: ['validator'],
+            });
+            applied++;
+            continue;
+          }
+        }
+        unapplied.push(correction);
+        break;
+      }
       case 'merge':
         unapplied.push(correction);
         break;
@@ -65,6 +102,7 @@ export async function validateMergedResults(
   model: string,
   timeoutMs: number,
   maxPasses: number,
+  imageSize?: [number, number],
 ): Promise<{ rooms: MergedRoom[]; totalCorrections: number; passes: number }> {
   let currentRooms = rooms;
   let totalCorrections = 0;
@@ -85,7 +123,7 @@ export async function validateMergedResults(
     if (!parsed.ok) break;
     if (parsed.correct || parsed.corrections.length === 0) break;
 
-    const { rooms: corrected, applied } = applyCorrections(currentRooms, parsed.corrections);
+    const { rooms: corrected, applied } = applyCorrections(currentRooms, parsed.corrections, imageSize);
     totalCorrections += applied;
     currentRooms = corrected;
 
