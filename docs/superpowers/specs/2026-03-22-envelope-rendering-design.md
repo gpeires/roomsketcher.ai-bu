@@ -25,18 +25,22 @@ The current rendering pipeline has fundamental limitations that prevent accurate
 - Structural mass between clustered small rooms (bath/closet/W/D zones)
 - No wall overlap or coalescence problems — there's only one shape
 
-**Trade-off:** Exterior walls are no longer individually editable. Room edge editing replaces this (resize the room, envelope follows). Interior partition walls remain as discrete, draggable objects.
+**Trade-off:** Exterior walls change role from "visual + data" to "data only." They remain in `FloorPlan.walls` as objects carrying opening data and defining room boundaries, but are no longer rendered as individual thick polygons. The envelope handles the visual structural mass. Interior partition walls remain as discrete, draggable objects.
 
 ### Exterior openings (windows on the building perimeter)
 
-**Decision:** Render exterior openings as overlays on the envelope fill. Windows and doors on the building perimeter are drawn by cutting visual gaps into the envelope polygon at the opening position, then rendering the opening symbol (window lines, door arc) in that gap.
+**Decision:** Exterior walls remain in the data model. The renderer reads their openings to cut visual gaps in the envelope fill.
 
-**Implementation:** During envelope rendering, for each room edge that lies on the envelope boundary, check if that edge has openings defined. For each opening:
-1. Cut a gap in the envelope fill at the opening position (render the envelope polygon with a white rectangle overlay at the gap)
-2. Draw the opening symbol (window mullions, door swing arc) in the gap
-3. Opening data is stored on the room edge (not on a wall object), keyed by room label + wall direction
+**Key insight:** The envelope is purely a rendering construct. Exterior walls are purely a data construct. They don't interfere:
+- The envelope defines *what the structure looks like* (filled polygon)
+- Exterior walls define *where openings go* (data containers with opening arrays)
+- The renderer draws the envelope, then reads exterior walls' openings to cut gaps and draw opening symbols
 
-This means the `SimpleOpeningInput` schema (with `room` + `wall` direction) continues to work for exterior openings. Interior openings still attach to interior `Wall` objects as today.
+**No change protocol changes needed.** `add_opening`, `remove_opening`, `update_opening` (all keyed by `wall_id`) work unchanged. Users can add, remove, resize, and change type of windows on exterior walls exactly as today. The wall objects are just no longer drawn as individual thick polygons.
+
+**Rendering:** During envelope rendering, the renderer iterates exterior walls with openings. For each opening, it computes the opening's position on the envelope boundary and:
+1. Draws a white rectangle over the envelope fill at the gap position
+2. Draws the opening symbol (window mullions, door swing arc) in that gap
 
 ### Polygon room support (axis-aligned)
 
@@ -76,7 +80,7 @@ This means the `SimpleOpeningInput` schema (with `room` + `wall` direction) cont
 
 2. **Remove bounding-box reduction for polygon rooms** — `roomToRect()` still computes a bounding box (needed for furniture placement, label positioning), but `generateRoom()` uses the actual polygon for the room shape. Wall edges come from `getPolygonEdges()` for polygon rooms (already implemented).
 
-3. **Stop generating exterior wall segments** — The `generateWalls()` function currently emits both interior and exterior walls. Change it to emit only interior partition walls (shared edges). Exterior structure is handled by the envelope.
+3. **Keep exterior walls as data, stop rendering them as thick polygons** — The `generateWalls()` function continues to emit both interior and exterior walls. Exterior walls remain in `FloorPlan.walls` as data containers for openings. The *renderer* changes to not draw them as thick polygons — the envelope handles the visual.
 
 4. **Compute building envelope** — New function `computeEnvelope(rooms: Room[], exteriorThickness: number): Point[]`:
    - Take all room polygons
@@ -88,7 +92,7 @@ This means the `SimpleOpeningInput` schema (with `room` + `wall` direction) cont
 
 5. **Add envelope to FloorPlan** — Store the computed envelope polygon so renderers can use it.
 
-6. **Exterior opening placement** — For openings specified with `room` + `wall` direction, store them as metadata on the room (or as an `exteriorOpenings` array on the FloorPlan) rather than attaching to wall objects. The renderer reads these when drawing the envelope.
+6. **Opening placement unchanged** — `placeOpenings()` continues to work as today. Exterior openings attach to exterior wall objects via `wall_id`. The renderer reads these openings to cut gaps in the envelope visual.
 
 #### types.ts changes
 
@@ -130,7 +134,7 @@ Mirror the svg.ts rendering changes in the browser renderer's template string. N
 
 **Existing sketches without envelope:** When loading a sketch that has no `envelope` field (pre-refactor), fall back to the current wall-based rendering. The renderer checks `if (plan.envelope)` and uses the new structural mass approach; otherwise renders walls as individual segments (current behavior). No migration needed — old sketches continue to render, new sketches get the improved rendering.
 
-**Change protocol:** The existing `move_wall`/`update_wall`/`remove_wall` change types continue to work for interior walls. No new change types are needed in this phase. Room boundary editing (for exterior walls) can use the existing `update_room` change type with a new polygon. A future phase could add more ergonomic room-edge-specific change types if needed.
+**Change protocol:** All existing change types work unchanged. `move_wall`/`update_wall`/`remove_wall` work for both interior and exterior walls. `add_opening`/`remove_opening`/`update_opening` work for openings on any wall. Exterior walls still exist as data objects — they're just not rendered as thick polygons. No new change types needed.
 
 ### Phase 2: Fixture Catalog + Fill Patterns
 
