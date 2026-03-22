@@ -56,6 +56,12 @@ class MergeStepResult(NamedTuple):
     meta: dict
 
 
+def _safe_dilation(thick_wall_px: float) -> int:
+    """Compute dilation for polygon refinement, capped to avoid swallowing rooms."""
+    raw = max(1, int(thick_wall_px / 2))
+    return min(raw, 8)  # cap at 8px to preserve small rooms
+
+
 def cap_wall_thickness_cm(thin_cm: float, thick_cm: float) -> tuple[float, float]:
     """Clamp wall thickness to realistic residential bounds.
 
@@ -480,7 +486,7 @@ def refine_polygons_step(
     min_room_area = int(h * w * 0.005)
 
     # Build dilation mask: only dilate in regions around structural elements
-    dilation_amount = max(1, int(profile.thick_wall_px / 2))
+    dilation_amount = _safe_dilation(profile.thick_wall_px)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
                                        (dilation_amount * 2 + 1, dilation_amount * 2 + 1))
 

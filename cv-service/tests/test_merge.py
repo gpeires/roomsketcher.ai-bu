@@ -649,3 +649,18 @@ class TestWallThicknessCapping:
         thin_cm, thick_cm = cap_wall_thickness_cm(0.5, 1.0)
         assert thin_cm >= 5, f"Interior wall {thin_cm}cm below 5cm minimum"
         assert thick_cm >= 10, f"Exterior wall {thick_cm}cm below 10cm minimum"
+
+
+class TestRefinementDilation:
+    """Polygon refinement dilation must not exceed a safe maximum."""
+
+    def test_dilation_capped_at_8px(self):
+        """Even with thick walls, dilation should not exceed 8 pixels
+        to avoid swallowing small rooms."""
+        from cv.merge import _safe_dilation
+        # thick_wall_px = 30 -> raw dilation = 15 -> should cap at 8
+        assert _safe_dilation(30) <= 8
+        # thick_wall_px = 10 -> raw dilation = 5 -> should be 5 (within cap)
+        assert _safe_dilation(10) == 5
+        # thick_wall_px = 2 -> raw dilation = 1 -> minimum 1
+        assert _safe_dilation(2) == 1
