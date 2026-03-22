@@ -750,6 +750,7 @@ The generated sketches don't closely match source images:
 - **AI-only rooms use estimated geometry** — grid-cell positions (3x3) and estimated sizes, not real pixel coordinates
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
 - **Furniture placement is approximate** — Symbol Spotter detects fixtures but gives grid-cell positions, not pixel coords
+- **Wall thickness is hardcoded** — `compile-layout.ts` uses fixed 20cm exterior / 10cm interior walls regardless of CV-detected thickness. The CV pipeline now outputs `wall_thickness.thin_cm` and `wall_thickness.thick_cm` per floor plan, but the sketch compiler ignores it. Next step: pass `wallThickness` through `SimpleFloorPlanInput` and use detected values in wall generation (see design spec Part 3 at `docs/superpowers/specs/2026-03-21-wall-thickness-aware-room-detection-design.md`)
 
 ### Resolved: Worker-side merge now uses CV confidence data
 
@@ -1086,10 +1087,13 @@ For agent convenience, `compile-layout.ts` accepts a simplified format where age
 SimpleFloorPlanInput
 ├── rooms[]: {label, x, y, width, depth} or {label, polygon: [{x,y}...]}
 ├── openings[]: {type, between: [room1, room2]} or {type, room, wall: "north"|...}
-└── furniture[]: {type, room, x, y, width, depth}
+├── furniture[]: {type, room, x, y, width, depth}
+└── wallThickness?: {exteriorCm, interiorCm}  ← NOT YET IMPLEMENTED
 ```
 
 This is the primary input format used by both template mode and copy mode (CV output maps directly to this schema).
+
+**Wall thickness gap:** `compile-layout.ts` currently hardcodes `WALL_THICKNESS = {exterior: 20, interior: 10}` (cm). The CV pipeline detects actual wall thickness (`wall_thickness.thin_cm` / `thick_cm` in the `/analyze` response), but this data is not yet passed through to the sketch compiler. Adding an optional `wallThickness` field to `SimpleFloorPlanInput` and using it in `compileSimpleInput()` is the planned next step.
 
 ---
 
