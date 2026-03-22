@@ -30,6 +30,17 @@ class MergeStats(BaseModel):
     low: int = 0
     total: int = 0
 
+class StructuralElementOutput(BaseModel):
+    kind: str
+    centroid_cm: list[float]
+    size_cm: list[float]
+    thickness_cm: float
+
+class WallThickness(BaseModel):
+    thin_cm: float
+    thick_cm: float
+    structural_elements: list[StructuralElementOutput] = []
+
 class MetaOutput(BaseModel):
     image_size: tuple[int, int]
     scale_cm_per_px: float
@@ -43,6 +54,7 @@ class MetaOutput(BaseModel):
     merge_stats: MergeStats | None = None
     merge_time_ms: int = 0
     merge_steps: dict | None = None
+    wall_thickness: WallThickness | None = None
 
 class AnalyzeResponse(BaseModel):
     """Response allows rooms in both rect and polygon formats, and

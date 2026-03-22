@@ -54,6 +54,26 @@ async def test_sweep_endpoint(b64_simple_image):
         assert "meta" in s
 
 
+def test_analyze_response_includes_wall_thickness():
+    """Verify wall_thickness appears in API response meta."""
+    from app import MetaOutput
+    meta_data = {
+        "image_size": (100, 100),
+        "scale_cm_per_px": 1.0,
+        "walls_detected": 4,
+        "rooms_detected": 2,
+        "text_regions": 0,
+        "wall_thickness": {
+            "thin_cm": 10.0,
+            "thick_cm": 20.0,
+            "structural_elements": [],
+        },
+    }
+    meta = MetaOutput(**meta_data)
+    assert meta.wall_thickness is not None
+    assert meta.wall_thickness.thin_cm == 10.0
+
+
 @pytest.mark.anyio
 async def test_sweep_rejects_missing_image():
     transport = ASGITransport(app=app)

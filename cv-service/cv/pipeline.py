@@ -132,6 +132,27 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan") -> dict
     result["meta"]["merge_stats"] = _compute_merge_stats(confidence_scores)
     result["meta"]["merge_time_ms"] = elapsed_ms
     result["meta"]["merge_steps"] = merge_meta
+
+    # Wall thickness data from structural detection
+    wall_thickness = None
+    if merge_context.thickness_profile:
+        tp = merge_context.thickness_profile
+        scale = result.get("meta", {}).get("scale_cm_per_px", 1.0)
+        wall_thickness = {
+            "thin_cm": round(tp.thin_wall_px * scale, 1),
+            "thick_cm": round(tp.thick_wall_px * scale, 1),
+            "structural_elements": [
+                {
+                    "kind": e.kind,
+                    "centroid_cm": [round(e.centroid[0] * scale, 1), round(e.centroid[1] * scale, 1)],
+                    "size_cm": [round(e.bbox[2] * scale, 1), round(e.bbox[3] * scale, 1)],
+                    "thickness_cm": round(e.thickness_px * scale, 1),
+                }
+                for e in tp.elements
+                if e.kind != "perimeter"
+            ],
+        }
+    result["meta"]["wall_thickness"] = wall_thickness
     result["meta"]["preprocessing"] = {
         "strategy_used": "multi_strategy_merge",
         "anchor_strategy": anchor_name,
