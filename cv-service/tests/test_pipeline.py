@@ -54,6 +54,6 @@ def test_pipeline_includes_merge_steps(simple_2room_path):
     assert "bbox_filter_pre" in step_names
     assert "cluster" in step_names
     assert "bbox_filter_post" in step_names
-    assert "column_detect" in step_names
+    assert "structural_detect" in step_names
     for step in steps:
         assert "time_ms" in step

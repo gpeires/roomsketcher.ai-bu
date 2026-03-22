@@ -250,67 +250,158 @@ def filter_clusters_by_bbox(
     return MergeStepResult(rooms=kept, removed=removed, meta=meta)
 
 
-def detect_columns_step(
+def _find_thin_wall_peak(distances: np.ndarray) -> float:
+    """Find the dominant thin-wall half-thickness from the distance transform histogram.
+
+    The distance transform of wall pixels gives half-thickness at each point.
+    Thin walls produce a strong peak at low values (typically 1-3px).
+    Returns the peak half-thickness value.
+    """
+    wall_distances = distances[distances > 0]
+    if len(wall_distances) == 0:
+        return 1.0
+
+    max_dist = min(int(wall_distances.max()) + 1, 50)
+    hist, bin_edges = np.histogram(wall_distances, bins=max_dist, range=(0.5, max_dist + 0.5))
+
+    if len(hist) == 0:
+        return 1.0
+
+    peak_bin = int(np.argmax(hist))
+    return bin_edges[peak_bin] + 0.5  # center of bin
+
+
+def detect_structural_elements_step(
     rooms: list[dict],
     context: MergeContext,
 ) -> MergeStepResult:
-    """Detect structural columns (small square blobs) in the anchor mask."""
-    if context.strategy_masks is None or context.anchor_strategy is None:
-        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+    """Detect structural elements (columns, thick walls) via distance transform.
 
-    anchor_mask = None
-    for s in context.strategy_masks:
-        if s["strategy"] == context.anchor_strategy:
-            anchor_mask = s["mask"]
-            break
+    Replaces detect_columns_step. Uses distance transform on the anchor mask
+    to measure wall thickness, then classifies thick regions as columns or
+    thick walls based on shape.
+    """
+    anchor_mask = context.anchor_mask
     if anchor_mask is None:
-        return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
+        # Fallback: try to find anchor mask from strategy_masks
+        if context.strategy_masks and context.anchor_strategy:
+            for s in context.strategy_masks:
+                if s["strategy"] == context.anchor_strategy:
+                    anchor_mask = s["mask"]
+                    break
+        if anchor_mask is None:
+            return MergeStepResult(rooms=rooms, removed=[], meta={"skipped": True})
 
     h, w = anchor_mask.shape
     total_px = h * w
-    min_area = max(20, int(total_px * 0.0001))
-    max_area = max(500, int(total_px * 0.005))
 
+    # Distance transform: each wall pixel gets its distance to the nearest room pixel.
+    dist = cv2.distanceTransform(anchor_mask, cv2.DIST_L2, 5)
+
+    # Find the thin-wall baseline
+    thin_half = _find_thin_wall_peak(dist)
+    thin_full = thin_half * 2
+
+    # Threshold: pixels with distance > 2x the thin-wall peak are "thick"
+    thick_threshold = thin_half * 2
+    thick_mask = (dist > thick_threshold).astype(np.uint8) * 255
+
+    # Connected components on thick regions
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        anchor_mask, connectivity=8
+        thick_mask, connectivity=8
     )
 
-    candidates = []
+    elements: list[StructuralElement] = []
+    min_area = max(20, int(total_px * 0.0001))
+
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
-        if area < min_area or area > max_area:
+        if area < min_area:
             continue
-        cw = stats[i, cv2.CC_STAT_WIDTH]
-        ch = stats[i, cv2.CC_STAT_HEIGHT]
-        aspect = max(cw, ch) / max(min(cw, ch), 1)
-        if aspect > 1.3:
-            continue
-        bb_area = cw * ch
-        solidity = area / bb_area if bb_area > 0 else 0
-        if solidity < 0.8:
-            continue
-        cx, cy = centroids[i]
-        candidates.append({
-            "centroid": (int(cx), int(cy)),
-            "bbox": (int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP]),
-                     int(cw), int(ch)),
-            "area_px": int(area),
-            "solidity": round(solidity, 2),
-        })
+        cx, cy = int(centroids[i][0]), int(centroids[i][1])
+        bx = int(stats[i, cv2.CC_STAT_LEFT])
+        by = int(stats[i, cv2.CC_STAT_TOP])
+        bw = int(stats[i, cv2.CC_STAT_WIDTH])
+        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
+        aspect = max(bw, bh) / max(min(bw, bh), 1)
 
+        # Measure thickness: max distance value within this blob
+        blob_mask = (labels == i)
+        max_thickness = float(dist[blob_mask].max()) * 2  # full thickness
+
+        # Junction false-positive filter
+        if area < max(2000, int(total_px * 0.005)):
+            margin = 3
+            y0 = max(0, by - margin)
+            y1 = min(h, by + bh + margin)
+            x0 = max(0, bx - margin)
+            x1 = min(w, bx + bw + margin)
+            edges_wall = 0
+            if y0 > 0:
+                edges_wall += int(np.sum(anchor_mask[y0, x0:x1] > 0))
+            if y1 < h:
+                edges_wall += int(np.sum(anchor_mask[y1 - 1, x0:x1] > 0))
+            if x0 > 0:
+                edges_wall += int(np.sum(anchor_mask[y0:y1, x0] > 0))
+            if x1 < w:
+                edges_wall += int(np.sum(anchor_mask[y0:y1, x1 - 1] > 0))
+            perimeter_len = 2 * (x1 - x0) + 2 * (y1 - y0)
+            wall_ratio = edges_wall / max(perimeter_len, 1)
+            if wall_ratio > 0.6 and aspect < 2.0:
+                continue
+
+        # Classify
+        if area > total_px * 0.2:
+            kind = "perimeter"
+        elif aspect < 3 and area < max(5000, int(total_px * 0.01)):
+            kind = "column"
+        else:
+            kind = "thick_wall"
+
+        elements.append(StructuralElement(
+            kind=kind,
+            centroid=(cx, cy),
+            bbox=(bx, by, bw, bh),
+            area_px=area,
+            thickness_px=max_thickness,
+            aspect_ratio=round(aspect, 2),
+        ))
+
+    # Compute median thick-wall thickness
+    thick_thicknesses = [e.thickness_px for e in elements if e.kind != "perimeter"]
+    thick_wall_px = float(np.median(thick_thicknesses)) if thick_thicknesses else thin_full
+
+    # Grid detection
+    column_elements = [e for e in elements if e.kind == "column"]
     grid_detected = False
     grid_spacing = None
-    if len(candidates) >= 3:
-        xs = sorted(c["centroid"][0] for c in candidates)
-        ys = sorted(c["centroid"][1] for c in candidates)
+    if len(column_elements) >= 3:
+        xs = sorted(e.centroid[0] for e in column_elements)
+        ys = sorted(e.centroid[1] for e in column_elements)
         grid_detected, grid_spacing = _check_grid_regularity(xs, ys)
 
-    context.columns = candidates
+    profile = ThicknessProfile(
+        elements=elements,
+        thin_wall_px=thin_full,
+        thick_wall_px=thick_wall_px,
+        grid_detected=grid_detected,
+        grid_spacing_px=grid_spacing,
+    )
+    context.thickness_profile = profile
+
+    # Backward-compat: also set context.columns
+    context.columns = [
+        {"centroid": e.centroid, "bbox": e.bbox, "area_px": e.area_px}
+        for e in column_elements
+    ]
 
     meta = {
-        "columns_found": len(candidates),
+        "columns_found": len(column_elements),
         "grid_detected": grid_detected,
         "grid_spacing_px": grid_spacing,
+        "structural_elements": len(elements),
+        "thin_wall_px": round(thin_full, 1),
+        "thick_wall_px": round(thick_wall_px, 1),
     }
     return MergeStepResult(rooms=rooms, removed=[], meta=meta)
 
@@ -433,14 +524,14 @@ CLUSTER_STEP: tuple[str, Callable] = ("cluster", cluster_rooms_step)
 
 POST_CLUSTER_STEPS: dict[str, Callable] = {
     "bbox_filter_post": filter_clusters_by_bbox,
-    "column_detect": detect_columns_step,
+    "structural_detect": detect_structural_elements_step,
 }
 
 DEFAULT_MERGE_PIPELINE = [
     "bbox_filter_pre",
     "cluster",
     "bbox_filter_post",
-    "column_detect",
+    "structural_detect",
 ]
 
 EXCLUDED_MERGE_STEPS: set[str] = set()

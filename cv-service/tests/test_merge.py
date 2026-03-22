@@ -5,9 +5,10 @@ import pytest
 from cv.merge import cluster_rooms, assemble_rooms, _bbox_iou
 from cv.merge import (
     MergeContext, MergeStepResult, compute_consensus_bbox, filter_by_bbox,
-    cluster_rooms_step, filter_clusters_by_bbox, detect_columns_step,
+    cluster_rooms_step, filter_clusters_by_bbox, detect_structural_elements_step,
     run_merge_pipeline, DEFAULT_MERGE_PIPELINE, EXCLUDED_MERGE_STEPS,
     PRE_CLUSTER_STEPS, POST_CLUSTER_STEPS, CLUSTER_STEP,
+    StructuralElement, ThicknessProfile,
 )
 
 
@@ -303,52 +304,82 @@ class TestFilterClustersByBbox:
         assert len(result.removed) == 0
 
 
-class TestDetectColumnsStep:
-    def _make_grid_mask(self):
+class TestDetectStructuralElements:
+    def _make_thick_wall_mask(self):
+        """Mask with thin walls (2px) and thick walls (12px) and a column (10x10)."""
         mask = np.zeros((400, 600), dtype=np.uint8)
-        for row in range(3):
-            for col in range(4):
-                y, x = 50 + row * 100, 80 + col * 120
-                mask[y:y+10, x:x+10] = 255
-        mask[0:5, :] = 255
-        mask[:, 0:5] = 255
+        # Thin walls (2px wide)
+        mask[50:52, 50:550] = 255        # horizontal thin wall
+        mask[50:350, 50:52] = 255        # vertical thin wall
+        mask[50:350, 548:550] = 255      # vertical thin wall
+        mask[348:350, 50:550] = 255      # horizontal thin wall
+        # Thick wall (12px wide)
+        mask[190:202, 50:300] = 255      # horizontal thick wall
+        # Column (10x10 solid square, connected to thick wall)
+        mask[185:207, 295:310] = 255     # column at junction
         return mask
 
-    def test_finds_grid(self):
-        mask = self._make_grid_mask()
+    def test_detects_thick_elements(self):
+        mask = self._make_thick_wall_mask()
         rooms = [_make_room((300, 200))]
         ctx = MergeContext(
             image_shape=(400, 600),
             strategy_bboxes=[(0, 0, 600, 400)],
             anchor_strategy="raw",
+            anchor_mask=mask,
             strategy_masks=[{"strategy": "raw", "mask": mask}],
         )
-        result = detect_columns_step(rooms, ctx)
+        result = detect_structural_elements_step(rooms, ctx)
         assert len(result.rooms) == 1
-        assert result.rooms[0]["centroid"] == (300, 200)
-        assert ctx.columns is not None
-        assert result.meta["columns_found"] >= 6
+        assert ctx.thickness_profile is not None
+        assert ctx.thickness_profile.thin_wall_px > 0
+        assert ctx.thickness_profile.thick_wall_px > ctx.thickness_profile.thin_wall_px
+        assert len(ctx.thickness_profile.elements) >= 1
+        # At least one element should be a thick_wall or column
+        kinds = {e.kind for e in ctx.thickness_profile.elements}
+        assert kinds & {"thick_wall", "column"}
 
-    def test_ignores_elongated_components(self):
+    def test_thin_only_mask_finds_no_thick_elements(self):
+        """A mask with only 2px thin walls should find no structural elements."""
         mask = np.zeros((400, 600), dtype=np.uint8)
-        mask[100:102, 100:200] = 255
-        mask[200:220, 200:202] = 255
-        rooms = []
+        mask[100:102, 50:550] = 255
+        mask[200:202, 50:550] = 255
+        mask[50:350, 50:52] = 255
+        mask[50:350, 548:550] = 255
+        rooms = [_make_room((300, 150))]
         ctx = MergeContext(
             image_shape=(400, 600),
             strategy_bboxes=[(0, 0, 600, 400)],
             anchor_strategy="raw",
+            anchor_mask=mask,
             strategy_masks=[{"strategy": "raw", "mask": mask}],
         )
-        result = detect_columns_step(rooms, ctx)
-        assert result.meta["columns_found"] == 0
+        result = detect_structural_elements_step(rooms, ctx)
+        assert ctx.thickness_profile is not None
+        assert len(ctx.thickness_profile.elements) == 0
+        assert ctx.thickness_profile.thin_wall_px > 0
 
-    def test_noop_when_no_masks(self):
+    def test_noop_when_no_anchor_mask(self):
         rooms = [_make_room((300, 200))]
         ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)])
-        result = detect_columns_step(rooms, ctx)
+        result = detect_structural_elements_step(rooms, ctx)
         assert len(result.rooms) == 1
         assert result.meta.get("skipped") is True
+
+    def test_backward_compat_metadata_keys(self):
+        """Step still emits columns_found and grid_detected for backward compat."""
+        mask = self._make_thick_wall_mask()
+        rooms = [_make_room((300, 200))]
+        ctx = MergeContext(
+            image_shape=(400, 600),
+            strategy_bboxes=[(0, 0, 600, 400)],
+            anchor_strategy="raw",
+            anchor_mask=mask,
+            strategy_masks=[{"strategy": "raw", "mask": mask}],
+        )
+        result = detect_structural_elements_step(rooms, ctx)
+        assert "columns_found" in result.meta
+        assert "grid_detected" in result.meta
 
 
 class TestMergePipeline:
@@ -376,15 +407,15 @@ class TestMergePipeline:
         assert "bbox_filter_pre" in step_names
         assert "cluster" in step_names
         assert "bbox_filter_post" in step_names
-        assert "column_detect" in step_names
+        assert "structural_detect" in step_names
 
     def test_excludes_steps(self):
         strategy_rooms = self._make_strategy_data()
         ctx = MergeContext(image_shape=(400, 600), strategy_bboxes=[(0, 0, 600, 400)] * 2)
-        rooms, meta = run_merge_pipeline(strategy_rooms, ctx, excluded={"bbox_filter_pre", "column_detect"})
+        rooms, meta = run_merge_pipeline(strategy_rooms, ctx, excluded={"bbox_filter_pre", "structural_detect"})
         step_names = [s["name"] for s in meta["steps"]]
         assert "bbox_filter_pre" not in step_names
-        assert "column_detect" not in step_names
+        assert "structural_detect" not in step_names
         assert "cluster" in step_names
 
     def test_step_meta_has_timing(self):
@@ -399,10 +430,10 @@ class TestMergePipeline:
         assert "bbox_filter_pre" in PRE_CLUSTER_STEPS
         assert CLUSTER_STEP[0] == "cluster"
         assert "bbox_filter_post" in POST_CLUSTER_STEPS
-        assert "column_detect" in POST_CLUSTER_STEPS
+        assert "structural_detect" in POST_CLUSTER_STEPS
 
     def test_default_pipeline_order(self):
-        assert DEFAULT_MERGE_PIPELINE == ["bbox_filter_pre", "cluster", "bbox_filter_post", "column_detect"]
+        assert DEFAULT_MERGE_PIPELINE == ["bbox_filter_pre", "cluster", "bbox_filter_post", "structural_detect"]
 
     def test_excluded_merge_steps_empty(self):
         assert len(EXCLUDED_MERGE_STEPS) == 0
