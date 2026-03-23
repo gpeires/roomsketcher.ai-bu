@@ -342,7 +342,10 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. The CV pipeline extracts precise room coordinates, dimensions, and labels that you cannot accurately estimate by looking at the image. Do NOT skip this step and eyeball the layout — your dimension estimates will be wrong. If the user pasted an image without a URL, direct them to upload it at ${this.getWorkerUrl()}/upload first.
+HARD GATE: You MUST call analyze_floor_plan_image with a URL BEFORE calling generate_floor_plan. No exceptions.
+- If the user provided a URL → call analyze_floor_plan_image immediately.
+- If the user pasted/attached an image (no URL) → you MUST direct them to upload at ${this.getWorkerUrl()}/upload and STOP. Do NOT proceed. Do NOT try to read dimensions from the image yourself. Even if you can see printed dimensions clearly, your manual reading will produce worse results than the CV pipeline. Wait for the URL.
+- If you have not called analyze_floor_plan_image in this conversation, do NOT call generate_floor_plan.
 
 Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Quickly note the CV-detected rooms, scale, and outline. Trust CV for scale/wall-thickness, trust your eyes for room count and labels. Do NOT spend time writing a lengthy analysis — just absorb the data and move on.
 
@@ -485,12 +488,12 @@ TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
 1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url. Do not ask questions, do not wait. Just call it.
 
-2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → You can SEE the image but you MUST NOT try to recreate it by eye. The CV pipeline will extract precise data you cannot. Direct the user to upload it:
+2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → STOP. Do NOT try to read dimensions from the image. Do NOT try to build a floor plan manually. Even if dimensions are clearly printed, your manual reading will be less accurate than the CV pipeline. You MUST direct the user to upload and then WAIT:
    "I can see your floor plan! To get accurate room dimensions and positions, I need to run it through our computer vision pipeline. Please upload it so I can analyze it:
    1. Open the upload page: ${this.getWorkerUrl()}/upload
    2. Drop or paste your image there
    3. Copy the URL it gives you and paste it back here"
-   Then STOP and wait for the URL. Do NOT proceed to generate_floor_plan without CV output.
+   After sending this message, STOP. Do not call generate_floor_plan. Do not start mapping out rooms. Wait for the URL.
 
 Do NOT attempt to pass images as base64 — always use the upload page to get a URL.
 
