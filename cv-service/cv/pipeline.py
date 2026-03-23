@@ -17,6 +17,7 @@ from cv.openings import detect_openings
 from cv.topology import detect_adjacency
 from cv.output import build_floor_plan_input
 from cv.merge import run_merge_pipeline, MergeContext, cap_wall_thickness_cm
+from cv.outline import extract_outline, build_spatial_grid
 import cv.enhance as _enhance_mod
 
 log = logging.getLogger(__name__)
@@ -222,6 +223,15 @@ def _run_pipeline(
         "text_regions": len(text_regions),
         "openings_detected": len(openings),
     }
+
+    # Extract building outline and spatial grid
+    outline = extract_outline(binary, scale, floor_plan_bbox=fp_bbox)
+    if outline:
+        result["outline"] = outline
+    grid = build_spatial_grid(rooms, text_regions, scale, fp_bbox)
+    if grid:
+        result["spatial_grid"] = grid
+
     return result
 
 

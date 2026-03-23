@@ -192,6 +192,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── topology.py             # Room adjacency via mask dilation overlap
 │   ├── ocr.py                  # Tesseract OCR + merge_nearby_text() for split dimension reassembly
 │   ├── dimensions.py           # Parse metric/imperial/compound dimensions to cm
+│   ├── outline.py              # Building outline extraction (contour detection) + spatial grid (ASCII room layout map)
 │   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon), label filtering (_is_room_label, _DIM_LIKE, _FIXTURE_ABBREVS, _LOGO_WORDS), ghost room filtering
 ├── tests/
 │   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped, low-contrast)
@@ -470,7 +471,9 @@ _run_pipeline(image, binary_override?, rooms_override?)
   │   │   └── No fallback: if all candidates fail _is_room_label(), room gets "Room N" (not noise text)
   │   ├── Ghost room filter — removes negative coords, <0.5% image area, centroid outside bbox
   │   └── _is_room_label() — rejects dimensions (_DIM_LIKE), fixture abbrevs, logos, all-caps non-room
-  └── cap_wall_thickness_cm() on output: interior 5-20cm, exterior 10-40cm
+  ├── cap_wall_thickness_cm() on output: interior 5-20cm, exterior 10-40cm
+  ├── extract_outline(binary, scale, fp_bbox) → building perimeter polygon (cm, origin-normalized)
+  └── build_spatial_grid(rooms, text_regions, scale, fp_bbox) → ASCII room layout map
 ```
 
 **Why room-level merging, not wall-level?** Bitwise OR of wall masks is destructive — accumulated wall noise from many strategies fills room interiors, destroying rooms. Room-level clustering is monotonic: it can only ADD rooms, never destroy them. On the critical 520 W 23rd test image, wall-level merge produced 0 rooms from 13 contributing strategies; room-level merge recovered 3 real rooms (earlier baseline of 5 included 2 margin artifacts that `bbox_filter_pre` now correctly removes).
@@ -492,6 +495,17 @@ _run_pipeline(image, binary_override?, rooms_override?)
   "adjacency": [
     {"rooms": ["Kitchen", "Living"], "shared_edge": "vertical", "length_cm": 300}
   ],
+  "outline": [
+    {"x": 0, "y": 0}, {"x": 500, "y": 0}, {"x": 500, "y": 480},
+    {"x": 730, "y": 480}, {"x": 730, "y": 850}, {"x": 0, "y": 850}
+  ],
+  "spatial_grid": {
+    "grid": ["KT KT ·  BR BR", "LV LV ·  BR BR", "LV LV BA BA ·"],
+    "legend": {"KT": "Kitchen (11'8\" x 9'8\")", "LV": "Living Room", "BR": "Bedroom", "BA": "Bath"},
+    "cell_size_cm": 30,
+    "origin": {"x": 0, "y": 0},
+    "size": {"cols": 5, "rows": 3}
+  },
   "meta": {
     "image_size": [1200, 800],
     "scale_cm_per_px": 1.25,
@@ -616,7 +630,7 @@ The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-se
 | `/analyze` | POST | Multi-strategy merge: run 23 strategies, cluster rooms, return merged result |
 | `/sweep` | POST | Diagnostics: run all 28 strategies independently, return per-strategy results with debug binary masks |
 
-The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], meta}`. Rooms have `confidence` (0.5-0.9, rooms below 0.5 are filtered out), `found_by` (list of strategy names), and optionally `type` (inferred from label text via `_infer_room_type()`). Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
+The `/analyze` endpoint accepts either `image` (base64) or `image_url` (fetched server-side via httpx). Returns `{name, rooms[], openings[], adjacency[], outline?, spatial_grid?, meta}`. Rooms have `confidence` (0.5-0.9, rooms below 0.5 are filtered out), `found_by` (list of strategy names), and optionally `type` (inferred from label text via `_infer_room_type()`). `outline` is the building perimeter polygon (cm, origin-normalized). `spatial_grid` contains an ASCII grid, legend, cell size, and grid dimensions. Meta includes `strategies_run`, `strategies_contributing`, `merge_stats`, `merge_time_ms`, and `preprocessing` with anchor strategy info.
 
 The `/sweep` endpoint runs all 28 strategies (including excluded ones) and returns `{image_size, strategies[]}` where each strategy entry has the full pipeline result plus `debug_binary` (base64 PNG of the binary wall mask) and `time_ms`.
 
@@ -789,7 +803,7 @@ The generated sketches don't closely match source images:
 - **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **envelope-based rendering** — `compileLayout()` computes a building envelope (union of room polygons expanded by exterior wall thickness) and stores it as `plan.envelope`. Both SVG renderers detect this field and use the envelope-minus-rooms model: structural mass as filled polygon, rooms as colored cutouts, interior walls as thin lines. Legacy sketches without `envelope` fall back to the old wall-based rendering (exterior wall polygons + junction circles).
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
-### Exterior perimeter irregularity (2026-03-22 finding, PROVEN 2026-03-22)
+### Exterior perimeter irregularity (2026-03-22 finding, PARTIALLY PROVEN)
 
 **Problem:** Generated sketches always have rectangular exterior perimeters, even when source floor plans have irregular shapes (L-shaped apartments, step-outs, indentations). Real floor plans often have non-rectangular exterior walls.
 
@@ -799,12 +813,11 @@ The generated sketches don't closely match source images:
 3. Traces outer contour of filled grid → axis-aligned polygon
 4. Offsets outward by exterior wall thickness
 
-**Proven working (2026-03-22):** Shore Drive sketch `2Gq_OIlsBj2W69-yW8w7l` demonstrates a clearly irregular perimeter:
-- **Balcony protrudes north** from the NW corner (175cm beyond the kitchen's north wall)
-- **South wall steps** — WIC/CL area stops 200cm short of Bedroom 2's south wall
-- **Overall L-shaped footprint** — not rectangular
+**Partially proven (2026-03-22):** Shore Drive sketch `2Gq_OIlsBj2W69-yW8w7l` shows some irregularity (balcony protrusion, stepped south wall). However, the full L-shape of the source is NOT accurately reproduced — specifically, Bedroom 2 should protrude significantly to the RIGHT at the bottom, and the kitchen protrudes a bit at the top. The sketch only captured the balcony bump, not the main building shape.
 
-The envelope code required NO changes. The fix was entirely in the **room placement approach**.
+**New approach (2026-03-23): CV-extracted building outline.** Instead of hoping room placement produces the right perimeter, the CV pipeline now extracts the **actual building outline** directly from the source image via contour detection on thick black walls. This gives Claude the exact target shape as a polygon before placing any rooms. See "Building Outline & Spatial Grid" section below.
+
+The envelope code required NO changes. The remaining challenge is getting Claude to place rooms accurately within the known outline.
 
 **The fundamental insight — additive vs subtractive:**
 - **Wrong approach (subtractive):** Start with a rectangular bounding box, place rooms to fill it, "cut out" room shapes. This forces every floor plan into a rectangle.
@@ -821,6 +834,71 @@ The envelope code required NO changes. The fix was entirely in the **room placem
 - `src/sketch/compile-layout.ts` — `computeEnvelope()` (lines ~522-562), `ENVELOPE_GAP_THRESHOLD` imported from defaults
 - `src/sketch/geometry.ts` — `rasterizeToGrid()`, `traceContour()`, `offsetAxisAlignedPolygon()`
 - `src/sketch/defaults.ts` — `ENVELOPE_GAP_THRESHOLD = 50` (cm)
+
+### Building Outline & Spatial Grid (2026-03-23, NEW)
+
+**Problem:** Claude struggles to reproduce the correct building shape from floor plan images. Even with additive room placement, the agent often misinterprets which rooms protrude and by how much. The CV room detection merges many rooms into blobs, so the spatial layout is ambiguous.
+
+**Solution:** Two new CV outputs give Claude structured spatial data instead of making it interpret the image:
+
+#### 1. Building Outline (`outline` field)
+
+The building perimeter polygon, extracted directly from the thick black walls via contour detection. Algorithm (`cv/outline.py: extract_outline()`):
+1. Crop to floor plan bbox (excludes footer/logos like COMPASS branding)
+2. Heavy morphological closing (kernel = image_dim/8) seals ALL gaps (doors, windows, openings)
+3. Flood fill from border → marks exterior
+4. Interior = NOT exterior, union with walls = building footprint
+5. `cv2.findContours(RETR_EXTERNAL)` → largest contour
+6. `cv2.approxPolyDP(epsilon=0.008*perimeter)` → simplified polygon
+7. Convert to cm, snap to 10cm grid, normalize origin to (0,0)
+
+Returns a list of `{x, y}` points in cm. Example for Shore Drive (L-shaped):
+```json
+[{"x": 0, "y": 0}, {"x": 500, "y": 0}, {"x": 500, "y": 480},
+ {"x": 680, "y": 480}, {"x": 680, "y": 850}, {"x": 0, "y": 850}]
+```
+This shows the building is 500cm wide at top, steps out to 680cm at y=480 where Bedroom 2 protrudes right.
+
+**Quality across test images (2026-03-23):**
+- Shore Drive: 9 vertices, 680×850cm — excellent L-shape
+- Res 507: 10 vertices, 950×1090cm — shows stepped shape
+- Apt 6C: 14 vertices, 1860×1900cm — too many vertices, scale may be wrong
+- Unit 2C: 19 vertices, 650×450cm — too noisy, needs stronger simplification
+
+**Known issues:**
+- **Outline over-detailed on some images** — Unit 2C gets 19 vertices for what should be ~6-8. Needs either higher epsilon or a vertex-count cap with re-simplification.
+- **Apt 6C outline is oversized** — 1860cm wide suggests the fp_bbox is too large or scale is off.
+
+#### 2. Spatial Grid (`spatial_grid` field)
+
+An ASCII map showing where each room sits, built from room masks + OCR labels. Algorithm (`cv/outline.py: build_spatial_grid()`):
+1. Create grid cells at `cell_size_cm` resolution (default 30cm)
+2. For each cell, test which room mask contains its center pixel
+3. Assign 2-char abbreviations via `_make_room_abbreviation()` (LV=Living, KT=Kitchen, BR=Bedroom, etc.)
+4. Pair rooms with dimension text from OCR (finds compound dimensions like "12'8\" x 8'8\"" near room centroids)
+5. Junk label filtering via `_is_junk_label()` — rejects dimensions, addresses, broker names, fixture abbreviations, special characters
+
+**Grid quality is bottlenecked by room detection.** The CV pipeline merges many rooms into single blobs (e.g., Shore Drive has one giant "Room" blob covering Living+Kitchen+Halls+Baths). The grid can only show rooms the CV detects individually. The outline polygon is the more reliable output.
+
+**Junk label filtering (`_is_junk_label()`)** catches:
+- Dimension fragments: `15'1"`, `8-7"`, numbers with `x`
+- Footer text: addresses, city names, broker names (COMPASS, Douglas Elliman, etc.)
+- Fixture abbreviations: DW, Ref, W/D, P
+- Short/single-char text, special characters ({, \, |)
+
+**Remaining junk leakers (2026-03-23):** Some OCR garbage still gets through: `ay`, `tc`, `{0`. The filter needs to reject short lowercase non-room words and text with special characters more aggressively. This is the next improvement to make.
+
+#### MCP Tool Output
+
+The `analyze_floor_plan_image` MCP tool (`src/sketch/tools.ts: handleAnalyzeImage()`) formats both outputs for Claude:
+- **Outline** → JSON polygon with explanation ("Use this as the target shape — place rooms INSIDE this outline")
+- **Grid** → ASCII art with legend showing abbreviation→room name mappings and dimension annotations
+
+**Key files:**
+- `cv-service/cv/outline.py` — `extract_outline()`, `build_spatial_grid()`, `_make_room_abbreviation()`, `_is_junk_label()`
+- `cv-service/cv/pipeline.py` — wires outline+grid into `_run_pipeline()`
+- `cv-service/app.py` — `AnalyzeResponse` Pydantic model includes `outline` and `spatial_grid` fields
+- `src/sketch/tools.ts` — `handleAnalyzeImage()` formats outline+grid in MCP response
 
 ### Generate→Preview→Compare loop experience (2026-03-22, updated)
 

@@ -57,6 +57,13 @@ class MetaOutput(BaseModel):
     merge_steps: dict | None = None
     wall_thickness: WallThickness | None = None
 
+class SpatialGridOutput(BaseModel):
+    grid: list[str]
+    legend: dict[str, str]
+    cell_size_cm: int
+    origin: dict[str, int]
+    size: dict[str, int]
+
 class AnalyzeResponse(BaseModel):
     """Response allows rooms in both rect and polygon formats, and
     includes detected openings and adjacency data."""
@@ -64,6 +71,8 @@ class AnalyzeResponse(BaseModel):
     rooms: list[dict]
     openings: list[dict] = []
     adjacency: list[dict] = []
+    outline: list[dict] | None = None
+    spatial_grid: SpatialGridOutput | None = None
     meta: MetaOutput
 
 class SweepRequest(BaseModel):

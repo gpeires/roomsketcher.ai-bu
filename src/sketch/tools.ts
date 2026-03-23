@@ -447,6 +447,14 @@ export async function handleAnalyzeImage(
     rooms: Array<{ label: string; x: number; y: number; width: number; depth: number; polygon?: Array<{ x: number; y: number }> }>;
     openings?: Array<Record<string, unknown>>;
     adjacency?: Array<Record<string, unknown>>;
+    outline?: Array<{ x: number; y: number }>;
+    spatial_grid?: {
+      grid: string[];
+      legend: Record<string, string>;
+      cell_size_cm: number;
+      origin: { x: number; y: number };
+      size: { cols: number; rows: number };
+    };
     meta: {
       walls_detected: number;
       rooms_detected: number;
@@ -465,12 +473,44 @@ export async function handleAnalyzeImage(
     ? '\n\n⚠️ **Scale Warning:** No dimension labels were matched to walls. Room sizes are estimated using a fallback scale and may be significantly wrong. Compare the rooms against the source image and adjust sizes as needed.'
     : '';
 
+  // Build outline section
+  const outlineSection = cvResult.outline
+    ? [
+        '',
+        '## Building outline (perimeter polygon, cm)',
+        'This is the detected outer boundary of the building. Use this as the target shape — place rooms INSIDE this outline.',
+        '```json',
+        JSON.stringify(cvResult.outline, null, 2),
+        '```',
+      ]
+    : [];
+
+  // Build spatial grid section
+  const gridSection = cvResult.spatial_grid
+    ? [
+        '',
+        `## Spatial grid (each cell = ${cvResult.spatial_grid.cell_size_cm}cm)`,
+        'This shows WHERE each room sits in the layout. Use this as your visual map for room placement.',
+        '```',
+        ...cvResult.spatial_grid.grid,
+        '```',
+        '',
+        '**Legend:** ' + Object.entries(cvResult.spatial_grid.legend)
+          .map(([abbrev, label]) => `${abbrev}=${label}`)
+          .join(', '),
+        `Grid origin: (${cvResult.spatial_grid.origin.x}cm, ${cvResult.spatial_grid.origin.y}cm), · = empty/wall`,
+      ]
+    : [];
+
   const summary = [
     `**CV Analysis Complete** — ${cvResult.rooms.length} rooms detected`,
     `Scale: ${cvResult.meta.scale_cm_per_px.toFixed(2)} cm/px (${cvResult.meta.scale_confidence ?? 'measured'})`,
     `Walls: ${cvResult.meta.walls_detected}, Text regions: ${cvResult.meta.text_regions}`,
     ...(cvResult.meta.wall_thickness ? [`Wall thickness: interior ${cvResult.meta.wall_thickness.thin_cm}cm, exterior ${cvResult.meta.wall_thickness.thick_cm}cm`] : []),
     scaleWarning,
+    ...outlineSection,
+    ...gridSection,
+    '',
     '',
     '## CV detected rooms',
     '```json',
