@@ -342,14 +342,14 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-HARD GATE (Copy Mode only): You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. This gate applies ONLY when the user provided a reference image — it does NOT apply to Design Mode below.
-- If the user provided a URL → call analyze_floor_plan_image with it immediately.
-- If you have the image as a data URI → pass it as image_url to analyze_floor_plan_image (data URIs are supported).
-- If the user pasted an image and you have no URL or data URI → direct them to upload at ${this.getWorkerUrl()}/upload and STOP. Do NOT read dimensions manually.
+COPY MODE REQUIRES CV ANALYSIS. No exceptions, no workarounds. The server will REJECT generate_floor_plan calls with 3+ rooms if you haven't run CV analysis first.
+- User provided a URL → call analyze_floor_plan_image with it.
+- User pasted/attached an image (no URL) → call upload_image with the image data to get a URL, then call analyze_floor_plan_image with that URL. This takes 2 quick tool calls.
+- There is ZERO reason to skip CV analysis or read dimensions by eye. The tools handle everything.
 
-Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Quickly note the CV-detected rooms, scale, and outline. Trust CV for scale/wall-thickness, trust your eyes for room count and labels. Do NOT spend time writing a lengthy analysis — just absorb the data and move on.
+Step 1: ANALYZE — Get CV data (upload_image first if needed, then analyze_floor_plan_image). Quickly note rooms, scale, outline. Do NOT write a lengthy analysis.
 
-Step 1b (ONLY IF NEEDED): If the outline has way too many vertices for the building shape (e.g., 14 for a rectangle), re-call with higher outline_epsilon. Otherwise skip this step.
+Step 1b (ONLY IF NEEDED): If the outline has way too many vertices for the building shape (e.g., 14 for a rectangle), re-call with higher outline_epsilon.
 
 Step 2: BUILD ALL ROOMS — Call generate_floor_plan with ALL rooms. Start from CV rooms, add any the CV missed. Rooms only — no furniture, no openings beyond obvious ones. Be fast, not perfect.
 
@@ -486,16 +486,9 @@ WHY THIS TOOL IS MANDATORY: You cannot accurately estimate room dimensions, wall
 
 TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
-1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url. Do not ask questions, do not wait. Just call it.
+1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url.
 
-2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → If you have access to the image as a data URI (data:image/...), pass it directly as image_url — the server handles data URIs. Otherwise, direct the user to upload:
-   "I can see your floor plan! To get accurate dimensions, please upload it so I can run CV analysis:
-   1. Open ${this.getWorkerUrl()}/upload
-   2. Drop or paste your image there
-   3. Copy the URL and paste it back here"
-   After sending this message, STOP. Do NOT try to read dimensions manually. Do NOT call generate_floor_plan. Wait for the URL.
-
-Data URIs are accepted: if you have a data:image/... URI (e.g. from a pasted image), pass it as image_url — the server will extract the base64 automatically. You can also pass raw base64 as the image parameter.
+2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → Call upload_image with the image data (base64 or data URI) to get a URL. Then call this tool with that URL. Two tool calls, fully automatic — do NOT ask the user to upload manually, do NOT read dimensions by eye.
 
 OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.
 
@@ -526,6 +519,61 @@ When CV and your visual understanding disagree:
           this.setState({ ...(this.state ?? {}), cvAnalyzed: true });
         }
         return result;
+      },
+    );
+
+    this.server.registerTool(
+      'upload_image',
+      {
+        description: `Upload a floor plan image so it can be used with analyze_floor_plan_image.
+
+USE THIS TOOL WHEN: The user pasted or attached a floor plan image in chat and you don't have a URL for it. Pass the image data (base64 or data URI) and get back a permanent URL.
+
+WORKFLOW: upload_image → get URL → analyze_floor_plan_image with that URL → generate_floor_plan
+
+This is the ONLY correct way to handle pasted images. Do NOT read dimensions by eye. Do NOT direct the user to a web page. Just call this tool.`,
+        inputSchema: {
+          image: z.string().describe('The image as a base64 string or a data URI (data:image/jpeg;base64,...). Both formats are accepted.'),
+        },
+      },
+      async ({ image }) => {
+        // Strip data URI prefix if present, detect MIME
+        let base64 = image;
+        let contentType = 'image/jpeg';
+        const dataUriMatch = image.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (dataUriMatch) {
+          contentType = dataUriMatch[1];
+          base64 = dataUriMatch[2];
+        }
+        // Validate content type
+        if (contentType !== 'image/png' && contentType !== 'image/jpeg') {
+          contentType = 'image/jpeg'; // default fallback
+        }
+        // Decode and validate size
+        let bytes: Uint8Array;
+        try {
+          bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        } catch {
+          return { content: [{ type: 'text' as const, text: 'Invalid base64 image data. Make sure you are passing the full base64 string or a valid data URI.' }] };
+        }
+        if (bytes.byteLength > 10 * 1024 * 1024) {
+          return { content: [{ type: 'text' as const, text: 'Image too large (max 10 MB). Try compressing the image first.' }] };
+        }
+        if (bytes.byteLength < 1000) {
+          return { content: [{ type: 'text' as const, text: `Image data is suspiciously small (${bytes.byteLength} bytes). This may be truncated. Make sure you are passing the complete image data.` }] };
+        }
+        // Store in D1 (same logic as /api/upload-image endpoint)
+        const id = crypto.randomUUID();
+        const chunks: string[] = [];
+        for (let i = 0; i < bytes.length; i += 8192) {
+          chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+        }
+        const storedBase64 = btoa(chunks.join(''));
+        await this.env.DB.prepare(
+          'INSERT INTO uploaded_images (id, data, content_type, created_at) VALUES (?, ?, ?, ?)'
+        ).bind(id, storedBase64, contentType, new Date().toISOString()).run();
+        const imageUrl = `${this.getWorkerUrl()}/api/images/${id}`;
+        return { content: [{ type: 'text' as const, text: `Image uploaded successfully.\n\n**URL:** ${imageUrl}\n\nNow call analyze_floor_plan_image with this URL as image_url.` }] };
       },
     );
 

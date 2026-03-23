@@ -458,18 +458,8 @@ export async function handleAnalyzeImage(
   _db?: D1Database,
   workerUrl?: string,
 ): Promise<ToolResult> {
-  // Handle data URIs — extract base64 and treat as direct image
-  if (input.image_url && input.image_url.startsWith('data:')) {
-    const match = input.image_url.match(/^data:image\/[^;]+;base64,(.+)$/);
-    if (match) {
-      input.image = match[1];
-      input.image_url = undefined;
-    }
-  }
-
   if (!input.image && !input.image_url) {
-    const uploadUrl = workerUrl ? `${workerUrl}/upload` : '/upload';
-    return { content: [{ type: 'text' as const, text: `No image provided. To analyze a floor plan image:\n\n1. Upload your image at ${uploadUrl}\n2. Copy the returned URL\n3. Call this tool again with that URL as image_url\n\nThe upload page supports drag-drop, paste from clipboard, and file selection.` }] };
+    return { content: [{ type: 'text' as const, text: `No image provided. Use upload_image to upload a pasted image first, then call this tool with the returned URL.` }] };
   }
 
   // Fetch the source image for visual feedback
