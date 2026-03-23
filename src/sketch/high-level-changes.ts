@@ -6,6 +6,7 @@ import { polygonBoundingBox, shoelaceArea, boundingBox } from './geometry';
 import { ROOM_COLORS } from './defaults';
 import { FURNITURE_CATALOG } from './furniture-catalog';
 import { applyChanges } from './changes';
+import { computeEnvelope } from './compile-layout';
 import {
   findRoomByLabel,
   findRoomWalls,
@@ -135,11 +136,6 @@ const RemoveFurnitureHLSchema = z.object({
   furniture_id: z.string().optional(),
 });
 
-const SetEnvelopeSchema = z.object({
-  type: z.literal('set_envelope'),
-  polygon: z.array(PointSchema).min(3),
-});
-
 const RenameRoomSchema = z.object({
   type: z.literal('rename_room'),
   room: z.string(),
@@ -166,7 +162,6 @@ export const HighLevelChangeSchema = z.discriminatedUnion('type', [
   PlaceFurnitureSchema,
   MoveFurnitureSchema,
   RemoveFurnitureHLSchema,
-  SetEnvelopeSchema,
   RenameRoomSchema,
   RetypeRoomSchema,
 ]);
@@ -724,13 +719,6 @@ function compileRetypeRoom(plan: FloorPlan, change: z.infer<typeof RetypeRoomSch
   }];
 }
 
-function compileSetEnvelope(_plan: FloorPlan, change: z.infer<typeof SetEnvelopeSchema>): Change[] {
-  return [{
-    type: 'set_envelope',
-    polygon: change.polygon,
-  }];
-}
-
 // ─── Main compiler ────────────────────────────────────────────────────────────
 
 export function compileHighLevelChange(plan: FloorPlan, change: HighLevelChange): Change[] {
@@ -750,7 +738,6 @@ export function compileHighLevelChange(plan: FloorPlan, change: HighLevelChange)
     case 'remove_furniture': return compileRemoveFurniture(plan, change);
     case 'rename_room': return compileRenameRoom(plan, change);
     case 'retype_room': return compileRetypeRoom(plan, change);
-    case 'set_envelope': return compileSetEnvelope(plan, change);
   }
 }
 
@@ -771,6 +758,19 @@ export function processChanges(
   // Apply low-level changes on top
   if (lowLevelChanges.length > 0) {
     current = applyChanges(current, lowLevelChanges);
+  }
+
+  // Recompute envelope if geometry changed
+  const geometryChangingTypes = new Set([
+    'resize_room', 'move_room', 'add_room', 'remove_room', 'split_room', 'merge_rooms',
+  ]);
+  const hasGeometryChange = highLevelChanges.some(c => geometryChangingTypes.has(c.type));
+  if (hasGeometryChange && current.envelope) {
+    const extThickness = current.walls.find(w => w.type === 'exterior')?.thickness ?? 20;
+    const newEnvelope = computeEnvelope(current.rooms, extThickness);
+    if (newEnvelope) {
+      current = { ...current, envelope: newEnvelope };
+    }
   }
 
   // Recompute canvas bounds

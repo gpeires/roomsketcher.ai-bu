@@ -554,9 +554,6 @@ Furniture operations:
 - move_furniture: {furniture_type, room, position: "center"|"north"|{x,y}}
 - remove_furniture: {furniture_type, room} or {furniture_id}
 
-Envelope:
-- set_envelope: {polygon: [{x,y},...]} — set building outline
-
 ITERATION PHILOSOPHY: Fix ONE thing at a time. After each fix, preview to verify it worked and didn't break adjacent rooms. Never regenerate the entire layout to fix a single room.
 
 GOOD: "Kitchen is 30cm too narrow on east side" → resize_room Kitchen east +30

@@ -519,7 +519,7 @@ function erodeGrid(grid: boolean[][], rows: number, cols: number): boolean[][] {
   return result;
 }
 
-function computeEnvelope(
+export function computeEnvelope(
   rooms: Room[],
   exteriorThickness: number,
   gridSize: number = SNAP_GRID,

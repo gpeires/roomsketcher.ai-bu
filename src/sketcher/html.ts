@@ -250,6 +250,7 @@ export function sketcherHtml(sketchId: string): string {
   var redoStack = [];
   var MAX_UNDO = 50;
   var isDragging = false;        // true during endpoint drag (skips full render)
+  var envelopeDegraded = false;  // true if envelope recompute exceeded 16ms budget
   var viewBox = { x: 0, y: 0, w: 1000, h: 800 };
   var userViewBox = false;
   var ws = null;
@@ -754,6 +755,10 @@ export function sketcherHtml(sketchId: string): string {
         plan.furniture = plan.furniture.filter(function(f) { return f.id !== change.furniture_id; });
         break;
     }
+    // Recompute envelope when room geometry changes externally
+    if (change.type === 'update_room' || change.type === 'add_room' || change.type === 'remove_room') {
+      recomputeEnvelope(plan);
+    }
     plan.metadata.updated_at = new Date().toISOString();
     plan.metadata.source = 'mixed';
   }
@@ -1066,6 +1071,253 @@ export function sketcherHtml(sketchId: string): string {
       sum += polygon[i].x * polygon[j].y - polygon[j].x * polygon[i].y;
     }
     return Math.abs(sum) / 2 / 10000;
+  }
+
+  function pointInPolygon(point, polygon) {
+    if (polygon.length < 3) return false;
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      var xi = polygon[i].x, yi = polygon[i].y;
+      var xj = polygon[j].x, yj = polygon[j].y;
+      var intersect = ((yi > point.y) !== (yj > point.y)) &&
+        (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function rasterizeToGrid(polygons, gridSize) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (var pi = 0; pi < polygons.length; pi++) {
+      for (var vi = 0; vi < polygons[pi].length; vi++) {
+        var p = polygons[pi][vi];
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y > maxY) maxY = p.y;
+      }
+    }
+    var originX = Math.floor(minX / gridSize) * gridSize;
+    var originY = Math.floor(minY / gridSize) * gridSize;
+    var cols = Math.ceil((maxX - originX) / gridSize);
+    var rows = Math.ceil((maxY - originY) / gridSize);
+    var grid = [];
+    for (var r = 0; r < rows; r++) {
+      grid[r] = [];
+      for (var c = 0; c < cols; c++) {
+        var cx = originX + c * gridSize + gridSize / 2;
+        var cy = originY + r * gridSize + gridSize / 2;
+        grid[r][c] = false;
+        for (var pj = 0; pj < polygons.length; pj++) {
+          if (pointInPolygon({ x: cx, y: cy }, polygons[pj])) {
+            grid[r][c] = true;
+            break;
+          }
+        }
+      }
+    }
+    return { grid: grid, originX: originX, originY: originY, cols: cols, rows: rows };
+  }
+
+  function dilateGrid(grid, rows, cols) {
+    var result = [];
+    for (var r = 0; r < rows; r++) {
+      result[r] = [];
+      for (var c = 0; c < cols; c++) result[r][c] = grid[r][c];
+    }
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        if (grid[r][c]) continue;
+        if ((r > 0 && grid[r-1][c]) || (r < rows-1 && grid[r+1][c]) ||
+            (c > 0 && grid[r][c-1]) || (c < cols-1 && grid[r][c+1])) {
+          result[r][c] = true;
+        }
+      }
+    }
+    return result;
+  }
+
+  function erodeGrid(grid, rows, cols) {
+    var result = [];
+    for (var r = 0; r < rows; r++) {
+      result[r] = [];
+      for (var c = 0; c < cols; c++) result[r][c] = grid[r][c];
+    }
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        if (!grid[r][c]) continue;
+        if (r === 0 || !grid[r-1][c] || r === rows-1 || !grid[r+1][c] ||
+            c === 0 || !grid[r][c-1] || c === cols-1 || !grid[r][c+1]) {
+          result[r][c] = false;
+        }
+      }
+    }
+    return result;
+  }
+
+  function traceContour(grid, gridSize, originX, originY) {
+    var rows = grid.length;
+    var cols = rows > 0 ? grid[0].length : 0;
+    if (rows === 0 || cols === 0) return [];
+    var filled = function(r, c) {
+      return r >= 0 && r < rows && c >= 0 && c < cols && grid[r][c];
+    };
+    var edges = [];
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        if (!grid[r][c]) continue;
+        var x = originX + c * gridSize;
+        var y = originY + r * gridSize;
+        var s = gridSize;
+        if (!filled(r-1, c)) edges.push({ x1: x, y1: y, x2: x+s, y2: y });
+        if (!filled(r+1, c)) edges.push({ x1: x+s, y1: y+s, x2: x, y2: y+s });
+        if (!filled(r, c-1)) edges.push({ x1: x, y1: y+s, x2: x, y2: y });
+        if (!filled(r, c+1)) edges.push({ x1: x+s, y1: y, x2: x+s, y2: y+s });
+      }
+    }
+    if (edges.length === 0) return [];
+    var edgeMap = {};
+    for (var ei = 0; ei < edges.length; ei++) {
+      var key = edges[ei].x1 + ',' + edges[ei].y1;
+      if (!edgeMap[key]) edgeMap[key] = [];
+      edgeMap[key].push(ei);
+    }
+    var used = {};
+    var polygon = [];
+    var current = edges[0];
+    used[0] = true;
+    polygon.push({ x: current.x1, y: current.y1 });
+    for (var i = 0; i < edges.length - 1; i++) {
+      var nextKey = current.x2 + ',' + current.y2;
+      var candidates = edgeMap[nextKey];
+      if (!candidates) break;
+      var next = null;
+      var nextIdx = -1;
+      for (var ci = 0; ci < candidates.length; ci++) {
+        if (!used[candidates[ci]]) { next = edges[candidates[ci]]; nextIdx = candidates[ci]; break; }
+      }
+      if (!next) break;
+      used[nextIdx] = true;
+      var prev = polygon[polygon.length - 1];
+      var mid = { x: current.x2, y: current.y2 };
+      var nxt = { x: next.x2, y: next.y2 };
+      var sameLine = (prev.x === mid.x && mid.x === nxt.x) ||
+                     (prev.y === mid.y && mid.y === nxt.y);
+      if (!sameLine) polygon.push(mid);
+      current = next;
+    }
+    return polygon;
+  }
+
+  function offsetAxisAlignedPolygon(polygon, distance) {
+    var n = polygon.length;
+    if (n < 3) return polygon.slice();
+    var normals = [];
+    for (var i = 0; i < n; i++) {
+      var a = polygon[i];
+      var b = polygon[(i + 1) % n];
+      var dx = b.x - a.x;
+      var dy = b.y - a.y;
+      var len = Math.sqrt(dx * dx + dy * dy);
+      if (len === 0) { normals.push({ x: 0, y: 0 }); continue; }
+      normals.push({ x: dy / len, y: -dx / len });
+    }
+    var result = [];
+    for (var i = 0; i < n; i++) {
+      var prevIdx = (i - 1 + n) % n;
+      var prevNormal = normals[prevIdx];
+      var currNormal = normals[i];
+      var p = polygon[i];
+      var cross = prevNormal.x * currNormal.y - prevNormal.y * currNormal.x;
+      if (Math.abs(cross) < 0.001) {
+        result.push({ x: p.x + currNormal.x * distance, y: p.y + currNormal.y * distance });
+      } else if (cross > 0) {
+        result.push({
+          x: p.x + (prevNormal.x + currNormal.x) * distance,
+          y: p.y + (prevNormal.y + currNormal.y) * distance,
+        });
+      } else {
+        result.push({
+          x: p.x + prevNormal.x * distance,
+          y: p.y + prevNormal.y * distance,
+        });
+        result.push({
+          x: p.x + currNormal.x * distance,
+          y: p.y + currNormal.y * distance,
+        });
+      }
+    }
+    return result;
+  }
+
+  function getExteriorThickness(plan) {
+    for (var i = 0; i < plan.walls.length; i++) {
+      if (plan.walls[i].type === 'exterior') return plan.walls[i].thickness || 20;
+    }
+    return 20;
+  }
+
+  function recomputeEnvelope(plan) {
+    if (!plan || !plan.envelope || plan.rooms.length === 0) return;
+    var polygons = plan.rooms.map(function(r) { return r.polygon; });
+    var gridSize = 10;
+    var gapThreshold = 50;
+    var result = rasterizeToGrid(polygons, gridSize);
+    var dilateSteps = Math.ceil(gapThreshold / gridSize / 2);
+    var pad = dilateSteps;
+    var paddedRows = result.rows + pad * 2;
+    var paddedCols = result.cols + pad * 2;
+    var closed = [];
+    for (var r = 0; r < paddedRows; r++) {
+      closed[r] = [];
+      for (var c = 0; c < paddedCols; c++) {
+        var origR = r - pad;
+        var origC = c - pad;
+        closed[r][c] = origR >= 0 && origR < result.rows && origC >= 0 && origC < result.cols && result.grid[origR][origC];
+      }
+    }
+    for (var step = 0; step < dilateSteps; step++) {
+      closed = dilateGrid(closed, paddedRows, paddedCols);
+    }
+    for (var step = 0; step < dilateSteps; step++) {
+      closed = erodeGrid(closed, paddedRows, paddedCols);
+    }
+    var unpadded = closed.slice(pad, pad + result.rows).map(function(row) { return row.slice(pad, pad + result.cols); });
+    var contour = traceContour(unpadded, gridSize, result.originX, result.originY);
+    if (contour.length < 3) return;
+    var extThickness = getExteriorThickness(plan);
+    plan.envelope = offsetAxisAlignedPolygon(contour, extThickness / 2);
+  }
+
+  // Propagate room polygon vertices that are near reference points.
+  // Uses absolute delta from original positions to avoid floating-point drift.
+  // refPoints: array of {orig: {x,y}, delta: {x,y}} — each reference point and its displacement
+  function propagateRoomPolygons(plan, refPoints) {
+    var maxThick = 0;
+    for (var ti = 0; ti < plan.walls.length; ti++) {
+      if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
+    }
+    var roomThreshold = maxThick + 5;
+    for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+      var room = plan.rooms[rpi];
+      // Use original polygon if available, otherwise current
+      var srcPolygon = room._origPolygon || room.polygon;
+      var changed = false;
+      var newPolygon = srcPolygon.map(function(v) {
+        for (var ri = 0; ri < refPoints.length; ri++) {
+          var ref = refPoints[ri];
+          if (Math.abs(v.x - ref.orig.x) <= roomThreshold && Math.abs(v.y - ref.orig.y) <= roomThreshold) {
+            changed = true;
+            return { x: v.x + ref.delta.x, y: v.y + ref.delta.y };
+          }
+        }
+        return { x: v.x, y: v.y };
+      });
+      if (changed) {
+        room.polygon = newPolygon;
+        room.area = computeArea(newPolygon);
+      }
+    }
   }
 
   function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -1598,6 +1850,10 @@ export function sketcherHtml(sketchId: string): string {
       start: { x: wall.start.x, y: wall.start.y },
       end: { x: wall.end.x, y: wall.end.y }
     };
+    // Snapshot original room polygons for drift-free propagation during drag
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      plan.rooms[ri]._origPolygon = plan.rooms[ri].polygon.map(function(v) { return { x: v.x, y: v.y }; });
+    }
     var connected = dragState.connectedWalls;
     for (var i = 0; i < connected.length; i++) {
       var cw = plan.walls.find(function(w) { return w.id === connected[i].wallId; });
@@ -1786,6 +2042,34 @@ export function sketcherHtml(sketchId: string): string {
       }
     }
 
+    // Propagate room polygons during drag (absolute delta from originals)
+    var epDx = pt.x - dragState.startPoint.x;
+    var epDy = pt.y - dragState.startPoint.y;
+    if (epDx !== 0 || epDy !== 0) {
+      propagateRoomPolygons(plan, [{ orig: dragState.startPoint, delta: { x: epDx, y: epDy } }]);
+    }
+
+    // Recompute envelope in real-time (with performance escape hatch)
+    if (!envelopeDegraded && plan.envelope) {
+      var t0 = performance.now();
+      recomputeEnvelope(plan);
+      if (performance.now() - t0 > 16) envelopeDegraded = true;
+    }
+    // Update envelope and room cutout polygons in DOM
+    if (plan.envelope) {
+      var envEl = svg.querySelector('#structure polygon:first-child');
+      if (envEl) {
+        envEl.setAttribute('points', plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+      }
+      for (var rci = 0; rci < plan.rooms.length; rci++) {
+        var rcRoom = plan.rooms[rci];
+        var rcEl = svg.querySelector('#structure [data-type="room"][data-id="' + rcRoom.id + '"]');
+        if (rcEl) {
+          rcEl.setAttribute('points', rcRoom.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+        }
+      }
+    }
+
     // Throttled WebSocket broadcast during drag (10fps)
     sendWsThrottled({ type: 'move_wall', wall_id: dragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
   }
@@ -1819,6 +2103,7 @@ export function sketcherHtml(sketchId: string): string {
     }
     redoStack.push(entry);
     updateUndoButtons();
+    recomputeEnvelope(plan);
     render();
     showProperties();
   }
@@ -1834,6 +2119,7 @@ export function sketcherHtml(sketchId: string): string {
     }
     undoStack.push(entry);
     updateUndoButtons();
+    recomputeEnvelope(plan);
     render();
     showProperties();
   }
@@ -1857,6 +2143,14 @@ export function sketcherHtml(sketchId: string): string {
           var rw = plan.walls.find(function(w) { return w.id === rc.wallId; });
           var ro = dragState.originalPositions[rc.wallId];
           if (rw && ro) { rw.start = ro.start; rw.end = ro.end; }
+        }
+      }
+      // Revert room polygons to originals and clean up
+      for (var rvi = 0; rvi < plan.rooms.length; rvi++) {
+        if (plan.rooms[rvi]._origPolygon) {
+          plan.rooms[rvi].polygon = plan.rooms[rvi]._origPolygon;
+          plan.rooms[rvi].area = computeArea(plan.rooms[rvi]._origPolygon);
+          delete plan.rooms[rvi]._origPolygon;
         }
       }
       isDragging = false;
@@ -1886,102 +2180,33 @@ export function sketcherHtml(sketchId: string): string {
       }
     }
 
-    // Room polygon propagation (added in Task 8)
-    // Room polygon vertices are offset inward from wall endpoints by half the wall
-    // thickness, so we use a generous threshold and apply the drag delta (not snap
-    // to the wall point) to preserve the inward offset.
-    var origPt = dragState.startPoint;
-    var newPt = dragState.endpoint === 'start' ? wall.start : wall.end;
-    var dx = newPt.x - origPt.x;
-    var dy = newPt.y - origPt.y;
-    if (dx !== 0 || dy !== 0) {
-      var maxThick = 0;
-      for (var ti = 0; ti < plan.walls.length; ti++) {
-        if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
-      }
-      var roomThreshold = maxThick + 5;
-      for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
-        var room = plan.rooms[rpi];
-        var roomChanged = false;
-        var newPolygon = room.polygon.map(function(v) {
-          if (Math.abs(v.x - origPt.x) <= roomThreshold && Math.abs(v.y - origPt.y) <= roomThreshold) {
-            roomChanged = true;
-            return { x: v.x + dx, y: v.y + dy };
-          }
-          return { x: v.x, y: v.y };
-        });
-        if (roomChanged) {
-          var oldPolygon = room.polygon.map(function(v) { return { x: v.x, y: v.y }; });
-          room.polygon = newPolygon;
-          room.area = computeArea(newPolygon);
-          changes.push({ type: 'update_room', room_id: room.id, polygon: newPolygon });
-          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: oldPolygon });
-        }
-      }
-
-      // Rebuild room polygons from wall geometry when vertices drifted too far.
-      // This catches cases where walls were disconnected and reconnected.
-      for (var rri = 0; rri < plan.rooms.length; rri++) {
-        var rm = plan.rooms[rri];
-        if (!rm.wall_ids || rm.wall_ids.length === 0) continue;
-        // Collect all wall endpoints that border this room
-        var wallPts = [];
-        for (var wii = 0; wii < rm.wall_ids.length; wii++) {
-          var rw = plan.walls.find(function(w) { return w.id === rm.wall_ids[wii]; });
-          if (rw) {
-            wallPts.push(rw.start);
-            wallPts.push(rw.end);
-          }
-        }
-        // Check each polygon vertex: is it still within threshold of some wall endpoint?
-        var drifted = false;
-        for (var vi = 0; vi < rm.polygon.length; vi++) {
-          var v = rm.polygon[vi];
-          var nearAny = false;
-          for (var wpi = 0; wpi < wallPts.length; wpi++) {
-            if (Math.abs(v.x - wallPts[wpi].x) <= roomThreshold && Math.abs(v.y - wallPts[wpi].y) <= roomThreshold) {
-              nearAny = true;
+    // Record room polygon changes for undo (rooms already propagated during drag)
+    for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+      var room = plan.rooms[rpi];
+      if (room._origPolygon) {
+        var origPoly = room._origPolygon;
+        var curPoly = room.polygon;
+        var polyChanged = false;
+        if (origPoly.length === curPoly.length) {
+          for (var pci = 0; pci < origPoly.length; pci++) {
+            if (origPoly[pci].x !== curPoly[pci].x || origPoly[pci].y !== curPoly[pci].y) {
+              polyChanged = true;
               break;
             }
           }
-          if (!nearAny) { drifted = true; break; }
+        } else {
+          polyChanged = true;
         }
-        // If a vertex drifted, snap each vertex to its nearest wall endpoint (preserving inward offset direction)
-        if (drifted) {
-          var alreadyChanged = changes.some(function(c) { return c.type === 'update_room' && c.room_id === rm.id; });
-          var repairedPolygon = rm.polygon.map(function(v) {
-            var bestDist = Infinity, bestPt = null;
-            for (var wpi = 0; wpi < wallPts.length; wpi++) {
-              var d = Math.abs(v.x - wallPts[wpi].x) + Math.abs(v.y - wallPts[wpi].y);
-              if (d < bestDist) { bestDist = d; bestPt = wallPts[wpi]; }
-            }
-            if (bestPt && bestDist > roomThreshold) {
-              // Preserve the inward offset direction but snap near the wall endpoint
-              var offX = v.x > bestPt.x ? -(maxThick / 2) : (v.x < bestPt.x ? (maxThick / 2) : 0);
-              var offY = v.y > bestPt.y ? -(maxThick / 2) : (v.y < bestPt.y ? (maxThick / 2) : 0);
-              return { x: bestPt.x + offX, y: bestPt.y + offY };
-            }
-            return { x: v.x, y: v.y };
-          });
-          if (!alreadyChanged) {
-            var oldPoly = rm.polygon.map(function(v) { return { x: v.x, y: v.y }; });
-            rm.polygon = repairedPolygon;
-            rm.area = computeArea(repairedPolygon);
-            changes.push({ type: 'update_room', room_id: rm.id, polygon: repairedPolygon });
-            inverseChanges.push({ type: 'update_room', room_id: rm.id, polygon: oldPoly });
-          } else {
-            rm.polygon = repairedPolygon;
-            rm.area = computeArea(repairedPolygon);
-            // Update the existing change entry
-            for (var cci = 0; cci < changes.length; cci++) {
-              if (changes[cci].type === 'update_room' && changes[cci].room_id === rm.id) {
-                changes[cci].polygon = repairedPolygon;
-                break;
-              }
-            }
-          }
+        if (polyChanged) {
+          changes.push({ type: 'update_room', room_id: room.id, polygon: curPoly.map(function(v) { return { x: v.x, y: v.y }; }) });
+          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: origPoly.map(function(v) { return { x: v.x, y: v.y }; }) });
         }
       }
+    }
+
+    // Clean up drag-start snapshots
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      delete plan.rooms[ri]._origPolygon;
     }
 
     // Clear snap guides
@@ -1996,6 +2221,10 @@ export function sketcherHtml(sketchId: string): string {
         }
       });
     }
+
+    // Always recompute envelope on commit (catch-up for degraded mode)
+    recomputeEnvelope(plan);
+    envelopeDegraded = false;
 
     isDragging = false;
     dragState = null;
@@ -2018,6 +2247,10 @@ export function sketcherHtml(sketchId: string): string {
       connectedEnd: findConnectedEndpoints(wallId, 'end'),
       originalPositions: {}
     };
+    // Snapshot original room polygons for drift-free propagation during drag
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      plan.rooms[ri]._origPolygon = plan.rooms[ri].polygon.map(function(v) { return { x: v.x, y: v.y }; });
+    }
     // Save original positions of this wall and all connected walls
     wallDragState.originalPositions[wallId] = {
       start: { x: wall.start.x, y: wall.start.y },
@@ -2110,6 +2343,33 @@ export function sketcherHtml(sketchId: string): string {
     moveConnected(wallDragState.connectedStart, wall.start);
     moveConnected(wallDragState.connectedEnd, wall.end);
 
+    // Propagate room polygons during drag (absolute delta from originals)
+    propagateRoomPolygons(plan, [
+      { orig: wallDragState.origStart, delta: { x: dx, y: dy } },
+      { orig: wallDragState.origEnd, delta: { x: dx, y: dy } },
+    ]);
+
+    // Recompute envelope in real-time (with performance escape hatch)
+    if (!envelopeDegraded && plan.envelope) {
+      var t0 = performance.now();
+      recomputeEnvelope(plan);
+      if (performance.now() - t0 > 16) envelopeDegraded = true;
+    }
+    // Update envelope and room cutout polygons in DOM
+    if (plan.envelope) {
+      var envEl = svg.querySelector('#structure polygon:first-child');
+      if (envEl) {
+        envEl.setAttribute('points', plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+      }
+      for (var rci = 0; rci < plan.rooms.length; rci++) {
+        var rcRoom = plan.rooms[rci];
+        var rcEl = svg.querySelector('#structure [data-type="room"][data-id="' + rcRoom.id + '"]');
+        if (rcEl) {
+          rcEl.setAttribute('points', rcRoom.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' '));
+        }
+      }
+    }
+
     // Throttled WebSocket broadcast
     sendWsThrottled({ type: 'move_wall', wall_id: wallDragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
   }
@@ -2139,38 +2399,33 @@ export function sketcherHtml(sketchId: string): string {
       }
     }
 
-    // Room polygon propagation — move vertices near either endpoint
-    var dxS = wall.start.x - wallDragState.origStart.x;
-    var dyS = wall.start.y - wallDragState.origStart.y;
-    if (dxS !== 0 || dyS !== 0) {
-      var maxThick = 0;
-      for (var ti = 0; ti < plan.walls.length; ti++) {
-        if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
-      }
-      var roomThreshold = maxThick + 5;
-      var origStartPt = wallDragState.origStart;
-      var origEndPt = wallDragState.origEnd;
-      for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
-        var room = plan.rooms[rpi];
-        var roomChanged = false;
-        var newPolygon = room.polygon.map(function(v) {
-          // Check if vertex is near either original endpoint of the dragged wall
-          var nearStart = Math.abs(v.x - origStartPt.x) <= roomThreshold && Math.abs(v.y - origStartPt.y) <= roomThreshold;
-          var nearEnd = Math.abs(v.x - origEndPt.x) <= roomThreshold && Math.abs(v.y - origEndPt.y) <= roomThreshold;
-          if (nearStart || nearEnd) {
-            roomChanged = true;
-            return { x: v.x + dxS, y: v.y + dyS };
+    // Record room polygon changes for undo (rooms already propagated during drag)
+    for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+      var room = plan.rooms[rpi];
+      if (room._origPolygon) {
+        var origPoly = room._origPolygon;
+        var curPoly = room.polygon;
+        var polyChanged = false;
+        if (origPoly.length === curPoly.length) {
+          for (var pci = 0; pci < origPoly.length; pci++) {
+            if (origPoly[pci].x !== curPoly[pci].x || origPoly[pci].y !== curPoly[pci].y) {
+              polyChanged = true;
+              break;
+            }
           }
-          return { x: v.x, y: v.y };
-        });
-        if (roomChanged) {
-          var oldPolygon = room.polygon.map(function(v) { return { x: v.x, y: v.y }; });
-          room.polygon = newPolygon;
-          room.area = computeArea(newPolygon);
-          changes.push({ type: 'update_room', room_id: room.id, polygon: newPolygon });
-          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: oldPolygon });
+        } else {
+          polyChanged = true;
+        }
+        if (polyChanged) {
+          changes.push({ type: 'update_room', room_id: room.id, polygon: curPoly.map(function(v) { return { x: v.x, y: v.y }; }) });
+          inverseChanges.push({ type: 'update_room', room_id: room.id, polygon: origPoly.map(function(v) { return { x: v.x, y: v.y }; }) });
         }
       }
+    }
+
+    // Clean up drag-start snapshots
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      delete plan.rooms[ri]._origPolygon;
     }
 
     if (changes.length > 0) {
@@ -2181,6 +2436,10 @@ export function sketcherHtml(sketchId: string): string {
         }
       });
     }
+
+    // Always recompute envelope on commit (catch-up for degraded mode)
+    recomputeEnvelope(plan);
+    envelopeDegraded = false;
 
     isDragging = false;
     wallDragState = null;

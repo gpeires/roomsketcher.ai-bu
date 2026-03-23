@@ -626,20 +626,6 @@ describe('retype_room', () => {
   });
 });
 
-describe('set_envelope', () => {
-  it('passes through as low-level set_envelope', () => {
-    const plan = makeTestPlan();
-    const poly = [{ x: 0, y: 0 }, { x: 800, y: 0 }, { x: 800, y: 300 }, { x: 0, y: 300 }];
-    const changes = compileHighLevelChange(plan, {
-      type: 'set_envelope',
-      polygon: poly,
-    });
-
-    expect(changes).toHaveLength(1);
-    expect(changes[0]).toEqual({ type: 'set_envelope', polygon: poly });
-  });
-});
-
 // ─── Integration: processChanges ────────────────────────────────────────────
 
 describe('processChanges', () => {
@@ -695,6 +681,51 @@ describe('processChanges', () => {
     expect(() => processChanges(plan, [
       { type: 'rename_room', room: 'Nonexistent', new_label: 'X' },
     ])).toThrow(/Kitchen.*Living Room|Living Room.*Kitchen/);
+  });
+
+  it('recomputes envelope after resize_room', () => {
+    const plan = makeTestPlan();
+    // Give the plan an initial envelope
+    plan.envelope = [
+      { x: -10, y: -10 }, { x: 810, y: -10 },
+      { x: 810, y: 310 }, { x: -10, y: 310 },
+    ];
+    // Resize Living Room eastward by 200cm — pushes outer boundary
+    const result = processChanges(plan, [
+      { type: 'resize_room', room: 'Living Room', side: 'east', delta_cm: 200 },
+    ]);
+    // Envelope should be a valid polygon that differs from the original
+    expect(result.envelope).toBeDefined();
+    expect(result.envelope!.length).toBeGreaterThanOrEqual(3);
+    expect(result.envelope!.every(p => typeof p.x === 'number' && typeof p.y === 'number')).toBe(true);
+    // The envelope should be wider now (max X should be larger)
+    const maxX = Math.max(...result.envelope!.map(p => p.x));
+    const origMaxX = Math.max(...plan.envelope.map(p => p.x));
+    expect(maxX).toBeGreaterThan(origMaxX);
+  });
+
+  it('does not recompute envelope for non-geometry changes', () => {
+    const plan = makeTestPlan();
+    plan.envelope = [
+      { x: -10, y: -10 }, { x: 810, y: -10 },
+      { x: 810, y: 310 }, { x: -10, y: 310 },
+    ];
+    const originalEnvelope = [...plan.envelope];
+    const result = processChanges(plan, [
+      { type: 'rename_room', room: 'Kitchen', new_label: 'Main Kitchen' },
+    ]);
+    expect(result.envelope).toEqual(originalEnvelope);
+  });
+
+  it('skips envelope recompute when plan has no envelope', () => {
+    const plan = makeTestPlan();
+    // No envelope on this plan
+    expect(plan.envelope).toBeUndefined();
+    const result = processChanges(plan, [
+      { type: 'resize_room', room: 'Living Room', side: 'east', delta_cm: 200 },
+    ]);
+    // Should remain undefined — don't create an envelope from nothing
+    expect(result.envelope).toBeUndefined();
   });
 
   it('error: merge non-adjacent rooms throws "no shared wall"', () => {
