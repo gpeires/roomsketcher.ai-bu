@@ -342,9 +342,10 @@ CHOOSE YOUR WORKFLOW — pick ONE based on what the user gave you:
 ═══ COPY MODE (user provided a reference floor plan image) ═══
 Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. Use the ROOM-FIRST INPUT FORMAT — the system generates walls, polygons, and colors automatically.
 
-HARD GATE (Copy Mode only): You MUST call analyze_floor_plan_image with a URL BEFORE calling generate_floor_plan. No exceptions. This gate applies ONLY when the user provided a reference image — it does NOT apply to Design Mode below.
-- If the user provided a URL → call analyze_floor_plan_image immediately.
-- If the user pasted/attached an image (no URL) → you MUST direct them to upload at ${this.getWorkerUrl()}/upload and STOP. Do NOT proceed. Do NOT try to read dimensions from the image yourself. Even if you can see printed dimensions clearly, your manual reading will produce worse results than the CV pipeline. Wait for the URL.
+HARD GATE (Copy Mode only): You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. This gate applies ONLY when the user provided a reference image — it does NOT apply to Design Mode below.
+- If the user provided a URL → call analyze_floor_plan_image with it immediately.
+- If you have the image as a data URI → pass it as image_url to analyze_floor_plan_image (data URIs are supported).
+- If the user pasted an image and you have no URL or data URI → direct them to upload at ${this.getWorkerUrl()}/upload and STOP. Do NOT read dimensions manually.
 
 Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Quickly note the CV-detected rooms, scale, and outline. Trust CV for scale/wall-thickness, trust your eyes for room count and labels. Do NOT spend time writing a lengthy analysis — just absorb the data and move on.
 
@@ -487,14 +488,14 @@ TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
 1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url. Do not ask questions, do not wait. Just call it.
 
-2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → STOP. Do NOT try to read dimensions from the image. Do NOT try to build a floor plan manually. Even if dimensions are clearly printed, your manual reading will be less accurate than the CV pipeline. You MUST direct the user to upload and then WAIT:
-   "I can see your floor plan! To get accurate room dimensions and positions, I need to run it through our computer vision pipeline. Please upload it so I can analyze it:
-   1. Open the upload page: ${this.getWorkerUrl()}/upload
+2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → If you have access to the image as a data URI (data:image/...), pass it directly as image_url — the server handles data URIs. Otherwise, direct the user to upload:
+   "I can see your floor plan! To get accurate dimensions, please upload it so I can run CV analysis:
+   1. Open ${this.getWorkerUrl()}/upload
    2. Drop or paste your image there
-   3. Copy the URL it gives you and paste it back here"
-   After sending this message, STOP. Do not call generate_floor_plan. Do not start mapping out rooms. Wait for the URL.
+   3. Copy the URL and paste it back here"
+   After sending this message, STOP. Do NOT try to read dimensions manually. Do NOT call generate_floor_plan. Wait for the URL.
 
-Do NOT attempt to pass images as base64 — always use the upload page to get a URL.
+Data URIs are accepted: if you have a data:image/... URI (e.g. from a pasted image), pass it as image_url — the server will extract the base64 automatically. You can also pass raw base64 as the image parameter.
 
 OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.
 
