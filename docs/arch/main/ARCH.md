@@ -125,7 +125,7 @@ src/
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine (15 change types incl. set_envelope)
 │   ├── resolve.ts              # Label→ID resolution layer (findRoomByLabel, findRoomWalls, findSharedWall, resolvePosition)
-│   ├── high-level-changes.ts   # 16 high-level change schemas + compiler → low-level changes + processChanges()
+│   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges()
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
 │   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (envelope-based or legacy wall rendering)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
@@ -992,6 +992,20 @@ Root cause (confirmed via systematic isolation testing):
 
 **Current workaround:** Users upload at `/upload` page, paste returned URL into chat.
 
+### Claude Desktop Copy Mode Testing Feedback (2026-03-23)
+
+Testing the full Copy Mode workflow in Claude Desktop (analyze → generate → preview → surgical update → preview) on 4 images surfaced these operational insights:
+
+**What works well:**
+- **Side-by-side rasterized preview** — "Probably the most valuable part of the whole workflow." Immediate visual comparison between generated sketch and source image. The tool Claude Desktop would call repeatedly during iteration.
+- **`generate_floor_plan` room-first input format** — "Very clean — just give it rectangles with x/y/width/depth and it builds walls automatically."
+- **CV data for scale and wall thickness** — Even when CV misidentifies rooms, its scale calibration and wall thickness measurements are reliable and directly usable.
+
+**What doesn't work well:**
+- **Spatial grid** — "Not really helpful. Large ASCII matrix with lots of RO labels and dots that was hard to parse." The JSON room coordinates from CV were far more actionable. Grid added noise without being as precise as JSON or as intuitive as the image.
+- **CV room labeling** — Mislabeled most rooms (generic "Room" or wrong labels from footer text like "2 Bedroom 2 Bathroom"). Claude had to override almost everything using what it could read from the image itself.
+- **Envelope doesn't follow room edits** — When resizing a room, the building envelope didn't follow. Attempting `set_envelope` to fix it broke exterior walls. (This is being addressed by the Envelope Recomputation plan.)
+
 ---
 
 ## Image Upload System
@@ -1104,7 +1118,7 @@ PHASE 2 — SURGICAL ITERATION:
 
 ### Surgical Iteration System (2026-03-23, IMPLEMENTED)
 
-**Status:** Fully implemented — 272 tests passing, not yet deployed or validated on test images.
+**Status:** Fully implemented, deployed, and validated on 4 test images. 272 tests passing.
 
 Two new modules add label-based surgical editing on top of the existing 15 low-level change types:
 
@@ -1117,7 +1131,7 @@ Two new modules add label-based surgical editing on top of the existing 15 low-l
 - `resolvePosition(room, position, width, depth)` — named positions (center/north/sw/etc.) → absolute coords
 
 **`src/sketch/high-level-changes.ts`** — Compiler from label-based ops to low-level changes:
-- 16 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `set_envelope`, `rename_room`, `retype_room`
+- 15 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `rename_room`, `retype_room` (`set_envelope` removed — envelope is now auto-derived, see Envelope Recomputation below)
 - Each compiles to an array of existing low-level `Change` types
 - `processChanges(plan, highLevelChanges, lowLevelChanges)` — sequential compilation + application
 - Canvas bounds recomputed after changes
@@ -1134,7 +1148,20 @@ inputSchema: {
 
 **Side-by-side preview:** `preview_sketch` returns source image alongside rendered sketch when `source_image_url` is in metadata. Source URL flows: `analyze_floor_plan_image` caller stores in `SketchSession.sourceImageUrl` → `generate_floor_plan` copies to `plan.metadata.source_image_url`.
 
-**New low-level change type:** `set_envelope` — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`).
+**Low-level `set_envelope` change type** — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`). Used internally; NOT exposed as a high-level operation.
+
+### Envelope Recomputation (2026-03-23, PLANNED — spec + plan committed)
+
+**Problem:** The building envelope (thick perimeter outline) was computed once during `generate_floor_plan` and never updated when rooms changed via surgical ops or wall drag. `set_envelope` as a high-level workaround made things worse — it replaced the polygon without updating walls.
+
+**Solution (designed, not yet implemented):**
+- **Client-side:** Port `computeEnvelope` pipeline (rasterize → morphological close → contour trace → offset) to vanilla JS in `html.ts`. Recompute in real-time during wall drag with a 16ms performance escape hatch. Also recompute on commit, undo/redo, and `applyChangeLocal`.
+- **Server-side:** Auto-recompute in `processChanges` after geometry-changing operations (`resize_room`, `move_room`, `add_room`, `remove_room`, `split_room`, `merge_rooms`).
+- **Remove `set_envelope`** from high-level changes (schema, compiler, tool description). Low-level `set_envelope` stays for internal use.
+- **Room polygon propagation during drag** — currently only happens on mouseup (commit). Must also happen during mousemove for real-time envelope feedback. Extract shared helper, use absolute deltas from drag-start to avoid floating-point drift.
+
+**Spec:** `docs/superpowers/specs/2026-03-23-client-envelope-recompute-design.md`
+**Plan:** `docs/superpowers/plans/2026-03-23-client-envelope-recompute.md` (7 tasks)
 
 ### Template Mode (Description → Floor Plan)
 
