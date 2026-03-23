@@ -8,6 +8,7 @@ outline, giving the AI agent a structured "visual" of the layout.
 """
 import logging
 import math
+import os
 import re
 
 import cv2
@@ -21,6 +22,9 @@ _JUNK_PATTERNS = [
     re.compile(r'^\d+[\'\"]'),                      # dimension fragments: 15'1"
     re.compile(r'[xX×]\s*\d'),                      # dimension pairs: 10'9" x 8'
     re.compile(r'\d+\s*[xX×]\s*\d'),                # "5x3"
+    re.compile(r'[\'\"″′]'),                        # foot/inch marks — dimension fragments
+    re.compile(r'[{}\\|()]'),                        # special characters — OCR garbage
+    re.compile(r'^\d+-'),                            # digit-hyphen fragments: "8-", "8-7"
     re.compile(r'\d+\s*bedroom', re.I),             # "2 Bedroom 2 Bathroom"
     re.compile(r'\d+\s*bathroom', re.I),
     re.compile(r'^\d+\s+(shore|west|east|north|south|street|avenue|ave|st|dr|drive|blvd)', re.I),  # addresses
@@ -33,14 +37,24 @@ _JUNK_PATTERNS = [
     re.compile(r'^Ref$', re.I),                     # refrigerator
 ]
 
+# Short lowercase words that ARE valid room abbreviations (not junk)
+_VALID_SHORT_LABELS = {"cl", "wic", "ba", "br", "lr", "dr", "kt", "dn", "fo", "en"}
+
 
 def _is_junk_label(text: str) -> bool:
     """Check if text is NOT a room label (dimension, address, broker, etc.)."""
     text = text.strip()
     if len(text) < 2:
         return True
+    # Short lowercase text (< 3 chars) is junk unless it's a known room abbreviation
+    if len(text) <= 2 and text.lower() in _VALID_SHORT_LABELS:
+        return False
     for pat in _JUNK_PATTERNS:
         if pat.search(text):
+            return True
+    # Short lowercase words that aren't known room types are likely OCR garbage
+    if len(text) <= 3 and text[0].islower() and text.isalpha():
+        if text.lower() not in _VALID_SHORT_LABELS:
             return True
     return False
 
@@ -75,11 +89,187 @@ def _find_dimension_for_room(
     return best_dim
 
 
+def _sam2_mask(
+    image_url: str,
+    floor_plan_bbox: tuple[int, int, int, int],
+) -> np.ndarray | None:
+    """Call Replicate SAM2 auto-segmenter to get a building mask.
+
+    SAM2 returns multiple mask images sorted by predicted IoU. We download
+    each, threshold to binary, and pick the one with the best overlap with
+    the floor plan bounding box — the building footprint mask.
+
+    Returns a binary mask (255=building, 0=background) or None on failure.
+    """
+    api_token = os.environ.get("REPLICATE_API_TOKEN")
+    if not api_token:
+        log.warning("SAM2: REPLICATE_API_TOKEN not set, skipping")
+        return None
+
+    try:
+        import replicate
+    except ImportError:
+        log.warning("SAM2: replicate package not installed, skipping")
+        return None
+
+    fx, fy, fw, fh = floor_plan_bbox
+    center_x = fx + fw // 2
+    center_y = fy + fh // 2
+
+    log.info("SAM2: calling auto-segmenter for bbox (%d,%d,%d,%d), center (%d,%d)",
+             fx, fy, fw, fh, center_x, center_y)
+
+    try:
+        import httpx
+
+        output = replicate.run(
+            "lucataco/segment-anything-2",
+            input={
+                "image": image_url,
+                "points_per_side": 32,
+                "pred_iou_thresh": 0.7,
+                "mask_limit": 10,
+            },
+        )
+
+        # output is a list of mask image URLs, sorted by predicted_iou
+        mask_urls = list(output) if not isinstance(output, list) else output
+        log.info("SAM2: received %d mask URLs", len(mask_urls))
+
+        if not mask_urls:
+            log.warning("SAM2: no masks returned")
+            return None
+
+        # Score each mask: prefer large masks that cover the floor plan center
+        best_mask = None
+        best_score = -1
+
+        for i, url in enumerate(mask_urls):
+            try:
+                resp = httpx.get(str(url), follow_redirects=True, timeout=30.0)
+                resp.raise_for_status()
+                arr = np.frombuffer(resp.content, dtype=np.uint8)
+                mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+                if mask is None:
+                    continue
+
+                _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
+                total_px = binary_mask.shape[0] * binary_mask.shape[1]
+                mask_area = cv2.countNonZero(binary_mask)
+
+                # Check if mask covers the floor plan center
+                covers_center = (
+                    0 <= center_y < binary_mask.shape[0]
+                    and 0 <= center_x < binary_mask.shape[1]
+                    and binary_mask[center_y, center_x] > 0
+                )
+
+                # Score: coverage of floor plan bbox area, with bonus for covering center
+                # Crop mask to floor plan bbox and measure overlap
+                y0, y1 = max(0, fy), min(binary_mask.shape[0], fy + fh)
+                x0, x1 = max(0, fx), min(binary_mask.shape[1], fx + fw)
+                if y1 > y0 and x1 > x0:
+                    bbox_region = binary_mask[y0:y1, x0:x1]
+                    bbox_coverage = cv2.countNonZero(bbox_region) / (bbox_region.shape[0] * bbox_region.shape[1])
+                else:
+                    bbox_coverage = 0
+
+                # Penalize masks that are too large (nearly full image — background)
+                coverage = mask_area / total_px
+                if coverage > 0.9:
+                    bbox_coverage *= 0.1  # nearly full image, likely background
+
+                score = bbox_coverage * (2.0 if covers_center else 0.5)
+
+                log.info("SAM2: mask %d — coverage=%.1f%%, bbox_coverage=%.1f%%, center=%s, score=%.3f",
+                         i, coverage * 100, bbox_coverage * 100, covers_center, score)
+
+                if score > best_score:
+                    best_score = score
+                    best_mask = binary_mask
+
+            except Exception as e:
+                log.warning("SAM2: failed to fetch mask %d: %s", i, e)
+                continue
+
+        if best_mask is None:
+            log.warning("SAM2: no valid masks after scoring")
+            return None
+
+        nonzero = cv2.countNonZero(best_mask)
+        total = best_mask.shape[0] * best_mask.shape[1]
+        log.info("SAM2: selected mask — coverage=%.1f%%, score=%.3f", nonzero / total * 100, best_score)
+
+        if nonzero < total * 0.05:
+            log.warning("SAM2: best mask too small (%.1f%%), discarding", nonzero / total * 100)
+            return None
+
+        return best_mask
+
+    except Exception as e:
+        log.warning("SAM2: call failed: %s", e)
+        return None
+
+
+def _contour_to_outline(
+    mask: np.ndarray,
+    scale_cm_per_px: float,
+    snap_cm: int,
+    crop_offset: tuple[int, int] = (0, 0),
+    min_area_ratio: float = 0.05,
+) -> list[dict] | None:
+    """Convert a binary mask to a simplified outline polygon in cm.
+
+    Finds the largest contour, simplifies it, converts to cm, snaps to grid,
+    and normalizes origin to (0, 0).
+    """
+    h, w = mask.shape
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
+
+    if area < h * w * min_area_ratio:
+        log.warning("Contour too small (%.1f%% of image)", area / (h * w) * 100)
+        return None
+
+    perimeter = cv2.arcLength(largest, True)
+    epsilon = 0.003 * perimeter
+    simplified = cv2.approxPolyDP(largest, epsilon, True)
+
+    crop_x, crop_y = crop_offset
+    raw_points = []
+    for pt in simplified:
+        x_px, y_px = pt[0]
+        x_cm = (x_px + crop_x) * scale_cm_per_px
+        y_cm = (y_px + crop_y) * scale_cm_per_px
+        raw_points.append((x_cm, y_cm))
+
+    min_x = min(p[0] for p in raw_points)
+    min_y = min(p[1] for p in raw_points)
+
+    outline_cm = []
+    for x_cm, y_cm in raw_points:
+        x = round((x_cm - min_x) / snap_cm) * snap_cm
+        y = round((y_cm - min_y) / snap_cm) * snap_cm
+        if not outline_cm or (x != outline_cm[-1]["x"] or y != outline_cm[-1]["y"]):
+            outline_cm.append({"x": x, "y": y})
+
+    if len(outline_cm) > 2 and outline_cm[0] == outline_cm[-1]:
+        outline_cm.pop()
+
+    log.info("Outline: %d vertices, area=%.0f px²", len(outline_cm), area)
+    return outline_cm
+
+
 def extract_outline(
     binary: np.ndarray,
     scale_cm_per_px: float,
     floor_plan_bbox: tuple[int, int, int, int] | None = None,
     snap_cm: int = 10,
+    image_url: str | None = None,
 ) -> list[dict] | None:
     """Extract the building perimeter polygon from a binary wall mask.
 
@@ -103,6 +293,16 @@ def extract_outline(
         with origin normalized to (0,0), or None if extraction fails.
     """
     h, w = binary.shape
+
+    # Try SAM2 first if we have an image URL and bbox
+    if image_url and floor_plan_bbox:
+        sam2_mask = _sam2_mask(image_url, floor_plan_bbox)
+        if sam2_mask is not None:
+            sam2_outline = _contour_to_outline(sam2_mask, scale_cm_per_px, snap_cm, crop_offset=(0, 0))
+            if sam2_outline:
+                log.info("SAM2 outline: %d vertices (using SAM2 result)", len(sam2_outline))
+                return sam2_outline
+            log.warning("SAM2: mask produced no valid outline, falling back to OpenCV")
 
     # Crop to floor plan bbox if provided (removes footer, logos, compass)
     crop_x, crop_y = 0, 0
@@ -144,50 +344,8 @@ def extract_outline(
     # Include walls as part of building footprint
     building = cv2.bitwise_or(interior, sealed)
 
-    # Step 3: Find the largest external contour
-    contours, _ = cv2.findContours(building, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        log.warning("No contours found for building outline")
-        return None
-
-    largest = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(largest)
-
-    if area < h * w * 0.05:
-        log.warning("Largest contour too small (%.1f%% of image)", area / (h * w) * 100)
-        return None
-
-    # Step 4: Simplify polygon
-    perimeter = cv2.arcLength(largest, True)
-    epsilon = 0.008 * perimeter
-    simplified = cv2.approxPolyDP(largest, epsilon, True)
-
-    # Step 5: Convert to cm, snap to grid, normalize to (0,0)
-    raw_points = []
-    for pt in simplified:
-        x_px, y_px = pt[0]
-        # Convert back to full image coords if we cropped
-        x_cm = (x_px + crop_x) * scale_cm_per_px
-        y_cm = (y_px + crop_y) * scale_cm_per_px
-        raw_points.append((x_cm, y_cm))
-
-    # Find min x/y to normalize origin
-    min_x = min(p[0] for p in raw_points)
-    min_y = min(p[1] for p in raw_points)
-
-    outline_cm = []
-    for x_cm, y_cm in raw_points:
-        x = round((x_cm - min_x) / snap_cm) * snap_cm
-        y = round((y_cm - min_y) / snap_cm) * snap_cm
-        if not outline_cm or (x != outline_cm[-1]["x"] or y != outline_cm[-1]["y"]):
-            outline_cm.append({"x": x, "y": y})
-
-    # Close polygon if needed
-    if len(outline_cm) > 2 and outline_cm[0] == outline_cm[-1]:
-        outline_cm.pop()
-
-    log.info("Outline extracted: %d vertices, area=%.0f px²", len(outline_cm), area)
-    return outline_cm
+    # Step 3–5: Find contour, simplify, convert to cm
+    return _contour_to_outline(building, scale_cm_per_px, snap_cm, crop_offset=(crop_x, crop_y))
 
 
 def _make_room_abbreviation(label: str, used: set[str]) -> str:

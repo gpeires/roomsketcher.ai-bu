@@ -124,7 +124,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     if image is None:
         raise HTTPException(400, "Could not decode image (not a valid PNG/JPG)")
     try:
-        result = analyze_image(image, name=req.name)
+        result = analyze_image(image, name=req.name, image_url=req.image_url)
     except Exception as e:
         log.exception("CV pipeline failed")
         raise HTTPException(500, f"Analysis failed: {e}")

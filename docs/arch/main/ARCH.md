@@ -104,6 +104,7 @@ The `.env` file (not committed) must contain:
 ```
 CLOUDFLARE_API_TOKEN=...
 CLOUDFLARE_ACCOUNT_ID=...
+REPLICATE_API_TOKEN=...    # For SAM2 outline extraction (optional — falls back to OpenCV)
 ```
 
 `wrangler.toml` contains non-secret config:
@@ -192,7 +193,7 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── topology.py             # Room adjacency via mask dilation overlap
 │   ├── ocr.py                  # Tesseract OCR + merge_nearby_text() for split dimension reassembly
 │   ├── dimensions.py           # Parse metric/imperial/compound dimensions to cm
-│   ├── outline.py              # Building outline extraction (contour detection) + spatial grid (ASCII room layout map)
+│   ├── outline.py              # Building outline extraction (SAM2 via Replicate → OpenCV fallback) + spatial grid (ASCII room layout map)
 │   └── output.py               # Map CV detections to SimpleFloorPlanInput JSON (rect or polygon), label filtering (_is_room_label, _DIM_LIKE, _FIXTURE_ABBREVS, _LOGO_WORDS), ghost room filtering
 ├── tests/
 │   ├── conftest.py             # Synthetic floor plan image fixtures (2-room, L-shaped, low-contrast)
@@ -211,9 +212,9 @@ cv-service/                     # Python CV pipeline (deployed to Hetzner via Do
 │   ├── test_preprocess.py      # Wall mask extraction tests
 │   └── test_walls.py           # Wall segment tests
 ├── Dockerfile                  # Python 3.11 + Tesseract + OpenCV
-├── docker-compose.yml          # Single-service compose for local/prod
-├── deploy-hetzner.sh           # One-command deploy: rsync + docker compose up
-└── requirements.txt            # FastAPI, OpenCV, pytesseract, httpx
+├── docker-compose.yml          # Single-service compose, passes REPLICATE_API_TOKEN from env
+├── deploy-hetzner.sh           # One-command deploy: rsync + copy .env + docker compose up
+└── requirements.txt            # FastAPI, OpenCV, pytesseract, httpx, replicate
 ```
 
 ---
@@ -472,7 +473,7 @@ _run_pipeline(image, binary_override?, rooms_override?)
   │   ├── Ghost room filter — removes negative coords, <0.5% image area, centroid outside bbox
   │   └── _is_room_label() — rejects dimensions (_DIM_LIKE), fixture abbrevs, logos, all-caps non-room
   ├── cap_wall_thickness_cm() on output: interior 5-20cm, exterior 10-40cm
-  ├── extract_outline(binary, scale, fp_bbox) → building perimeter polygon (cm, origin-normalized)
+  ├── extract_outline(binary, scale, fp_bbox, image_url?) → SAM2 mask (if image_url + token) or OpenCV contour → building perimeter polygon (cm, origin-normalized)
   └── build_spatial_grid(rooms, text_regions, scale, fp_bbox) → ASCII room layout map
 ```
 
@@ -620,7 +621,7 @@ Matches dimension text labels to their nearest **parallel** wall using perpendic
 ./cv-service/deploy-hetzner.sh <server-ip> [ssh-key-path]
 ```
 
-The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-service directory, runs `docker compose up --build -d`, and verifies via health check.
+The script: installs Docker if needed, opens port 8100 via ufw, rsyncs the cv-service directory, copies the project root `.env` file to the server (contains `REPLICATE_API_TOKEN`), sources it before running `docker compose up --build -d`, and verifies via health check. The `docker-compose.yml` passes `REPLICATE_API_TOKEN` from the environment to the container via `${REPLICATE_API_TOKEN}` interpolation.
 
 ### FastAPI Endpoints
 
@@ -843,29 +844,51 @@ The envelope code required NO changes. The remaining challenge is getting Claude
 
 #### 1. Building Outline (`outline` field)
 
-The building perimeter polygon, extracted directly from the thick black walls via contour detection. Algorithm (`cv/outline.py: extract_outline()`):
+The building perimeter polygon, extracted from the floor plan image. Two extraction methods are tried in order:
+
+**Method 1: SAM2 via Replicate (preferred, requires `image_url`)**
+
+Uses the `lucataco/segment-anything-2` model on Replicate (Nvidia L40S, ~$0.048/call, ~50s). Algorithm (`cv/outline.py: _sam2_mask()`):
+1. Call SAM2 auto-segmenter with `points_per_side=32`, `pred_iou_thresh=0.7`, `mask_limit=10`
+2. SAM2 returns up to 10 mask image URLs sorted by predicted IoU
+3. Download each mask, threshold to binary
+4. Score each mask by: coverage of floor plan bbox area × 2.0 if covers bbox center (penalize >90% coverage as background)
+5. Select highest-scoring mask → `_contour_to_outline()` → polygon
+
+SAM2 is only attempted when `image_url` is provided (not for base64 uploads) and `REPLICATE_API_TOKEN` env var is set. Gracefully falls back to Method 2 on any failure (API error, timeout, insufficient credit, bad mask).
+
+**Method 2: OpenCV morphological (fallback)**
+
+Algorithm (`cv/outline.py: extract_outline()`):
 1. Crop to floor plan bbox (excludes footer/logos like COMPASS branding)
 2. Heavy morphological closing (kernel = image_dim/8) seals ALL gaps (doors, windows, openings)
 3. Flood fill from border → marks exterior
 4. Interior = NOT exterior, union with walls = building footprint
-5. `cv2.findContours(RETR_EXTERNAL)` → largest contour
-6. `cv2.approxPolyDP(epsilon=0.008*perimeter)` → simplified polygon
-7. Convert to cm, snap to 10cm grid, normalize origin to (0,0)
+5. `_contour_to_outline()` → largest contour → simplified polygon
+
+**Shared contour processing** (`_contour_to_outline()`):
+1. `cv2.findContours(RETR_EXTERNAL)` → largest contour
+2. `cv2.approxPolyDP(epsilon=0.003*perimeter)` → simplified polygon
+3. Convert to cm, snap to grid, normalize origin to (0,0)
 
 Returns a list of `{x, y}` points in cm. Example for Shore Drive (L-shaped):
 ```json
 [{"x": 0, "y": 0}, {"x": 500, "y": 0}, {"x": 500, "y": 480},
  {"x": 680, "y": 480}, {"x": 680, "y": 850}, {"x": 0, "y": 850}]
 ```
-This shows the building is 500cm wide at top, steps out to 680cm at y=480 where Bedroom 2 protrudes right.
 
-**Quality across test images (2026-03-23):**
+**Data threading:** `image_url` flows from `app.py` request → `analyze_image(image, name, image_url)` → `_run_pipeline(..., image_url)` → `extract_outline(..., image_url)`. Only available when the `/analyze` endpoint receives `image_url` (not base64 `image`).
+
+**SAM2 status (2026-03-22):** Code deployed and working. Replicate account needs billing credit — SAM2 calls return 402 until funded. OpenCV fallback produces correct outlines in the meantime. Once funded, SAM2 will be used automatically for `image_url` requests.
+
+**Quality across test images (OpenCV method, 2026-03-23):**
 - Shore Drive: 9 vertices, 680×850cm — excellent L-shape
 - Res 507: 10 vertices, 950×1090cm — shows stepped shape
 - Apt 6C: 14 vertices, 1860×1900cm — too many vertices, scale may be wrong
 - Unit 2C: 19 vertices, 650×450cm — too noisy, needs stronger simplification
 
 **Known issues:**
+- **SAM2 untested on real images** — needs Replicate billing credit to validate quality vs OpenCV
 - **Outline over-detailed on some images** — Unit 2C gets 19 vertices for what should be ~6-8. Needs either higher epsilon or a vertex-count cap with re-simplification.
 - **Apt 6C outline is oversized** — 1860cm wide suggests the fp_bbox is too large or scale is off.
 
@@ -895,9 +918,9 @@ The `analyze_floor_plan_image` MCP tool (`src/sketch/tools.ts: handleAnalyzeImag
 - **Grid** → ASCII art with legend showing abbreviation→room name mappings and dimension annotations
 
 **Key files:**
-- `cv-service/cv/outline.py` — `extract_outline()`, `build_spatial_grid()`, `_make_room_abbreviation()`, `_is_junk_label()`
-- `cv-service/cv/pipeline.py` — wires outline+grid into `_run_pipeline()`
-- `cv-service/app.py` — `AnalyzeResponse` Pydantic model includes `outline` and `spatial_grid` fields
+- `cv-service/cv/outline.py` — `_sam2_mask()`, `_contour_to_outline()`, `extract_outline()`, `build_spatial_grid()`, `_make_room_abbreviation()`, `_is_junk_label()`
+- `cv-service/cv/pipeline.py` — threads `image_url` through `analyze_image()` → `_run_pipeline()` → `extract_outline()`
+- `cv-service/app.py` — `AnalyzeResponse` Pydantic model includes `outline` and `spatial_grid` fields; passes `req.image_url` to `analyze_image()`
 - `src/sketch/tools.ts` — `handleAnalyzeImage()` formats outline+grid in MCP response
 
 ### Generate→Preview→Compare loop experience (2026-03-22, updated)

@@ -41,10 +41,21 @@ rsync -avz --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache' \
     -e "ssh $SSH_OPTS" \
     "$DIR/" "$REMOTE:/opt/cv-service/"
 
+# Copy project root .env (contains REPLICATE_API_TOKEN etc.)
+PROJECT_ENV="$DIR/../.env"
+if [ -f "$PROJECT_ENV" ]; then
+    echo "==> Copying .env to server..."
+    scp $SSH_OPTS "$PROJECT_ENV" "$REMOTE:/opt/cv-service/.env"
+fi
+
 echo "==> Building and starting container..."
 ssh $SSH_OPTS "$REMOTE" bash -s <<'START'
 set -euo pipefail
 cd /opt/cv-service
+# Source .env so docker-compose can interpolate env vars
+if [ -f .env ]; then
+    set -a; source .env; set +a
+fi
 docker compose down 2>/dev/null || true
 docker compose up --build -d
 sleep 3
