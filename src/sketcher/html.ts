@@ -250,7 +250,6 @@ export function sketcherHtml(sketchId: string): string {
   var redoStack = [];
   var MAX_UNDO = 50;
   var isDragging = false;        // true during endpoint drag (skips full render)
-  var envelopeDegraded = false;  // true if envelope recompute exceeded 16ms budget
   var viewBox = { x: 0, y: 0, w: 1000, h: 800 };
   var userViewBox = false;
   var ws = null;
@@ -583,8 +582,6 @@ export function sketcherHtml(sketchId: string): string {
         var msg = JSON.parse(e.data);
         if (msg.type === 'state_update') {
           plan = msg.plan;
-          // Server doesn't recompute envelope — do it client-side
-          recomputeEnvelope(plan);
           // Only auto-fit on first load; subsequent updates preserve user's viewport
           if (wsInitialLoad) { userViewBox = false; wsInitialLoad = false; }
           render();
@@ -757,10 +754,6 @@ export function sketcherHtml(sketchId: string): string {
         plan.furniture = plan.furniture.filter(function(f) { return f.id !== change.furniture_id; });
         break;
     }
-    // Recompute envelope when room geometry changes externally
-    if (change.type === 'update_room' || change.type === 'add_room' || change.type === 'remove_room') {
-      recomputeEnvelope(plan);
-    }
     plan.metadata.updated_at = new Date().toISOString();
     plan.metadata.source = 'mixed';
   }
@@ -783,17 +776,7 @@ export function sketcherHtml(sketchId: string): string {
           if (p.y > maxY) maxY = p.y;
         }
       }
-      // Include envelope points in bounding box
-      if (plan.envelope) {
-        for (var ei = 0; ei < plan.envelope.length; ei++) {
-          var ep = plan.envelope[ei];
-          if (ep.x < minX) minX = ep.x;
-          if (ep.y < minY) minY = ep.y;
-          if (ep.x > maxX) maxX = ep.x;
-          if (ep.y > maxY) maxY = ep.y;
-        }
-      }
-      if (plan.walls.length === 0 && !plan.envelope) {
+      if (plan.walls.length === 0) {
         minX = 0; minY = 0; maxX = plan.canvas.width; maxY = plan.canvas.height;
       }
       var pad = 80;
@@ -835,38 +818,21 @@ export function sketcherHtml(sketchId: string): string {
     var dimOpenings = (tool === 'wall' || tool === 'room' || tool === 'furniture');
     var dimFurniture = (tool !== 'select' && tool !== 'furniture');
 
-    var useEnvelope = !!(plan.envelope);
-
-    // Structure layer: envelope + room cutouts (new) or legacy rooms
-    if (useEnvelope) {
-      html += '<g id="structure"' + (dimRooms ? ' class="dimmed"' : '') + '>';
-      // Envelope as filled structural mass
-      var envPts = plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' ');
-      html += '<polygon points="' + envPts + '" fill="#333" stroke="none"/>';
-      // Room polygons as colored cutouts on top
-      for (var ri = 0; ri < plan.rooms.length; ri++) {
-        var room = plan.rooms[ri];
-        var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
-        html += '<polygon points="' + pts + '" fill="' + room.color + '" stroke="none" data-id="' + room.id + '" data-type="room"/>';
-      }
-      html += '</g>';
-    } else {
-      // Legacy: Rooms with labels inline
-      html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
-      for (var ri = 0; ri < plan.rooms.length; ri++) {
-        var room = plan.rooms[ri];
-        var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
-        var cx = room.polygon.reduce(function(s, p) { return s + p.x; }, 0) / room.polygon.length;
-        var cy = room.polygon.reduce(function(s, p) { return s + p.y; }, 0) / room.polygon.length;
-        var area = computeArea(room.polygon);
-        html += '<polygon points="' + pts + '" fill="' + room.color + '" fill-opacity="0.5" stroke="none" data-id="' + room.id + '" data-type="room"/>';
-        html += '<text x="' + cx + '" y="' + (cy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(room.label) + '</text>';
-        html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\\u00B2</text>';
-      }
-      html += '</g>';
+    // Rooms with labels inline
+    html += '<g id="rooms"' + (dimRooms ? ' class="dimmed"' : '') + '>';
+    for (var ri = 0; ri < plan.rooms.length; ri++) {
+      var room = plan.rooms[ri];
+      var pts = room.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' ');
+      var cx = room.polygon.reduce(function(s, p) { return s + p.x; }, 0) / room.polygon.length;
+      var cy = room.polygon.reduce(function(s, p) { return s + p.y; }, 0) / room.polygon.length;
+      var area = computeArea(room.polygon);
+      html += '<polygon points="' + pts + '" fill="' + room.color + '" fill-opacity="0.5" stroke="none" data-id="' + room.id + '" data-type="room"/>';
+      html += '<text x="' + cx + '" y="' + (cy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(room.label) + '</text>';
+      html += '<text x="' + cx + '" y="' + (cy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + area.toFixed(1) + ' m\\u00B2</text>';
     }
+    html += '</g>';
 
-    // Walls — envelope mode: only interior/divider; legacy: all walls
+    // Walls
     html += '<g id="walls"' + (dimWalls ? ' class="dimmed"' : '') + '>';
     for (var wi = 0; wi < plan.walls.length; wi++) {
       var w = plan.walls[wi];
@@ -874,42 +840,34 @@ export function sketcherHtml(sketchId: string): string {
       if (w.type === 'divider') {
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
       } else if (w.type === 'exterior') {
-        if (!useEnvelope) {
-          var pts = wallQuadPoints(w);
-          if (pts) {
-            html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
-          }
-        } else {
-          // Envelope mode: invisible hit-target line over exterior wall centerline
-          var hitW = (w.thickness || 20) + 8; // slightly wider than visual thickness for easy grabbing
-          html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="transparent" stroke-width="' + hitW + '" pointer-events="stroke" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
+        var pts = wallQuadPoints(w);
+        if (pts) {
+          html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
         }
       } else {
         // Interior walls as thin lines
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="2" stroke-linecap="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
       }
     }
-    if (!useEnvelope) {
-      // Junction circles at shared exterior wall endpoints only (legacy mode)
-      var junctions = {};
-      var jCounts = {};
-      for (var ji = 0; ji < plan.walls.length; ji++) {
-        var jw = plan.walls[ji];
-        if (jw.type !== 'exterior') continue;
-        var endpoints = [jw.start, jw.end];
-        for (var je = 0; je < endpoints.length; je++) {
-          var jkey = endpoints[je].x + ',' + endpoints[je].y;
-          jCounts[jkey] = (jCounts[jkey] || 0) + 1;
-          if (!junctions[jkey] || jw.thickness > junctions[jkey].t) {
-            junctions[jkey] = { x: endpoints[je].x, y: endpoints[je].y, t: jw.thickness };
-          }
+    // Junction circles at shared exterior wall endpoints
+    var junctions = {};
+    var jCounts = {};
+    for (var ji = 0; ji < plan.walls.length; ji++) {
+      var jw = plan.walls[ji];
+      if (jw.type !== 'exterior') continue;
+      var endpoints = [jw.start, jw.end];
+      for (var je = 0; je < endpoints.length; je++) {
+        var jkey = endpoints[je].x + ',' + endpoints[je].y;
+        jCounts[jkey] = (jCounts[jkey] || 0) + 1;
+        if (!junctions[jkey] || jw.thickness > junctions[jkey].t) {
+          junctions[jkey] = { x: endpoints[je].x, y: endpoints[je].y, t: jw.thickness };
         }
       }
-      for (var jk in junctions) {
-        if (jCounts[jk] >= 2) {
-          var jn = junctions[jk];
-          html += '<circle cx="' + jn.x + '" cy="' + jn.y + '" r="' + (jn.t / 2) + '" fill="#333"/>';
-        }
+    }
+    for (var jk in junctions) {
+      if (jCounts[jk] >= 2) {
+        var jn = junctions[jk];
+        html += '<circle cx="' + jn.x + '" cy="' + jn.y + '" r="' + (jn.t / 2) + '" fill="#333"/>';
       }
     }
     html += '</g>';
@@ -977,26 +935,10 @@ export function sketcherHtml(sketchId: string): string {
     }
     html += '</g>';
 
-    // Room labels (envelope mode — labels are separate from structure layer)
-    if (useEnvelope) {
-      html += '<g id="room-labels">';
-      for (var rli = 0; rli < plan.rooms.length; rli++) {
-        var rlRoom = plan.rooms[rli];
-        var rlCx = rlRoom.polygon.reduce(function(s, p) { return s + p.x; }, 0) / rlRoom.polygon.length;
-        var rlCy = rlRoom.polygon.reduce(function(s, p) { return s + p.y; }, 0) / rlRoom.polygon.length;
-        var rlArea = computeArea(rlRoom.polygon);
-        html += '<text x="' + rlCx + '" y="' + (rlCy - 8) + '" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">' + escHtml(rlRoom.label) + '</text>';
-        html += '<text x="' + rlCx + '" y="' + (rlCy + 10) + '" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">' + rlArea.toFixed(1) + ' m\\u00B2</text>';
-      }
-      html += '</g>';
-    }
-
     // Dimensions
     html += '<g id="dimensions">';
     for (var di = 0; di < plan.walls.length; di++) {
       var w = plan.walls[di];
-      // In envelope mode, only show dimensions for interior/divider walls
-      if (useEnvelope && w.type === 'exterior') continue;
       var dx = w.end.x - w.start.x, dy = w.end.y - w.start.y;
       var len = Math.sqrt(dx*dx + dy*dy);
       if (len < 1) continue;
@@ -1076,222 +1018,6 @@ export function sketcherHtml(sketchId: string): string {
       sum += polygon[i].x * polygon[j].y - polygon[j].x * polygon[i].y;
     }
     return Math.abs(sum) / 2 / 10000;
-  }
-
-  function pointInPolygon(point, polygon) {
-    if (polygon.length < 3) return false;
-    var inside = false;
-    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      var xi = polygon[i].x, yi = polygon[i].y;
-      var xj = polygon[j].x, yj = polygon[j].y;
-      var intersect = ((yi > point.y) !== (yj > point.y)) &&
-        (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-    }
-    return inside;
-  }
-
-  function rasterizeToGrid(polygons, gridSize) {
-    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (var pi = 0; pi < polygons.length; pi++) {
-      for (var vi = 0; vi < polygons[pi].length; vi++) {
-        var p = polygons[pi][vi];
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-      }
-    }
-    var originX = Math.floor(minX / gridSize) * gridSize;
-    var originY = Math.floor(minY / gridSize) * gridSize;
-    var cols = Math.ceil((maxX - originX) / gridSize);
-    var rows = Math.ceil((maxY - originY) / gridSize);
-    var grid = [];
-    for (var r = 0; r < rows; r++) {
-      grid[r] = [];
-      for (var c = 0; c < cols; c++) {
-        var cx = originX + c * gridSize + gridSize / 2;
-        var cy = originY + r * gridSize + gridSize / 2;
-        grid[r][c] = false;
-        for (var pj = 0; pj < polygons.length; pj++) {
-          if (pointInPolygon({ x: cx, y: cy }, polygons[pj])) {
-            grid[r][c] = true;
-            break;
-          }
-        }
-      }
-    }
-    return { grid: grid, originX: originX, originY: originY, cols: cols, rows: rows };
-  }
-
-  function dilateGrid(grid, rows, cols) {
-    var result = [];
-    for (var r = 0; r < rows; r++) {
-      result[r] = [];
-      for (var c = 0; c < cols; c++) result[r][c] = grid[r][c];
-    }
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        if (grid[r][c]) continue;
-        if ((r > 0 && grid[r-1][c]) || (r < rows-1 && grid[r+1][c]) ||
-            (c > 0 && grid[r][c-1]) || (c < cols-1 && grid[r][c+1])) {
-          result[r][c] = true;
-        }
-      }
-    }
-    return result;
-  }
-
-  function erodeGrid(grid, rows, cols) {
-    var result = [];
-    for (var r = 0; r < rows; r++) {
-      result[r] = [];
-      for (var c = 0; c < cols; c++) result[r][c] = grid[r][c];
-    }
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        if (!grid[r][c]) continue;
-        if (r === 0 || !grid[r-1][c] || r === rows-1 || !grid[r+1][c] ||
-            c === 0 || !grid[r][c-1] || c === cols-1 || !grid[r][c+1]) {
-          result[r][c] = false;
-        }
-      }
-    }
-    return result;
-  }
-
-  function traceContour(grid, gridSize, originX, originY) {
-    var rows = grid.length;
-    var cols = rows > 0 ? grid[0].length : 0;
-    if (rows === 0 || cols === 0) return [];
-    var filled = function(r, c) {
-      return r >= 0 && r < rows && c >= 0 && c < cols && grid[r][c];
-    };
-    var edges = [];
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        if (!grid[r][c]) continue;
-        var x = originX + c * gridSize;
-        var y = originY + r * gridSize;
-        var s = gridSize;
-        if (!filled(r-1, c)) edges.push({ x1: x, y1: y, x2: x+s, y2: y });
-        if (!filled(r+1, c)) edges.push({ x1: x+s, y1: y+s, x2: x, y2: y+s });
-        if (!filled(r, c-1)) edges.push({ x1: x, y1: y+s, x2: x, y2: y });
-        if (!filled(r, c+1)) edges.push({ x1: x+s, y1: y, x2: x+s, y2: y+s });
-      }
-    }
-    if (edges.length === 0) return [];
-    var edgeMap = {};
-    for (var ei = 0; ei < edges.length; ei++) {
-      var key = edges[ei].x1 + ',' + edges[ei].y1;
-      if (!edgeMap[key]) edgeMap[key] = [];
-      edgeMap[key].push(ei);
-    }
-    var used = {};
-    var polygon = [];
-    var current = edges[0];
-    used[0] = true;
-    polygon.push({ x: current.x1, y: current.y1 });
-    for (var i = 0; i < edges.length - 1; i++) {
-      var nextKey = current.x2 + ',' + current.y2;
-      var candidates = edgeMap[nextKey];
-      if (!candidates) break;
-      var next = null;
-      var nextIdx = -1;
-      for (var ci = 0; ci < candidates.length; ci++) {
-        if (!used[candidates[ci]]) { next = edges[candidates[ci]]; nextIdx = candidates[ci]; break; }
-      }
-      if (!next) break;
-      used[nextIdx] = true;
-      var prev = polygon[polygon.length - 1];
-      var mid = { x: current.x2, y: current.y2 };
-      var nxt = { x: next.x2, y: next.y2 };
-      var sameLine = (prev.x === mid.x && mid.x === nxt.x) ||
-                     (prev.y === mid.y && mid.y === nxt.y);
-      if (!sameLine) polygon.push(mid);
-      current = next;
-    }
-    return polygon;
-  }
-
-  function offsetAxisAlignedPolygon(polygon, distance) {
-    var n = polygon.length;
-    if (n < 3) return polygon.slice();
-    var normals = [];
-    for (var i = 0; i < n; i++) {
-      var a = polygon[i];
-      var b = polygon[(i + 1) % n];
-      var dx = b.x - a.x;
-      var dy = b.y - a.y;
-      var len = Math.sqrt(dx * dx + dy * dy);
-      if (len === 0) { normals.push({ x: 0, y: 0 }); continue; }
-      normals.push({ x: dy / len, y: -dx / len });
-    }
-    var result = [];
-    for (var i = 0; i < n; i++) {
-      var prevIdx = (i - 1 + n) % n;
-      var prevNormal = normals[prevIdx];
-      var currNormal = normals[i];
-      var p = polygon[i];
-      var cross = prevNormal.x * currNormal.y - prevNormal.y * currNormal.x;
-      if (Math.abs(cross) < 0.001) {
-        result.push({ x: p.x + currNormal.x * distance, y: p.y + currNormal.y * distance });
-      } else if (cross > 0) {
-        result.push({
-          x: p.x + (prevNormal.x + currNormal.x) * distance,
-          y: p.y + (prevNormal.y + currNormal.y) * distance,
-        });
-      } else {
-        result.push({
-          x: p.x + prevNormal.x * distance,
-          y: p.y + prevNormal.y * distance,
-        });
-        result.push({
-          x: p.x + currNormal.x * distance,
-          y: p.y + currNormal.y * distance,
-        });
-      }
-    }
-    return result;
-  }
-
-  function getExteriorThickness(plan) {
-    for (var i = 0; i < plan.walls.length; i++) {
-      if (plan.walls[i].type === 'exterior') return plan.walls[i].thickness || 20;
-    }
-    return 20;
-  }
-
-  function recomputeEnvelope(plan) {
-    if (!plan || !plan.envelope || plan.rooms.length === 0) return;
-    var polygons = plan.rooms.map(function(r) { return r.polygon; });
-    var gridSize = 10;
-    var gapThreshold = 50;
-    var result = rasterizeToGrid(polygons, gridSize);
-    var dilateSteps = Math.ceil(gapThreshold / gridSize / 2);
-    var pad = dilateSteps;
-    var paddedRows = result.rows + pad * 2;
-    var paddedCols = result.cols + pad * 2;
-    var closed = [];
-    for (var r = 0; r < paddedRows; r++) {
-      closed[r] = [];
-      for (var c = 0; c < paddedCols; c++) {
-        var origR = r - pad;
-        var origC = c - pad;
-        closed[r][c] = origR >= 0 && origR < result.rows && origC >= 0 && origC < result.cols && result.grid[origR][origC];
-      }
-    }
-    for (var step = 0; step < dilateSteps; step++) {
-      closed = dilateGrid(closed, paddedRows, paddedCols);
-    }
-    for (var step = 0; step < dilateSteps; step++) {
-      closed = erodeGrid(closed, paddedRows, paddedCols);
-    }
-    var unpadded = closed.slice(pad, pad + result.rows).map(function(row) { return row.slice(pad, pad + result.cols); });
-    var contour = traceContour(unpadded, gridSize, result.originX, result.originY);
-    if (contour.length < 3) return;
-    var extThickness = getExteriorThickness(plan);
-    plan.envelope = offsetAxisAlignedPolygon(contour, extThickness / 2);
   }
 
   // Propagate room polygon vertices that are near reference points.
@@ -2054,27 +1780,6 @@ export function sketcherHtml(sketchId: string): string {
       propagateRoomPolygons(plan, [{ orig: dragState.startPoint, delta: { x: epDx, y: epDy } }]);
     }
 
-    // Recompute envelope in real-time (with performance escape hatch)
-    if (!envelopeDegraded && plan.envelope) {
-      var t0 = performance.now();
-      recomputeEnvelope(plan);
-      if (performance.now() - t0 > 16) envelopeDegraded = true;
-    }
-    // Update envelope and room cutout polygons in DOM
-    if (plan.envelope) {
-      var envEl = svg.querySelector('#structure polygon:first-child');
-      if (envEl) {
-        envEl.setAttribute('points', plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' '));
-      }
-      for (var rci = 0; rci < plan.rooms.length; rci++) {
-        var rcRoom = plan.rooms[rci];
-        var rcEl = svg.querySelector('#structure [data-type="room"][data-id="' + rcRoom.id + '"]');
-        if (rcEl) {
-          rcEl.setAttribute('points', rcRoom.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' '));
-        }
-      }
-    }
-
     // Throttled WebSocket broadcast during drag (10fps)
     sendWsThrottled({ type: 'move_wall', wall_id: dragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
   }
@@ -2102,13 +1807,12 @@ export function sketcherHtml(sketchId: string): string {
     var entry = undoStack.pop();
     for (var i = 0; i < entry.inverseChanges.length; i++) {
       applyChangeLocal(entry.inverseChanges[i]);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(entry.inverseChanges[i]));
-      }
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(entry.inverseChanges));
     }
     redoStack.push(entry);
     updateUndoButtons();
-    recomputeEnvelope(plan);
     render();
     showProperties();
   }
@@ -2118,13 +1822,12 @@ export function sketcherHtml(sketchId: string): string {
     var entry = redoStack.pop();
     for (var i = 0; i < entry.changes.length; i++) {
       applyChangeLocal(entry.changes[i]);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(entry.changes[i]));
-      }
+    }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(entry.changes));
     }
     undoStack.push(entry);
     updateUndoButtons();
-    recomputeEnvelope(plan);
     render();
     showProperties();
   }
@@ -2220,16 +1923,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (changes.length > 0) {
       pushUndo(changes, inverseChanges);
-      changes.forEach(function(c) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(c));
-        }
-      });
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(changes));
+      }
     }
-
-    // Always recompute envelope on commit (catch-up for degraded mode)
-    recomputeEnvelope(plan);
-    envelopeDegraded = false;
 
     isDragging = false;
     dragState = null;
@@ -2354,27 +2051,6 @@ export function sketcherHtml(sketchId: string): string {
       { orig: wallDragState.origEnd, delta: { x: dx, y: dy } },
     ]);
 
-    // Recompute envelope in real-time (with performance escape hatch)
-    if (!envelopeDegraded && plan.envelope) {
-      var t0 = performance.now();
-      recomputeEnvelope(plan);
-      if (performance.now() - t0 > 16) envelopeDegraded = true;
-    }
-    // Update envelope and room cutout polygons in DOM
-    if (plan.envelope) {
-      var envEl = svg.querySelector('#structure polygon:first-child');
-      if (envEl) {
-        envEl.setAttribute('points', plan.envelope.map(function(p) { return p.x + ',' + p.y; }).join(' '));
-      }
-      for (var rci = 0; rci < plan.rooms.length; rci++) {
-        var rcRoom = plan.rooms[rci];
-        var rcEl = svg.querySelector('#structure [data-type="room"][data-id="' + rcRoom.id + '"]');
-        if (rcEl) {
-          rcEl.setAttribute('points', rcRoom.polygon.map(function(p) { return p.x + ',' + p.y; }).join(' '));
-        }
-      }
-    }
-
     // Throttled WebSocket broadcast
     sendWsThrottled({ type: 'move_wall', wall_id: wallDragState.wallId, start: { x: wall.start.x, y: wall.start.y }, end: { x: wall.end.x, y: wall.end.y } });
   }
@@ -2435,16 +2111,10 @@ export function sketcherHtml(sketchId: string): string {
 
     if (changes.length > 0) {
       pushUndo(changes, inverseChanges);
-      changes.forEach(function(c) {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(c));
-        }
-      });
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(changes));
+      }
     }
-
-    // Always recompute envelope on commit (catch-up for degraded mode)
-    recomputeEnvelope(plan);
-    envelopeDegraded = false;
 
     isDragging = false;
     wallDragState = null;

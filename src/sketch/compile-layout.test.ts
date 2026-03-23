@@ -231,46 +231,6 @@ describe('compileLayout', () => {
     });
   });
 
-  describe('envelope computation', () => {
-    it('generates an envelope for a single room', () => {
-      const input: SimpleFloorPlanInput = {
-        name: 'Single Room',
-        rooms: [{ label: 'Living', x: 0, y: 0, width: 400, depth: 300 }],
-      };
-      const plan = compileLayout(input);
-      expect(plan.envelope).toBeDefined();
-      expect(plan.envelope!.length).toBeGreaterThanOrEqual(4);
-      // Envelope should be larger than room by exterior wall thickness (20cm default)
-      const bb = plan.envelope!.reduce(
-        (acc, p) => ({
-          minX: Math.min(acc.minX, p.x), minY: Math.min(acc.minY, p.y),
-          maxX: Math.max(acc.maxX, p.x), maxY: Math.max(acc.maxY, p.y),
-        }),
-        { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity },
-      );
-      expect(bb.minX).toBeLessThan(0);
-      expect(bb.minY).toBeLessThan(0);
-      expect(bb.maxX).toBeGreaterThan(400);
-      expect(bb.maxY).toBeGreaterThan(300);
-    });
-
-    it('generates envelope that bridges small gaps between rooms', () => {
-      const input: SimpleFloorPlanInput = {
-        name: 'Gap Test',
-        rooms: [
-          { label: 'Room A', x: 0, y: 0, width: 200, depth: 200 },
-          { label: 'Room B', x: 240, y: 0, width: 200, depth: 200 }, // 40cm gap
-        ],
-      };
-      const plan = compileLayout(input);
-      expect(plan.envelope).toBeDefined();
-      // Envelope should bridge the 40cm gap (< 50cm threshold)
-      const xs = plan.envelope!.map(p => p.x);
-      expect(Math.min(...xs)).toBeLessThan(0);
-      expect(Math.max(...xs)).toBeGreaterThan(440);
-    });
-  });
-
   describe('full compilation', () => {
     it('compiles a 2BR apartment layout', () => {
       const input: SimpleFloorPlanInput = {

@@ -545,7 +545,7 @@ Do NOT skip this. Do NOT read dimensions from the image by eye. The CV pipeline 
       {
         description: `Push modifications to an existing sketch. Supports two input modes:
 
-1. "changes" — Low-level ID-based changes (15 types: add/move/remove walls, openings, rooms, furniture, set_envelope)
+1. "changes" — Low-level ID-based changes (14 types: add/move/remove walls, openings, rooms, furniture)
 2. "high_level_changes" — Label-based surgical operations (recommended for Copy Mode iteration)
 
 HIGH-LEVEL OPERATIONS (use room labels, not IDs):
@@ -805,7 +805,7 @@ export class SketchSync extends Agent<Env, SketchSession> {
     if (typeof message !== 'string') return;
     try {
       const data = JSON.parse(message);
-      if (data.type) {
+      if (Array.isArray(data) || data.type) {
         await this.handleSketchMessage(connection, data as ClientMessage);
       }
     } catch {
@@ -824,6 +824,18 @@ export class SketchSync extends Agent<Env, SketchSession> {
   }
 
   private async handleSketchMessage(sender: Connection, msg: ClientMessage) {
+    if (Array.isArray(msg)) {
+      // Batched array of changes — apply all at once, broadcast once
+      if (!this.state?.plan) return;
+      for (const c of msg) this.logChange(c as Change);
+      const updated = applyChanges(this.state.plan, msg as Change[]);
+      this.setState({ ...this.state, plan: updated });
+      this.dirty = true;
+      this.broadcastToClients(JSON.stringify({ type: 'state_update', plan: updated }));
+      this.debouncedSave();
+      return;
+    }
+
     if (msg.type === 'load') {
       let plan = this.state?.plan;
       if (!plan && msg.sketch_id) {
@@ -851,7 +863,7 @@ export class SketchSync extends Agent<Env, SketchSession> {
       return;
     }
 
-    // It's a Change — apply it
+    // It's a single Change — apply it
     if (!this.state?.plan) {
       if (this.state?.sketchId) {
         const loaded = await loadSketch(this.env.DB, this.state.sketchId);

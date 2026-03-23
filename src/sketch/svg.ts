@@ -1,4 +1,4 @@
-import type { FloorPlan, Wall, Opening, Room, Point } from './types';
+import type { FloorPlan, Wall, Opening, Room } from './types';
 import { shoelaceArea, centroid, boundingBox, wallLength, wallQuad } from './geometry';
 import { furnitureSymbol, escXml } from './furniture-symbols';
 
@@ -124,33 +124,6 @@ function renderOpenings(walls: Wall[]): string {
   return parts.join('\n    ');
 }
 
-function renderStructure(envelope: Point[], rooms: Room[]): string {
-  // 1. Envelope as filled structural mass
-  const envPoints = envelope.map(p => `${p.x},${p.y}`).join(' ');
-  const envPoly = `<polygon points="${envPoints}" fill="#333" stroke="none"/>`;
-
-  // 2. Room polygons as colored cutouts (drawn on top, occluding the envelope)
-  const roomCutouts = rooms.map(room => {
-    const points = room.polygon.map(p => `${p.x},${p.y}`).join(' ');
-    return `<polygon points="${points}" fill="${room.color}" stroke="none" data-id="${room.id}" data-type="room"/>`;
-  }).join('\n    ');
-
-  return envPoly + '\n    ' + roomCutouts;
-}
-
-function renderRoomLabels(rooms: Room[], units: 'metric' | 'imperial'): string {
-  return rooms.map(room => {
-    const area = room.area ?? shoelaceArea(room.polygon);
-    const areaLabel = units === 'imperial'
-      ? `${(area * 10.7639).toFixed(1)} ft²`
-      : `${area.toFixed(1)} m²`;
-    const c = centroid(room.polygon);
-    const label = `<text x="${c.x}" y="${c.y - 8}" text-anchor="middle" font-size="14" font-family="sans-serif" fill="#333">${escXml(room.label)}</text>`;
-    const areaText = `<text x="${c.x}" y="${c.y + 10}" text-anchor="middle" font-size="11" font-family="sans-serif" fill="#666">${areaLabel}</text>`;
-    return [label, areaText].join('\n    ');
-  }).join('\n    ');
-}
-
 function renderRooms(rooms: Room[], units: 'metric' | 'imperial'): string {
   return rooms.map(room => {
     const points = room.polygon.map(p => `${p.x},${p.y}`).join(' ');
@@ -208,7 +181,7 @@ function renderWatermark(maxX: number, maxY: number): string {
 }
 
 export function floorPlanToSvg(plan: FloorPlan): string {
-  const bb = boundingBox(plan.walls, plan.envelope);
+  const bb = boundingBox(plan.walls);
 
   // Expand bounding box to include door swing arcs
   for (const wall of plan.walls) {
@@ -259,34 +232,14 @@ export function floorPlanToSvg(plan: FloorPlan): string {
   const vbH = (bb.maxY - bb.minY) + pad * 2;
 
   // For empty plans, use canvas dimensions
-  const hasContent = plan.walls.length > 0 || !!plan.envelope;
+  const hasContent = plan.walls.length > 0;
   const viewBox = hasContent
     ? `${vbX} ${vbY} ${vbW} ${vbH}`
     : `0 0 ${plan.canvas.width} ${plan.canvas.height}`;
 
-  // Separate wall types for rendering
-  const useEnvelope = !!plan.envelope;
-  const interiorWalls = plan.walls.filter(w => w.type === 'interior' || w.type === 'divider');
-  const exteriorWalls = plan.walls.filter(w => w.type === 'exterior');
-
-  const structureLayer = useEnvelope
-    ? renderStructure(plan.envelope!, plan.rooms)
-    : renderRooms(plan.rooms, plan.units);
-
-  const wallLayer = useEnvelope
-    ? renderWalls(interiorWalls)
-    : renderWalls(plan.walls);
-
-  const junctionLayer = useEnvelope
-    ? ''
-    : renderJunctions(plan.walls);
-
-  const labelLayer = useEnvelope
-    ? renderRoomLabels(plan.rooms, plan.units)
-    : '';
-
-  // Openings: interior on partition walls, exterior on exterior walls (both cut gaps)
-  const openingWalls = useEnvelope ? [...interiorWalls, ...exteriorWalls] : plan.walls;
+  const structureLayer = renderRooms(plan.rooms, plan.units);
+  const wallLayer = renderWalls(plan.walls);
+  const junctionLayer = renderJunctions(plan.walls);
 
   return `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" style="background:#fff">
   <g id="structure">
@@ -297,14 +250,13 @@ export function floorPlanToSvg(plan: FloorPlan): string {
     ${junctionLayer}
   </g>
   <g id="openings">
-    ${renderOpenings(openingWalls)}
+    ${renderOpenings(plan.walls)}
   </g>
-  ${useEnvelope ? `<g id="room-labels">\n    ${labelLayer}\n  </g>` : ''}
   <g id="furniture">
     ${renderFurniture(plan.furniture)}
   </g>
   <g id="dimensions">
-    ${renderDimensions(useEnvelope ? interiorWalls : plan.walls, plan.units)}
+    ${renderDimensions(plan.walls, plan.units)}
   </g>
   <g id="watermark">
     ${renderWatermark(vbX + vbW, vbY + vbH)}

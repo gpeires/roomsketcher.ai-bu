@@ -28,8 +28,6 @@ export const WALL_THICKNESS: Record<string, number> = {
 
 export const DEFAULT_HEIGHT = 250;
 
-export const ENVELOPE_GAP_THRESHOLD = 50; // cm — gaps smaller than this are bridged
-
 export function applyDefaults(input: FloorPlanInput): FloorPlan {
   const now = new Date().toISOString();
 
@@ -79,7 +77,6 @@ export function applyDefaults(input: FloorPlanInput): FloorPlan {
     canvas,
     walls,
     rooms,
-    ...(input.envelope ? { envelope: input.envelope } : {}),
     furniture,
     annotations: input.annotations,
     metadata,

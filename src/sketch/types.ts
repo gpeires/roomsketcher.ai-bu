@@ -102,7 +102,6 @@ export const FloorPlanSchema = z.object({
   }),
   walls: z.array(WallSchema),
   rooms: z.array(RoomSchema),
-  envelope: z.array(PointSchema).optional(),
   furniture: z.array(FurnitureItemSchema),
   annotations: z.array(AnnotationSchema),
   metadata: z.object({
@@ -131,7 +130,6 @@ export const ChangeSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('add_furniture'), furniture: FurnitureItemSchema }),
   z.object({ type: z.literal('move_furniture'), furniture_id: z.string(), position: PointSchema.optional(), rotation: z.number().optional() }),
   z.object({ type: z.literal('remove_furniture'), furniture_id: z.string() }),
-  z.object({ type: z.literal('set_envelope'), polygon: z.array(PointSchema).min(3) }),
 ]);
 export type Change = z.infer<typeof ChangeSchema>;
 
@@ -183,7 +181,6 @@ export const FloorPlanInputSchema = z.object({
   }).optional(),
   walls: z.array(WallInputSchema),
   rooms: z.array(RoomInputSchema),
-  envelope: z.array(PointSchema).optional(),
   furniture: z.array(FurnitureItemInputSchema),
   annotations: z.array(AnnotationSchema),
   metadata: z.object({
@@ -263,6 +260,7 @@ export type SimpleFloorPlanInput = z.infer<typeof SimpleFloorPlanInputSchema>;
 
 export type ClientMessage =
   | Change
+  | Change[]
   | { type: 'save' }
   | { type: 'load'; sketch_id: string };
 

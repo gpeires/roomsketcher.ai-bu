@@ -6,7 +6,6 @@ import { polygonBoundingBox, shoelaceArea, boundingBox } from './geometry';
 import { ROOM_COLORS } from './defaults';
 import { FURNITURE_CATALOG } from './furniture-catalog';
 import { applyChanges } from './changes';
-import { computeEnvelope } from './compile-layout';
 import {
   findRoomByLabel,
   findRoomWalls,
@@ -760,21 +759,8 @@ export function processChanges(
     current = applyChanges(current, lowLevelChanges);
   }
 
-  // Recompute envelope if geometry changed
-  const geometryChangingTypes = new Set([
-    'resize_room', 'move_room', 'add_room', 'remove_room', 'split_room', 'merge_rooms',
-  ]);
-  const hasGeometryChange = highLevelChanges.some(c => geometryChangingTypes.has(c.type));
-  if (hasGeometryChange && current.envelope) {
-    const extThickness = current.walls.find(w => w.type === 'exterior')?.thickness ?? 20;
-    const newEnvelope = computeEnvelope(current.rooms, extThickness);
-    if (newEnvelope) {
-      current = { ...current, envelope: newEnvelope };
-    }
-  }
-
   // Recompute canvas bounds
-  const bb = boundingBox(current.walls, current.envelope);
+  const bb = boundingBox(current.walls);
   const pad = 100;
   current = {
     ...current,

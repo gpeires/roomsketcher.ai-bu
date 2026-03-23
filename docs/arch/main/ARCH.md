@@ -121,18 +121,18 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
-│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe, computeEnvelope — exported for reuse by processChanges)
-│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon
-│   ├── changes.ts              # applyChanges() — immutable state machine (15 change types incl. set_envelope)
+│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe)
+│   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon (last 3 retained as utility exports)
+│   ├── changes.ts              # applyChanges() — immutable state machine (14 change types)
 │   ├── resolve.ts              # Label→ID resolution layer (findRoomByLabel, findRoomWalls, findSharedWall, resolvePosition)
-│   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges() (auto-recomputes envelope after geometry changes)
+│   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges()
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
-│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (envelope-based or legacy wall rendering)
+│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (wall-based rendering)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
 │   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types, incl. dishwasher, washer-dryer, aliases)
 │   ├── rasterize.ts            # svgToPng() via @cf-wasm/resvg (WASM) for preview_sketch
-│   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map + ENVELOPE_GAP_THRESHOLD
+│   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map
 │   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
 │   ├── templates/
 │   │   ├── studio.json         # v3 quality, fully furnished
@@ -264,7 +264,6 @@ FloorPlan
 │       ├── id, type (door|window|opening)
 │       ├── offset (along wall), width
 │       └── properties { swingDirection, sillHeight, windowType }
-├── envelope? [{x,y}...] (optional — outer building boundary polygon, computed by compileLayout)
 ├── rooms[]
 │   ├── id, label, type (living|bedroom|kitchen|...)
 │   ├── polygon [{x,y}...] (clockwise)
@@ -297,11 +296,9 @@ FloorPlan
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
-| `set_envelope` | polygon (Point[]) — sets building outline directly (internal only, not exposed as high-level op) |
-
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
 
-### SVG Rendering (Two Renderers)
+### SVG Rendering
 
 Both renderers must stay in sync — they render the same FloorPlan data.
 
@@ -309,31 +306,14 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Browser-side** (`src/sketcher/html.ts`): Used by the interactive sketcher SPA. Vanilla JS (embedded in template string). Includes selection highlighting, drag handles, tool modes.
 
-**Envelope rendering (as of 2026-03-23):**
-
-When `plan.envelope` exists, the renderer uses the **envelope-minus-rooms** model:
-1. **Structure layer** (`<g id="structure">`): Envelope polygon filled `#333` (structural mass), then room polygons filled with room colors on top (cutouts via painters model)
-2. **Walls layer** (`<g id="walls">`): Interior/divider walls as thin `<line>` elements. **Exterior walls** render as invisible hit-target `<line>` elements (`stroke="transparent"`, `stroke-width` = wall thickness + 8, `pointer-events="stroke"`) so users can click/drag them — the visual representation is the envelope polygon, but hit targets make exterior walls interactive.
-3. **Openings layer**: Openings on both interior and exterior walls cut gaps
-4. **Room labels layer** (`<g id="room-labels">`): Labels rendered separately (not embedded in room polygons)
-5. No junction circles needed — envelope provides continuous structural mass
-
-**Exterior wall hit targets (2026-03-23, PARTIALLY WORKING — see Known Issues):**
-Exterior walls in envelope mode are data-only (`plan.walls[]` with `type='exterior'`). To make them interactive, invisible `<line>` elements overlay each exterior wall's centerline. CSS `:hover` on `[data-type="wall"]` highlights them teal. Clicking selects them and shows drag handles. The existing wall drag infrastructure (`beginWallDrag`/`updateWallDrag`/`commitWallDrag`) works for these since it looks up walls by ID in `plan.walls`. **BUG: Envelope snaps back on mouse release** — during drag the envelope follows (via real-time `recomputeEnvelope`), but on commit the server echoes `state_update` with stale envelope, overwriting the client's correct state. See "Exterior wall drag envelope snap-back" in Known Issues.
-
-The envelope is computed by `computeEnvelope()` in `compile-layout.ts`:
-- Rasterize all room polygons onto a 10cm boolean grid
-- Morphological close (dilate then erode) on padded grid to bridge gaps < 50cm between rooms
-- Trace contour of the filled grid to extract axis-aligned polygon
-- Offset polygon outward by exterior wall thickness
-
-**Legacy rendering (fallback when no envelope):**
-- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad). Fill `#333`.
+**Rendering pipeline (single path, as of 2026-03-23):**
+- Room polygons rendered with fill + labels inline
+- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad). Fill `#333`. Directly selectable/draggable.
 - Interior walls → `<line>` elements with `stroke-width="2"`.
 - Divider walls → `<line>` elements with dashed stroke.
-- Junction circles at shared **exterior** wall endpoints fill corner gaps.
-- Room polygons rendered with fill + labels inline.
+- Junction circles at shared **exterior** wall endpoints fill corner gaps between perpendicular wall quads.
 - Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls.
+- Dimensions shown on all walls (exterior and interior).
 
 **Wall type classification** (`compile-layout.ts`):
 - Shared edges (two rooms touch at aligned edges) → `interior` walls. Detected via `findSharedEdges()` which finds overlapping opposing edges within `SNAP_TOLERANCE` (20cm).
@@ -347,7 +327,7 @@ The envelope is computed by `computeEnvelope()` in `compile-layout.ts`:
 
 **Geometry utility** (`src/sketch/geometry.ts`):
 - `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon
-- `boundingBox(walls, envelope?)` — when envelope present, uses envelope bounds (no thickness expansion needed); otherwise expands by max exterior wall thickness / 2
+- `boundingBox(walls)` — expands by max exterior wall thickness / 2
 - `polygonBoundingBox(polygon)` → `{ minX, minY, maxX, maxY }` — tight bounds on polygon vertices
 - `rasterizeToGrid(polygons, gridSize)` → boolean 2D array — rasterizes axis-aligned polygons via point-in-polygon at cell centers
 - `traceContour(grid, originX, originY, gridSize)` → `Point[]` — boundary-following on grid edges, produces axis-aligned polygon
@@ -358,13 +338,15 @@ The envelope is computed by `computeEnvelope()` in `compile-layout.ts`:
 
 ```
 Client → Server:
-  Change | { type: 'save' } | { type: 'load', sketch_id }
+  Change | Change[] | { type: 'save' } | { type: 'load', sketch_id }
 
 Server → Client:
   { type: 'state_update', plan, svg }
   { type: 'saved', sketch_id }
   { type: 'error', message }
 ```
+
+**Batching (2026-03-23):** Client sends `Change[]` arrays (e.g., wall moves + room polygon updates from a single drag commit). Server normalizes `Array.isArray(msg) ? msg : [msg]`, applies all changes in one `applyChanges()` call, broadcasts a single `state_update` with the final state. This prevents intermediate-state broadcasts that caused visual glitches.
 
 The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_AGENT_STATE` broadcasts are disabled via `shouldSendProtocolMessages() → false`.
 
@@ -803,71 +785,31 @@ Multi-strategy merge improved room counts but quality issues remain:
 | Apt 6C (520 W 23rd) | 5 | measured (2.63) | FOYER, BEDROOM×2, CL, LIVING/DINING | hallway, bedroom×2, closet, living | BATH (0.3) filtered; all rooms now labeled |
 | Res 507 (547 W 47th) | 8 | fallback (0.85) | Bed, Bedroom×2, Foyer, & Dining; 3 generic | bedroom×3, hallway, dining | Scale still fallback; "& Dining" partial label |
 
-### Exterior wall drag envelope snap-back (2026-03-23, OPEN BUG)
-
-**Problem:** When a user drags an exterior wall in envelope mode, the envelope visually follows in real-time during drag (via `recomputeEnvelope` in `updateWallDrag`). But on mouse release, the envelope **snaps back** to its pre-drag position.
-
-**Root cause (partially diagnosed, NOT fully fixed):** The `commitWallDrag` function sends individual `move_wall` and `update_room` changes via WebSocket. Each triggers a `state_update` broadcast from the server containing the full plan. The server's `applyChanges()` updates wall positions and room polygons but does NOT recompute the envelope. When the client receives `state_update`, it does `plan = msg.plan` which overwrites the locally-recomputed envelope with the server's stale one.
-
-**Attempted fix:** Added `recomputeEnvelope(plan)` call in the `ws.onmessage` handler after `plan = msg.plan` assignment (line ~586 of `html.ts`). Also added `Cache-Control: no-cache` header to the sketcher HTML response to prevent stale code. **This fix was deployed but did NOT resolve the issue** — the envelope still snaps back. Possible explanations:
-1. The intermediate `state_update` messages (with stale room polygons from partial change application) may be overwriting the final correct state
-2. The `recomputeEnvelope` call in the WS handler may be computing from stale room polygons (if `update_room` changes haven't been applied yet on the server)
-3. There may be a deeper issue with how `commitWallDrag` and the WS echo interact — race condition between local state and server echoes
-
-**What works:** Interior wall dragging works correctly — walls move, rooms follow, envelope recomputes. The difference is that interior walls are rendered as visible `<line>` elements and their position updates persist visually even when the server echo arrives.
-
-**What needs investigation:**
-1. Add `console.log` debugging to the `ws.onmessage` handler to trace: (a) how many `state_update` messages arrive after a single drag commit, (b) what the room polygons look like in each, (c) what `recomputeEnvelope` produces
-2. Consider suppressing server echo for self-originated changes (add a client-originated flag or sequence number)
-3. Consider batching all changes into a single WS message instead of sending individually
-4. **Deeper question:** Should the envelope even be separate from the room/wall data? The whole envelope system (dual rendering paths, client-side recompute, server/client sync) adds significant complexity. Consider whether the legacy wall-based rendering (exterior walls as thick polygons, junction circles at corners) could be made to look equally good while being simpler and fully interactive by default.
-
-**Key files:**
-- `src/sketcher/html.ts` — lines 582-589 (WS handler), 874-882 (hit target rendering), 2237-2448 (wall drag), 1260-1290 (`recomputeEnvelope`)
-- `src/sketch/changes.ts` — `applyChanges()` (does not touch envelope)
-- `src/index.ts` — lines 862-868 (server-side change processing + broadcast)
-
 ### Quality: Sketch generation from CV data
 
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **envelope-based rendering** — `compileLayout()` computes a building envelope (union of room polygons expanded by exterior wall thickness) and stores it as `plan.envelope`. Both SVG renderers detect this field and use the envelope-minus-rooms model: structural mass as filled polygon, rooms as colored cutouts, interior walls as thin lines. Legacy sketches without `envelope` fall back to the old wall-based rendering (exterior wall polygons + junction circles).
+- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. Rendering uses wall-based approach: exterior walls as thick `<polygon>` quads, interior walls as thin `<line>` elements, junction circles at exterior wall intersections.
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
-### Exterior perimeter irregularity (2026-03-22 finding, PARTIALLY PROVEN)
+### Exterior perimeter irregularity (2026-03-22 finding)
 
-**Problem:** Generated sketches always have rectangular exterior perimeters, even when source floor plans have irregular shapes (L-shaped apartments, step-outs, indentations). Real floor plans often have non-rectangular exterior walls.
+**Problem:** Generated sketches always have rectangular exterior perimeters, even when source floor plans have irregular shapes (L-shaped apartments, step-outs, indentations).
 
-**Root cause is room placement approach, NOT the envelope code.** The `computeEnvelope()` function in `compile-layout.ts` correctly traces the actual room contours:
-1. Rasterizes all room polygons onto a 10cm boolean grid
-2. Morphological close bridges gaps < 50cm (`ENVELOPE_GAP_THRESHOLD`)
-3. Traces outer contour of filled grid → axis-aligned polygon
-4. Offsets outward by exterior wall thickness
-
-**Partially proven (2026-03-22):** Shore Drive sketch `2Gq_OIlsBj2W69-yW8w7l` shows some irregularity (balcony protrusion, stepped south wall). However, the full L-shape of the source is NOT accurately reproduced — specifically, Bedroom 2 should protrude significantly to the RIGHT at the bottom, and the kitchen protrudes a bit at the top. The sketch only captured the balcony bump, not the main building shape.
-
-**New approach (2026-03-23): CV-extracted building outline.** Instead of hoping room placement produces the right perimeter, the CV pipeline now extracts the **actual building outline** directly from the source image via contour detection on thick black walls. This gives Claude the exact target shape as a polygon before placing any rooms. See "Building Outline & Spatial Grid" section below.
-
-The envelope code required NO changes. The remaining challenge is getting Claude to place rooms accurately within the known outline.
+**Root cause is room placement approach.** The building perimeter shape is determined by how rooms are placed — exterior walls are generated from room polygon edges.
 
 **The fundamental insight — additive vs subtractive:**
-- **Wrong approach (subtractive):** Start with a rectangular bounding box, place rooms to fill it, "cut out" room shapes. This forces every floor plan into a rectangle.
-- **Correct approach (additive):** Place each room at its actual position and size based on the source image. Let gaps exist naturally. Let the envelope trace whatever shape results from the actual room positions. Rooms that protrude beyond the main footprint (balconies, bump-outs) create irregular perimeter features.
+- **Wrong approach (subtractive):** Start with a rectangular bounding box, place rooms to fill it. This forces every floor plan into a rectangle.
+- **Correct approach (additive):** Place each room at its actual position and size based on the source image. Let gaps exist naturally. Rooms that protrude beyond the main footprint (balconies, bump-outs) create irregular perimeter features.
 
 **Practical guidance for the agent:**
 1. Place rooms at their actual sizes from the source — do NOT stretch rooms to fill gaps
 2. Rooms that protrude (balconies, bay areas) should be placed at their real position even if they extend beyond the main building footprint
-3. The `ENVELOPE_GAP_THRESHOLD` (50cm) bridges small gaps between rooms (for wall thickness) but preserves large gaps as perimeter irregularities
-4. Preview after placing rooms to verify the envelope shape matches the source perimeter
-5. For rectangular floor plans (like Apt 6C), the result WILL be rectangular — that's correct when the source is rectangular
+3. Preview after placing rooms to verify the perimeter shape matches the source
+4. For rectangular floor plans, the result WILL be rectangular — that's correct when the source is rectangular
 
-**Key files:**
-- `src/sketch/compile-layout.ts` — `computeEnvelope()` (lines ~522-562), `ENVELOPE_GAP_THRESHOLD` imported from defaults
-- `src/sketch/geometry.ts` — `rasterizeToGrid()`, `traceContour()`, `offsetAxisAlignedPolygon()`
-- `src/sketch/defaults.ts` — `ENVELOPE_GAP_THRESHOLD = 50` (cm)
-
-### Building Outline & Spatial Grid (2026-03-23, NEW)
+### Building Outline & Spatial Grid (2026-03-23)
 
 **Problem:** Claude struggles to reproduce the correct building shape from floor plan images. Even with additive room placement, the agent often misinterprets which rooms protrude and by how much. The CV room detection merges many rooms into blobs, so the spatial layout is ambiguous.
 
@@ -1032,7 +974,7 @@ Testing the full Copy Mode workflow in Claude Desktop (analyze → generate → 
 **What doesn't work well:**
 - **Spatial grid** — "Not really helpful. Large ASCII matrix with lots of RO labels and dots that was hard to parse." The JSON room coordinates from CV were far more actionable. Grid added noise without being as precise as JSON or as intuitive as the image.
 - **CV room labeling** — Mislabeled most rooms (generic "Room" or wrong labels from footer text like "2 Bedroom 2 Bathroom"). Claude had to override almost everything using what it could read from the image itself.
-- **~~Envelope doesn't follow room edits~~** — PARTIALLY FIXED (2026-03-23). Envelope auto-recomputes during wall drag and after server-side surgical ops. But **exterior wall drag has a snap-back bug** — see "Exterior wall drag envelope snap-back" in Known Issues.
+- **Envelope system stripped (2026-03-23)** — The envelope rendering (unified structural mass polygon) was removed in favor of direct wall-based rendering. Exterior walls now render as thick `<polygon>` quads with junction circles at corners. All walls are directly selectable, draggable, and show dimensions. The envelope's editing limitations (read-only computed blob, snap-back bug on drag, invisible hit-target workarounds) made it unsuitable for an interactive editor.
 
 ---
 
@@ -1158,10 +1100,9 @@ Two new modules add label-based surgical editing on top of the existing 15 low-l
 - `resolvePosition(room, position, width, depth)` — named positions (center/north/sw/etc.) → absolute coords
 
 **`src/sketch/high-level-changes.ts`** — Compiler from label-based ops to low-level changes:
-- 15 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `rename_room`, `retype_room` (envelope is auto-derived — see Envelope Recomputation below)
+- 15 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `rename_room`, `retype_room`
 - Each compiles to an array of existing low-level `Change` types
 - `processChanges(plan, highLevelChanges, lowLevelChanges)` — sequential compilation + application
-- Envelope auto-recomputed after geometry-changing high-level ops (imports `computeEnvelope` from `compile-layout.ts`)
 - Canvas bounds recomputed after changes
 - Atomic error handling — if any label resolution fails, entire batch rolls back
 
@@ -1176,34 +1117,10 @@ inputSchema: {
 
 **Side-by-side preview:** `preview_sketch` returns source image alongside rendered sketch when `source_image_url` is in metadata. Source URL flows: `analyze_floor_plan_image` caller stores in `SketchSession.sourceImageUrl` → `generate_floor_plan` copies to `plan.metadata.source_image_url`.
 
-**Low-level `set_envelope` change type** — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`). Used internally; NOT exposed as a high-level operation.
-
-### Envelope Recomputation (2026-03-23, PARTIALLY WORKING)
-
-**Problem:** The building envelope (thick perimeter outline) was computed once during `generate_floor_plan` and never updated when rooms changed via surgical ops or wall drag.
-
-**Solution (implemented, but exterior wall drag has snap-back bug — see "Exterior wall drag envelope snap-back" in Known Issues):**
-
-**Server-side:**
-- `computeEnvelope()` exported from `compile-layout.ts` for reuse
-- `processChanges()` auto-recomputes envelope after geometry-changing operations (`resize_room`, `move_room`, `add_room`, `remove_room`, `split_room`, `merge_rooms`)
-- `set_envelope` removed from high-level changes (schema, compiler, tool description). Low-level `set_envelope` stays in `changes.ts` for internal use.
-
-**Client-side (`html.ts`):**
-- ~200 lines of vanilla ES5 JS ported from `geometry.ts` and `compile-layout.ts`: `pointInPolygon`, `rasterizeToGrid`, `dilateGrid`, `erodeGrid`, `traceContour`, `offsetAxisAlignedPolygon`, `recomputeEnvelope`
+**Room polygon propagation during drag:**
 - `propagateRoomPolygons(plan, refPoints)` — shared helper for room polygon propagation during drag. Uses `_origPolygon` snapshots (set at drag-start) with absolute deltas from original positions to avoid floating-point drift.
-- Real-time envelope recompute during wall drag with 16ms performance escape hatch (`envelopeDegraded` flag). If recompute exceeds 16ms, degrades to recompute-on-mouseup only.
-- Direct DOM update for envelope polygon and room cutout polygons during drag (no full `render()`)
-- Envelope recompute hooked into: `updateWallDrag`, `updateEndpointDrag` (real-time), `commitWallDrag`, `commitEndpointDrag` (catch-up + reset degraded flag), `performUndo`, `performRedo`, and `applyChangeLocal` (for server-pushed room changes)
-
-**Room polygon propagation refactored:**
-- Old approach: propagation happened only in commit functions (mouseup), computing deltas and applying to current polygons
-- New approach: `_origPolygon` snapshot stored on each room at drag-start. `propagateRoomPolygons()` called on every mousemove frame, always computing deltas from originals (drift-free). Commit functions only record undo/redo entries by comparing `_origPolygon` to current polygon — they do NOT re-propagate.
+- `_origPolygon` snapshot stored on each room at drag-start. `propagateRoomPolygons()` called on every mousemove frame, always computing deltas from originals (drift-free). Commit functions only record undo/redo entries by comparing `_origPolygon` to current polygon — they do NOT re-propagate.
 - Degenerate wall revert (wall < 5cm) restores `_origPolygon` and cleans up snapshots
-- Drift repair code removed from `commitEndpointDrag` (no longer needed — absolute deltas prevent drift)
-
-**Spec:** `docs/superpowers/specs/2026-03-23-client-envelope-recompute-design.md`
-**Plan:** `docs/superpowers/plans/2026-03-23-client-envelope-recompute.md` (7 tasks, all completed)
 
 ### Template Mode (Description → Floor Plan)
 
@@ -1509,11 +1426,11 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
 **Tools:** Select, Wall, Door, Window, Room, Furniture
-**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation during drag, real-time envelope recomputation, furniture rotation handles, exterior wall hit targets (invisible `<line>` overlays for click/drag in envelope mode)
+**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation during drag, furniture rotation handles
 **State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `wallDragState`, `undoStack`, `redoStack`, `interactionMode`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 
-**Client-side change handling:** The SPA implements all 13 change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map. After room geometry changes (`update_room`, `add_room`, `remove_room`), `recomputeEnvelope(plan)` is called to keep the building outline in sync.
+**Client-side change handling:** The SPA implements all change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
 
 **URL strategy:** All API calls use relative paths (`/api/sketches/...`, `/ws/...`) for proxy transparency. No hardcoded origins.
 
