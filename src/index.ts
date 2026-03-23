@@ -532,19 +532,30 @@ When CV and your visual understanding disagree:
 2. "high_level_changes" — Label-based surgical operations (recommended for Copy Mode iteration)
 
 HIGH-LEVEL OPERATIONS (use room labels, not IDs):
-- resize_room: {room, side, delta_cm} — expand/contract one side
-- move_room: {room, dx, dy} — shift a room
-- split_room: {room, axis, position_cm, labels} — divide into two rooms
-- merge_rooms: {rooms: [a, b], label} — combine two adjacent rooms
-- add_room: {label, room_type, rect or polygon} — add a new room
-- remove_room: {room} — remove room + its walls + furniture
-- add_door: {between: [a, b]} or {room, wall_side} — add a door
-- add_window: {room, wall_side} — add a window
-- place_furniture: {furniture_type, room, position} — place by name (center/north/sw/etc)
-- move_furniture: {furniture_type, room, position} — reposition existing furniture
-- remove_furniture: {furniture_type, room} or {furniture_id} — remove furniture
-- rename_room / retype_room — change labels or types
-- set_envelope: {polygon} — set building outline
+
+Room operations:
+- resize_room: {room, side: "north"|"south"|"east"|"west", delta_cm} — expand (+) or contract (-) one side
+- move_room: {room, dx, dy} — shift a room by dx/dy cm
+- add_room: {label, room_type, rect: {x,y,width,depth}} or {label, room_type, polygon: [{x,y},...]}
+- remove_room: {room} — removes room + its walls + furniture
+- split_room: {room, axis: "vertical"|"horizontal", position_cm, labels: ["A","B"], types?: [type,type]}
+- merge_rooms: {rooms: ["A","B"], label, room_type}
+- rename_room: {room, new_label}
+- retype_room: {room, new_type}
+
+Opening operations:
+- add_door: {between: ["Room A","Room B"]} for interior, or {room, wall_side} for exterior. Optional: position (0-1), width, swing ("left"|"right")
+- add_window: {room, wall_side}. Optional: position (0-1), width, window_type ("single"|"double"|"sliding"|"bay")
+- update_opening: {room, wall_side, opening_index?, width?, position?, swing?, window_type?}
+- remove_opening: {room, wall_side, opening_index?}
+
+Furniture operations:
+- place_furniture: {furniture_type, room, position?: "center"|"north"|"sw"|{x,y}}. Optional: width, depth, rotation
+- move_furniture: {furniture_type, room, position: "center"|"north"|{x,y}}
+- remove_furniture: {furniture_type, room} or {furniture_id}
+
+Envelope:
+- set_envelope: {polygon: [{x,y},...]} — set building outline
 
 ITERATION PHILOSOPHY: Fix ONE thing at a time. After each fix, preview to verify it worked and didn't break adjacent rooms. Never regenerate the entire layout to fix a single room.
 

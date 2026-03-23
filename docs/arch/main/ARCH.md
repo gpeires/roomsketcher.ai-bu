@@ -934,12 +934,13 @@ Ran 5+ iterations on Apt 6C and 1 iteration on Shore Drive. Key learnings for th
 - `preview_sketch` returns a rendered PNG that's sufficient for visual comparison
 - **Additive room placement produces correct irregular perimeters** — demonstrated on Shore Drive where balcony protrusion and stepped south wall rendered correctly without any code changes
 
-**What doesn't work yet (being addressed by surgical iteration design):**
-- CV misses rooms — Unit 2C has 9 rooms but CV only finds 5. The surgical iteration design addresses this: Claude is now authoritative for room count and adds CV-missed rooms from printed labels/dimensions.
-- The feedback loop is slow — each generate call creates a new sketch. Surgical iteration uses `update_sketch` with label-based operations for in-place fixes (not yet implemented, plan written).
+**What doesn't work yet (known limitations):**
+- CV misses rooms — Unit 2C has 9 rooms but CV only finds 5. Claude is authoritative for room count and adds CV-missed rooms from printed labels/dimensions.
 - Complex service areas (corridors, closets, baths clustered together) are hard to lay out correctly — the structured comparison protocol (room-by-room checklist) helps catch and fix these one at a time.
 - **Room adjacency for openings** — rooms must be within ~10cm (interior wall thickness) of each other for the system to detect a shared wall and place doors between them.
 - CV dimension orientation is ambiguous — Claude can resolve this visually by comparing against the source image.
+
+**Surgical iteration (IMPLEMENTED):** The `update_sketch` tool now accepts a `high_level_changes` array with 16 label-based operations (resize_room, move_room, add_door, place_furniture, etc.) that compile to low-level changes. This enables in-place surgical fixes instead of regenerating the entire sketch. Validated on 4 test images — all operations work end-to-end.
 
 **Best sketches:**
 - **Apt 6C:** `0H_S8-YHU2T5LwQXnWZYM` — 11 rooms, rooms at labeled dimensions (305×447, 549×366, 358×417cm), correct layout but still rectangular (Apt 6C IS rectangular). Previous best: `PE72Hg-AziIJhY3QzfNLM` (9 rooms, oversized rooms to fill gaps).
