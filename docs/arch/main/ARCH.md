@@ -309,14 +309,17 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Browser-side** (`src/sketcher/html.ts`): Used by the interactive sketcher SPA. Vanilla JS (embedded in template string). Includes selection highlighting, drag handles, tool modes.
 
-**Envelope rendering (as of 2026-03-22):**
+**Envelope rendering (as of 2026-03-23):**
 
 When `plan.envelope` exists, the renderer uses the **envelope-minus-rooms** model:
 1. **Structure layer** (`<g id="structure">`): Envelope polygon filled `#333` (structural mass), then room polygons filled with room colors on top (cutouts via painters model)
-2. **Walls layer** (`<g id="walls">`): Only interior/divider walls rendered as thin `<line>` elements — exterior walls are implicit in the envelope shape
+2. **Walls layer** (`<g id="walls">`): Interior/divider walls as thin `<line>` elements. **Exterior walls** render as invisible hit-target `<line>` elements (`stroke="transparent"`, `stroke-width` = wall thickness + 8, `pointer-events="stroke"`) so users can click/drag them — the visual representation is the envelope polygon, but hit targets make exterior walls interactive.
 3. **Openings layer**: Openings on both interior and exterior walls cut gaps
 4. **Room labels layer** (`<g id="room-labels">`): Labels rendered separately (not embedded in room polygons)
 5. No junction circles needed — envelope provides continuous structural mass
+
+**Exterior wall hit targets (2026-03-23, PARTIALLY WORKING — see Known Issues):**
+Exterior walls in envelope mode are data-only (`plan.walls[]` with `type='exterior'`). To make them interactive, invisible `<line>` elements overlay each exterior wall's centerline. CSS `:hover` on `[data-type="wall"]` highlights them teal. Clicking selects them and shows drag handles. The existing wall drag infrastructure (`beginWallDrag`/`updateWallDrag`/`commitWallDrag`) works for these since it looks up walls by ID in `plan.walls`. **BUG: Envelope snaps back on mouse release** — during drag the envelope follows (via real-time `recomputeEnvelope`), but on commit the server echoes `state_update` with stale envelope, overwriting the client's correct state. See "Exterior wall drag envelope snap-back" in Known Issues.
 
 The envelope is computed by `computeEnvelope()` in `compile-layout.ts`:
 - Rasterize all room polygons onto a 10cm boolean grid
@@ -732,7 +735,7 @@ pipelineToSketchInput(output: PipelineOutput) → SimpleFloorPlanInput  // legac
 
 ---
 
-## Known Issues & Status (as of 2026-03-22)
+## Known Issues & Status (as of 2026-03-23)
 
 ### Resolved: CV finds 0 rooms on real-world floor plans
 
@@ -799,6 +802,30 @@ Multi-strategy merge improved room counts but quality issues remain:
 | Shore Dr (9511) | 12 | measured (0.62) | Bedroom, wic, "2 Bedroom 2 Bathroom"; 9 generic | bedroom, closet | Footer text leaking; Room 13 (0.3) filtered |
 | Apt 6C (520 W 23rd) | 5 | measured (2.63) | FOYER, BEDROOM×2, CL, LIVING/DINING | hallway, bedroom×2, closet, living | BATH (0.3) filtered; all rooms now labeled |
 | Res 507 (547 W 47th) | 8 | fallback (0.85) | Bed, Bedroom×2, Foyer, & Dining; 3 generic | bedroom×3, hallway, dining | Scale still fallback; "& Dining" partial label |
+
+### Exterior wall drag envelope snap-back (2026-03-23, OPEN BUG)
+
+**Problem:** When a user drags an exterior wall in envelope mode, the envelope visually follows in real-time during drag (via `recomputeEnvelope` in `updateWallDrag`). But on mouse release, the envelope **snaps back** to its pre-drag position.
+
+**Root cause (partially diagnosed, NOT fully fixed):** The `commitWallDrag` function sends individual `move_wall` and `update_room` changes via WebSocket. Each triggers a `state_update` broadcast from the server containing the full plan. The server's `applyChanges()` updates wall positions and room polygons but does NOT recompute the envelope. When the client receives `state_update`, it does `plan = msg.plan` which overwrites the locally-recomputed envelope with the server's stale one.
+
+**Attempted fix:** Added `recomputeEnvelope(plan)` call in the `ws.onmessage` handler after `plan = msg.plan` assignment (line ~586 of `html.ts`). Also added `Cache-Control: no-cache` header to the sketcher HTML response to prevent stale code. **This fix was deployed but did NOT resolve the issue** — the envelope still snaps back. Possible explanations:
+1. The intermediate `state_update` messages (with stale room polygons from partial change application) may be overwriting the final correct state
+2. The `recomputeEnvelope` call in the WS handler may be computing from stale room polygons (if `update_room` changes haven't been applied yet on the server)
+3. There may be a deeper issue with how `commitWallDrag` and the WS echo interact — race condition between local state and server echoes
+
+**What works:** Interior wall dragging works correctly — walls move, rooms follow, envelope recomputes. The difference is that interior walls are rendered as visible `<line>` elements and their position updates persist visually even when the server echo arrives.
+
+**What needs investigation:**
+1. Add `console.log` debugging to the `ws.onmessage` handler to trace: (a) how many `state_update` messages arrive after a single drag commit, (b) what the room polygons look like in each, (c) what `recomputeEnvelope` produces
+2. Consider suppressing server echo for self-originated changes (add a client-originated flag or sequence number)
+3. Consider batching all changes into a single WS message instead of sending individually
+4. **Deeper question:** Should the envelope even be separate from the room/wall data? The whole envelope system (dual rendering paths, client-side recompute, server/client sync) adds significant complexity. Consider whether the legacy wall-based rendering (exterior walls as thick polygons, junction circles at corners) could be made to look equally good while being simpler and fully interactive by default.
+
+**Key files:**
+- `src/sketcher/html.ts` — lines 582-589 (WS handler), 874-882 (hit target rendering), 2237-2448 (wall drag), 1260-1290 (`recomputeEnvelope`)
+- `src/sketch/changes.ts` — `applyChanges()` (does not touch envelope)
+- `src/index.ts` — lines 862-868 (server-side change processing + broadcast)
 
 ### Quality: Sketch generation from CV data
 
@@ -1005,7 +1032,7 @@ Testing the full Copy Mode workflow in Claude Desktop (analyze → generate → 
 **What doesn't work well:**
 - **Spatial grid** — "Not really helpful. Large ASCII matrix with lots of RO labels and dots that was hard to parse." The JSON room coordinates from CV were far more actionable. Grid added noise without being as precise as JSON or as intuitive as the image.
 - **CV room labeling** — Mislabeled most rooms (generic "Room" or wrong labels from footer text like "2 Bedroom 2 Bathroom"). Claude had to override almost everything using what it could read from the image itself.
-- **~~Envelope doesn't follow room edits~~** — FIXED (2026-03-23). Envelope now auto-recomputes in real-time during wall drag, on commit, undo/redo, and after server-side surgical ops. `set_envelope` removed as high-level op.
+- **~~Envelope doesn't follow room edits~~** — PARTIALLY FIXED (2026-03-23). Envelope auto-recomputes during wall drag and after server-side surgical ops. But **exterior wall drag has a snap-back bug** — see "Exterior wall drag envelope snap-back" in Known Issues.
 
 ---
 
@@ -1151,11 +1178,11 @@ inputSchema: {
 
 **Low-level `set_envelope` change type** — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`). Used internally; NOT exposed as a high-level operation.
 
-### Envelope Recomputation (2026-03-23, IMPLEMENTED)
+### Envelope Recomputation (2026-03-23, PARTIALLY WORKING)
 
 **Problem:** The building envelope (thick perimeter outline) was computed once during `generate_floor_plan` and never updated when rooms changed via surgical ops or wall drag.
 
-**Solution (fully implemented and deployed):**
+**Solution (implemented, but exterior wall drag has snap-back bug — see "Exterior wall drag envelope snap-back" in Known Issues):**
 
 **Server-side:**
 - `computeEnvelope()` exported from `compile-layout.ts` for reuse
@@ -1482,7 +1509,7 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
 **Tools:** Select, Wall, Door, Window, Room, Furniture
-**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation during drag, real-time envelope recomputation, furniture rotation handles
+**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation during drag, real-time envelope recomputation, furniture rotation handles, exterior wall hit targets (invisible `<line>` overlays for click/drag in envelope mode)
 **State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `wallDragState`, `undoStack`, `redoStack`, `interactionMode`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 

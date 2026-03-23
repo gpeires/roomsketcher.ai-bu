@@ -583,6 +583,8 @@ export function sketcherHtml(sketchId: string): string {
         var msg = JSON.parse(e.data);
         if (msg.type === 'state_update') {
           plan = msg.plan;
+          // Server doesn't recompute envelope — do it client-side
+          recomputeEnvelope(plan);
           // Only auto-fit on first load; subsequent updates preserve user's viewport
           if (wsInitialLoad) { userViewBox = false; wsInitialLoad = false; }
           render();
@@ -877,8 +879,11 @@ export function sketcherHtml(sketchId: string): string {
           if (pts) {
             html += '<polygon points="' + pts + '" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
           }
+        } else {
+          // Envelope mode: invisible hit-target line over exterior wall centerline
+          var hitW = (w.thickness || 20) + 8; // slightly wider than visual thickness for easy grabbing
+          html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="transparent" stroke-width="' + hitW + '" pointer-events="stroke" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
         }
-        // In envelope mode, exterior walls are data-only (not rendered as thick polygons)
       } else {
         // Interior walls as thin lines
         html += '<line x1="' + w.start.x + '" y1="' + w.start.y + '" x2="' + w.end.x + '" y2="' + w.end.y + '" stroke="#333" stroke-width="2" stroke-linecap="round" data-id="' + w.id + '" data-type="wall"' + sel + '/>';
