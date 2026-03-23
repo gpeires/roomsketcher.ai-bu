@@ -295,6 +295,7 @@ FloorPlan
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
+| `set_envelope` | polygon (Point[]) — **NEW 2026-03-23, not yet implemented** |
 
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
 
@@ -931,12 +932,12 @@ Ran 5+ iterations on Apt 6C and 1 iteration on Shore Drive. Key learnings for th
 - `preview_sketch` returns a rendered PNG that's sufficient for visual comparison
 - **Additive room placement produces correct irregular perimeters** — demonstrated on Shore Drive where balcony protrusion and stepped south wall rendered correctly without any code changes
 
-**What doesn't work yet:**
-- CV misses rooms — Apt 6C has 9+ rooms but CV only finds 5. Missing: Kitchen, both Baths, most closets. The agent must add these manually from the source image.
-- CV dimension orientation is ambiguous — "12'-0" x 18'-0"" could be width × depth or depth × width. The agent needs to visually check which interpretation matches the source.
-- Complex service areas (corridors, closets, baths clustered together) are hard to lay out correctly — small errors in room placement cascade into gaps or overlaps.
-- The feedback loop is slow — each generate call creates a new sketch. Update-in-place via `update_sketch` would be more efficient for iterative refinement.
-- **Room adjacency for openings** — rooms must be within ~10cm (interior wall thickness) of each other for the system to detect a shared wall and place doors between them. Rooms separated by >10cm cannot have `between` doors. Plan room positions carefully to ensure adjacencies.
+**What doesn't work yet (being addressed by surgical iteration design):**
+- CV misses rooms — Unit 2C has 9 rooms but CV only finds 5. The surgical iteration design addresses this: Claude is now authoritative for room count and adds CV-missed rooms from printed labels/dimensions.
+- The feedback loop is slow — each generate call creates a new sketch. Surgical iteration uses `update_sketch` with label-based operations for in-place fixes (not yet implemented, plan written).
+- Complex service areas (corridors, closets, baths clustered together) are hard to lay out correctly — the structured comparison protocol (room-by-room checklist) helps catch and fix these one at a time.
+- **Room adjacency for openings** — rooms must be within ~10cm (interior wall thickness) of each other for the system to detect a shared wall and place doors between them.
+- CV dimension orientation is ambiguous — Claude can resolve this visually by comparing against the source image.
 
 **Best sketches:**
 - **Apt 6C:** `0H_S8-YHU2T5LwQXnWZYM` — 11 rooms, rooms at labeled dimensions (305×447, 549×366, 358×417cm), correct layout but still rectangular (Apt 6C IS rectangular). Previous best: `PE72Hg-AziIJhY3QzfNLM` (9 rooms, oversized rooms to fill gaps).
@@ -1044,43 +1045,93 @@ MCP cannot pass images from chat to tools. The agent's behavior depends on how t
 
 **Why CV is mandatory:** The agent cannot accurately estimate room dimensions, wall coordinates, or spatial relationships by looking at an image. The CV pipeline uses edge detection, OCR, and geometric analysis to extract exact measurements in centimeters. Tool descriptions reinforce this: `analyze_floor_plan_image` says "NEVER skip this tool", `generate_floor_plan` says "MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan".
 
-### Copy Mode (Reference Image → Floor Plan)
+### Copy Mode (Reference Image → Floor Plan) — Vision-First with CV Advisory
 
-Two-phase approach: get visible fast, then refine with visual feedback.
+**Design principle (2026-03-23):** Claude drives room layout from its own visual understanding of the source image. CV data is advisory — expert input that Claude evaluates and may override when it can see something different. This replaced the earlier "CV is source of truth" approach because CV detects only 5 of 9 rooms on Unit 2C, while Claude reads all 9 labels and dimensions directly from the image.
+
+**CV is authoritative for:** scale calibration (cm/px), wall thickness, building outline polygon
+**Claude is authoritative for:** room count, room labels, printed dimensions, spatial relationships, openings, furniture
+
+**Design spec:** `docs/superpowers/specs/2026-03-23-surgical-iteration-design.md`
+**Implementation plan:** `docs/superpowers/plans/2026-03-23-surgical-iteration.md`
 
 ```
-PHASE 1 — GET THE LAYOUT VISIBLE FAST:
+PHASE 1 — ANALYZE AND BUILD SKELETON:
 
   Step 1: ANALYZE
-    analyze_floor_plan_image(image_url) → CV service extracts:
-      - rooms (rect or polygon format, coords in cm)
-      - openings (doors between rooms, windows on exterior walls)
-      - meta (scale, scale_confidence, wall_thickness, counts)
-    Auto-converted to SimpleFloorPlanInput via cvToSketchInput()
-    Agent sees: source image (inline) + converted sketch input
-    Fix obvious label errors, merge open-plan rooms. Don't perfectionist.
+    analyze_floor_plan_image(image_url) → CV + source image
+    Read the CV output AND look at the source image yourself.
+    Count every room you can see. Note rooms CV missed.
+    Trust CV for: scale, wall thickness, outline.
+    Trust your eyes for: room count, labels, printed dimensions.
 
-  Step 2: GENERATE ROOMS ONLY
-    generate_floor_plan with rooms + basic exterior openings, NO furniture.
-    Get the skeleton built.
+  Step 1b: EVALUATE OUTLINE
+    Check outline vertex count vs building shape.
+    Rectangle=4, L-shape=6, T-shape=8. Re-call with higher outline_epsilon if over-detailed.
 
-  Step 3: PREVIEW IMMEDIATELY
-    preview_sketch — agent is BLIND until it sees the rendered output.
-    Compare against source image. Check room sizes, wall positions, overlaps.
+  Step 2: BUILD ALL ROOMS
+    generate_floor_plan with ALL rooms — CV-detected + manually identified.
+    Convert imperial dims (1' = 30.48cm). Add basic openings. No furniture yet.
 
-PHASE 2 — REFINE BASED ON WHAT YOU SEE:
+  Step 3: PREVIEW AND COMPARE (side-by-side)
+    preview_sketch returns sketch + source image together.
+    Follow the COMPARISON PROTOCOL: count rooms, room-by-room check
+    (size, position, shape), openings, overall outline shape.
+    List specific discrepancies.
 
-  Step 4: FIX LAYOUT
-    update_sketch to fix room geometry. Preview again after fixes.
+PHASE 2 — SURGICAL ITERATION:
+
+  Step 4: FIX ONE THING AT A TIME
+    Use high-level surgical operations (resize_room, move_room, split_room, etc.)
+    via update_sketch high_level_changes array.
+    Apply ONE fix → preview → verify → repeat.
+    Never regenerate the entire layout to fix one room.
 
   Step 5: ADD OPENINGS
-    update_sketch to add doors/windows. Preview to verify placement.
+    add_door (between: [room1, room2] for interior, room + wall_side for exterior)
+    add_window (room + wall_side)
+    Preview to verify placement.
 
   Step 6: ADD FURNITURE
-    update_sketch to add furniture visible in reference image. Preview to verify.
+    place_furniture with room-relative named positions (center, north, sw, etc.)
+    Preview to verify.
 ```
 
-**Architecture note:** Copy Mode bypasses the AI specialist layer (4× Llama 3.2 11B Vision models removed). `handleAnalyzeImage` calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction. See `project_system_audit_mar22.md` for full rationale.
+**Architecture note:** Copy Mode bypasses the AI specialist layer (4× Llama 3.2 11B Vision models removed). `handleAnalyzeImage` calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction.
+
+### Surgical Iteration System (2026-03-23, PLANNED — not yet implemented)
+
+**Status:** Design spec complete, implementation plan written, code not yet written.
+
+Two new modules add label-based surgical editing on top of the existing 14+1 low-level change types:
+
+**`src/sketch/resolve.ts`** — Label→ID resolution layer:
+- `findRoomByLabel(plan, label)` — case-insensitive match, throws descriptive error listing available rooms
+- `findRoomWalls(plan, room)` — geometric wall-to-room association via bounding box edge matching (SNAP_TOLERANCE=20cm)
+- `findRoomWallOnSide(plan, room, side)` — find wall on N/S/E/W side
+- `findSharedWall(plan, roomA, roomB)` — find shared wall between two rooms
+- `findFurnitureInRoom(plan, room, type?)` — point-in-polygon check
+- `resolvePosition(room, position, width, depth)` — named positions (center/north/sw/etc.) → absolute coords
+
+**`src/sketch/high-level-changes.ts`** — Compiler from label-based ops to low-level changes:
+- 16 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `set_envelope`, `rename_room`, `retype_room`
+- Each compiles to an array of existing low-level `Change` types
+- `processChanges(plan, highLevelChanges, lowLevelChanges)` — sequential compilation + application
+- Canvas bounds recomputed after changes
+- Atomic error handling — if any label resolution fails, entire batch rolls back
+
+**`update_sketch` tool** uses separate arrays to avoid Zod discriminant collisions:
+```
+inputSchema: {
+  sketch_id: string,
+  changes?: Change[],              // existing low-level (by ID)
+  high_level_changes?: HighLevelChange[],  // new label-based (by room name)
+}
+```
+
+**Side-by-side preview:** `preview_sketch` returns source image alongside rendered sketch when `source_image_url` is in metadata. Source URL flows: `analyze_floor_plan_image` caller stores in `SketchSession.sourceImageUrl` → `generate_floor_plan` copies to `plan.metadata.source_image_url`.
+
+**New low-level change type:** `set_envelope` — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`).
 
 ### Template Mode (Description → Floor Plan)
 
@@ -1116,12 +1167,15 @@ get_sketch → read current state
 
 `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block.
 
+**Side-by-side comparison (planned 2026-03-23, not yet implemented):** When a sketch has `metadata.source_image_url` (set during Copy Mode), `preview_sketch` will return both the rendered sketch AND the source floor plan image together, enabling direct visual comparison in a single tool call. This replaces the current approach of comparing from memory across separate tool calls.
+
+**Structured comparison protocol (planned):** The `preview_sketch` tool description will embed a room-by-room checklist: count rooms, check each room's size/position/shape, verify openings, compare overall outline. This replaces the vague "looks good" comparison pattern.
+
 Tool descriptions enforce the loop:
-- `generate_floor_plan` says "CRITICAL: Do NOT skip preview_sketch after generating. You have no idea if your output is correct until you see the rasterized result."
-- `preview_sketch` describes itself as "your eyes" with a 5-point checklist (wall overlaps, furniture placement, missing openings, room sizing, label readability)
+- `generate_floor_plan` says "CRITICAL: Do NOT skip preview_sketch after generating."
+- `preview_sketch` describes itself as "your eyes" with a comparison protocol (Copy Mode) or 5-point checklist (Design Mode)
+- `update_sketch` enforces surgical iteration — fix one thing at a time, preview after each fix
 - The two-phase workflow means the agent previews BEFORE investing in openings and furniture, catching layout errors early
-- `update_sketch` requires preview after structural changes but allows skipping for cosmetic edits
-- **Iteration budget:** If the user provided a reference image or detailed measurements, 1 preview check suffices. For vague descriptions, expect 1–2 fix rounds. Max 3 iterations total to keep wait time under ~30 seconds.
 
 ---
 
