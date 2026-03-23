@@ -18,7 +18,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 │                                                                 │
 │  ┌──────────────┐   ┌──────────────┐   ┌─────────────────────┐  │
 │  │  MCP Tools   │   │  REST API    │   │  Browser Sketcher   │  │
-│  │  (18 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
+│  │  (19 tools)  │   │  /api/...    │   │  SPA /sketcher/:id  │  │
 │  └──────┬───────┘   └──────┬───────┘   └────────┬────────────┘  │
 │         │                  │                     │               │
 │  ┌──────▼──────────────────▼─────────────────────▼───────────┐  │
@@ -26,7 +26,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 │  │                                                           │  │
 │  │  RoomSketcherHelpMCP (McpAgent)                           │  │
 │  │   ├─ MCP protocol (/mcp)                                 │  │
-│  │   ├─ 18 registered tools (6 help + 10 sketch + 2 knowledge)│
+│  │   ├─ 19 registered tools (6 help + 11 sketch + 2 knowledge)│
 │  │   └─ Routes sketch ops to SketchSync DO                  │  │
 │  │                                                           │  │
 │  │  SketchSync (Agent)                                       │  │
@@ -367,7 +367,7 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 
 ---
 
-## MCP Tools (18)
+## MCP Tools (19)
 
 ### Help Tools (6)
 
@@ -380,12 +380,13 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 | `get_article` | Full article by ID |
 | `get_article_by_url` | Full article by Zendesk URL |
 
-### Sketch Tools (10)
+### Sketch Tools (11)
 
 | Tool | Purpose |
 |------|---------|
-| `generate_floor_plan` | Validate + store + render a FloorPlan JSON (description enforces: don't use if sketch exists) |
+| `generate_floor_plan` | Validate + store + render a FloorPlan JSON (server-side gate rejects 3+ rooms without prior CV analysis) |
 | `analyze_floor_plan_image` | Send image to CV service, return source image + extracted room JSON as MCP content blocks |
+| `upload_image` | Returns upload page URL for the user — agent calls this when user pastes image in chat without a URL |
 | `get_sketch` | Retrieve plan summary (walls, rooms, areas) |
 | `open_sketcher` | Return browser sketcher URL |
 | `update_sketch` | Apply low-level changes (by ID) and/or high-level changes (by label) + broadcast to browsers |
@@ -914,14 +915,14 @@ An ASCII map showing where each room sits, built from room masks + OCR labels. A
 
 The `analyze_floor_plan_image` MCP tool (`src/sketch/tools.ts: handleAnalyzeImage()`) formats both outputs for Claude:
 - **Outline** → JSON polygon with explanation ("Use this as the target shape — place rooms INSIDE this outline")
-- **Grid** → ASCII art with legend showing abbreviation→room name mappings and dimension annotations
+- **Grid** → ASCII art with legend (OFF by default — `include_grid: true` enables it). Testing showed agents find JSON coordinates more actionable than the ASCII matrix. The grid adds noise without being as precise as JSON or as intuitive as the source image.
 
 **Key files:**
 - `cv-service/cv/outline.py` — `_regularize_orthogonal()`, `_remove_collinear()`, `_contour_to_outline()`, `extract_outline()`, `build_spatial_grid()`, `_make_room_abbreviation()`, `_is_junk_label()`
 - `cv-service/cv/pipeline.py` — threads `outline_epsilon` through `analyze_image()` → `_run_pipeline()` → `extract_outline()`
 - `cv-service/app.py` — `AnalyzeRequest` has optional `outline_epsilon` field; `AnalyzeResponse` Pydantic model includes `outline` and `spatial_grid` fields
-- `src/sketch/tools.ts` — `handleAnalyzeImage()` passes `outline_epsilon` to CV service, formats outline+grid in MCP response
-- `src/index.ts` — `analyze_floor_plan_image` tool schema includes `outline_epsilon` param with feedback loop guidance in description
+- `src/sketch/tools.ts` — `handleAnalyzeImage()` passes `outline_epsilon` to CV service, formats outline+grid in MCP response. Grid included only when `include_grid` param is true.
+- `src/index.ts` — `analyze_floor_plan_image` tool schema includes `outline_epsilon` and `include_grid` params. `upload_image` tool returns upload page URL for pasted-image workflow. `generate_floor_plan` has server-side gate rejecting 3+ rooms without prior `cvAnalyzed` session flag.
 
 ### Generate→Preview→Compare loop experience (2026-03-22, updated)
 
@@ -1043,7 +1044,7 @@ Single-file HTML page at `/upload` with:
 - Upload page prepends `WORKER_URL` (from `env.WORKER_URL`, fallback `url.origin`) for display
 - This ensures the user always copies the canonical URL (e.g., `https://roomsketcher.kworq.com/api/images/...`), matching what MCP tools use
 
-**MCP image-in-chat limitation:** When users paste images directly into Claude chat, the agent can see them via vision but cannot pass the bytes to MCP tools (MCP protocol limitation). Tool descriptions for `analyze_floor_plan_image` and `generate_floor_plan` explicitly instruct the agent to direct users to `/upload` in this case.
+**MCP image-in-chat limitation:** When users paste images directly into Claude chat, the agent can see them via vision but cannot pass the bytes to MCP tools (MCP protocol limitation — base64 transfer through the MCP transport is unreliable for large images). The `upload_image` MCP tool exists specifically for this case: the agent calls it, gets the upload page URL, and directs the user there. The `generate_floor_plan` tool has a server-side gate that rejects Copy Mode calls (3+ rooms) if CV analysis hasn't been run, preventing agents from rationalizing past the upload step.
 
 ### Image Storage
 
@@ -1055,12 +1056,17 @@ Images stored as base64 text in D1 `uploaded_images` table. Served via `GET /api
 
 ### Image Handling (MCP Protocol Limitation)
 
-MCP cannot pass images from chat to tools. The agent's behavior depends on how the user provides the image:
+MCP cannot pass images from chat to tools. Base64 transfer through the MCP transport is unreliable for large images (Claude Desktop compresses and truncates). The agent's behavior depends on how the user provides the image:
 
 1. **User provides a URL** → Agent calls `analyze_floor_plan_image` immediately with that URL. No questions asked.
-2. **User pastes/attaches an image in chat** → Agent can SEE the image but MUST NOT eyeball the layout. Must direct user to upload at `{WORKER_URL}/upload`, then use the returned URL.
+2. **User pastes/attaches an image in chat** → Agent calls `upload_image` tool → gets the upload page URL → directs user to upload → waits for user to paste back the URL → calls `analyze_floor_plan_image`.
 
-**Why CV is mandatory:** The agent cannot accurately estimate room dimensions, wall coordinates, or spatial relationships by looking at an image. The CV pipeline uses edge detection, OCR, and geometric analysis to extract exact measurements in centimeters. Tool descriptions reinforce this: `analyze_floor_plan_image` says "NEVER skip this tool", `generate_floor_plan` says "MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan".
+**Three layers of enforcement prevent agents from bypassing CV analysis:**
+1. **Prompting** — Tool descriptions say "COPY MODE REQUIRES CV ANALYSIS. No exceptions, no workarounds."
+2. **`upload_image` tool** — Gives the agent a clear action to take (call a tool) instead of a vague instruction, reducing rationalization
+3. **Server-side gate** — `generate_floor_plan` checks `SketchSession.cvAnalyzed` flag. If false and plan has 3+ rooms, the tool returns an error with upload instructions. Design Mode can bypass by adding `"source: design"` to the plan name.
+
+**Why this enforcement exists:** In testing, agents repeatedly rationalized past the upload instruction by reading printed dimensions from pasted images ("I can see the dimensions clearly, let me just build it manually"). Each layer addresses a different failure mode: prompting for willing agents, the tool for agents that need a clear action, the server gate for agents that ignore everything else.
 
 ### Copy Mode (Reference Image → Floor Plan) — Vision-First with CV Advisory
 
@@ -1075,43 +1081,37 @@ MCP cannot pass images from chat to tools. The agent's behavior depends on how t
 ```
 PHASE 1 — ANALYZE AND BUILD SKELETON:
 
+  Step 0 (if no URL): call upload_image → direct user to upload page → WAIT for URL
+
   Step 1: ANALYZE
     analyze_floor_plan_image(image_url) → CV + source image
-    Read the CV output AND look at the source image yourself.
-    Count every room you can see. Note rooms CV missed.
+    Quickly note rooms, scale, outline. Do NOT write a lengthy analysis.
     Trust CV for: scale, wall thickness, outline.
     Trust your eyes for: room count, labels, printed dimensions.
 
-  Step 1b: EVALUATE OUTLINE
-    Check outline vertex count vs building shape.
-    Rectangle=4, L-shape=6, T-shape=8. Re-call with higher outline_epsilon if over-detailed.
+  Step 1b (ONLY IF NEEDED): EVALUATE OUTLINE
+    If outline has way too many vertices for building shape, re-call with higher epsilon.
 
   Step 2: BUILD ALL ROOMS
-    generate_floor_plan with ALL rooms — CV-detected + manually identified.
-    Convert imperial dims (1' = 30.48cm). Add basic openings. No furniture yet.
+    generate_floor_plan with ALL rooms. Rooms only — be fast, not perfect.
 
-  Step 3: PREVIEW AND COMPARE (side-by-side)
-    preview_sketch returns sketch + source image together.
-    Follow the COMPARISON PROTOCOL: count rooms, room-by-room check
-    (size, position, shape), openings, overall outline shape.
-    List specific discrepancies.
+  Step 3: PREVIEW IMMEDIATELY
+    preview_sketch RIGHT AFTER generating. This is the most valuable tool.
+    You are BLIND until you preview. Get visual feedback ASAP.
+    Do NOT batch multiple fixes without previewing between them.
 
 PHASE 2 — SURGICAL ITERATION:
 
-  Step 4: FIX ONE THING AT A TIME
-    Use high-level surgical operations (resize_room, move_room, split_room, etc.)
-    via update_sketch high_level_changes array.
-    Apply ONE fix → preview → verify → repeat.
+  Step 4: FIX VISUALLY
+    Look at side-by-side preview. Fix single biggest discrepancy.
+    update_sketch with high_level_changes. Preview again. Repeat.
     Never regenerate the entire layout to fix one room.
 
   Step 5: ADD OPENINGS
-    add_door (between: [room1, room2] for interior, room + wall_side for exterior)
-    add_window (room + wall_side)
-    Preview to verify placement.
+    add_door / add_window via high_level_changes. Preview to verify.
 
   Step 6: ADD FURNITURE
-    place_furniture with room-relative named positions (center, north, sw, etc.)
-    Preview to verify.
+    place_furniture with room-relative named positions. Preview to verify.
 ```
 
 **Architecture note:** Copy Mode bypasses the AI specialist layer (4× Llama 3.2 11B Vision models removed). `handleAnalyzeImage` calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction.
