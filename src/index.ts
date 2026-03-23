@@ -344,23 +344,24 @@ Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. 
 
 MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. The CV pipeline extracts precise room coordinates, dimensions, and labels that you cannot accurately estimate by looking at the image. Do NOT skip this step and eyeball the layout — your dimension estimates will be wrong. If the user pasted an image without a URL, direct them to upload it at ${this.getWorkerUrl()}/upload first.
 
-PHASE 1 — GET THE LAYOUT VISIBLE FAST:
-
-Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Use the CV output as your source of truth for room positions and sizes. Fix obvious label errors and merge open-plan rooms.
+Step 1: ANALYZE + LOOK — Call analyze_floor_plan_image with the image URL. Read the CV output but ALSO look at the source image yourself. Count every room you can see. The CV often misses rooms — trust your eyes for room count and labels, trust CV for scale (cm/px ratio) and wall thickness.
 
 Step 1b: EVALUATE OUTLINE — Compare the building outline vertices to the source image. If the vertex count is too high for the building shape (rectangle should be 4, L-shape should be 6), re-call analyze_floor_plan_image with a higher outline_epsilon (0.03 or 0.04) to get a cleaner outline. This is your feedback loop — you are the intelligence that evaluates and refines.
 
-Step 2: GENERATE ROOMS ONLY — Call generate_floor_plan with rooms from the CV output. Add basic exterior doors/windows you can see in the image but do NOT add furniture yet. Get the skeleton built.
+Step 2: BUILD ALL ROOMS — Call generate_floor_plan with ALL rooms you can identify. Start with CV-detected rooms, ADD rooms the CV missed. Do NOT add furniture yet. Get the skeleton built.
 
-Step 3: PREVIEW IMMEDIATELY — Call preview_sketch right after generating. You are BLIND until you see the rendered output. Look at the preview and compare it to the source image. Check: are rooms the right size and position? Are walls where they should be? Is anything overlapping or missing?
+Step 3: PREVIEW AND COMPARE — Call preview_sketch. It returns your sketch AND the source image side-by-side. Follow the COMPARISON PROTOCOL (see preview_sketch description). Count rooms in source vs sketch. Check each room's size, position, and shape.
 
-PHASE 2 — REFINE BASED ON WHAT YOU SEE:
+Step 4: FIX ONE THING AT A TIME — Use update_sketch with high_level_changes for surgical fixes. Each iteration: identify the single biggest discrepancy → minimal fix → preview → repeat.
+  "Kitchen is 30cm too narrow" → {type: "resize_room", room: "Kitchen", side: "east", delta_cm: 30}
+  "Missing a closet" → {type: "add_room", label: "Closet", room_type: "closet", rect: {...}}
+  Do NOT regenerate the entire layout to fix a single room.
 
-Step 4: FIX LAYOUT — If rooms are wrong (wrong size, overlapping, missing), fix with update_sketch. Preview again after fixes.
+Step 5: ADD OPENINGS — Add doors and windows using high_level_changes. {type: "add_door", between: ["Kitchen", "Living Room"]} for interior, {type: "add_door", room: "Kitchen", wall_side: "south"} for exterior. Preview to verify.
 
-Step 5: ADD OPENINGS — Now add doors and windows using update_sketch. Use {type, between: [room1, room2]} for interior doors, {type, room, wall: "north"|"south"|"east"|"west"} for exterior. Preview to verify placement.
+Step 6: ADD FURNITURE — Place furniture visible in the reference image using {type: "place_furniture", furniture_type: "bed-double", room: "Bedroom", position: "center"}. Preview to verify.
 
-Step 6: ADD FURNITURE — Add furniture visible in the reference image. Positions are RELATIVE to room top-left: {type, room: "Bedroom", x: 20, y: 30, width, depth}. Preview to verify.
+PRESERVE ARCHITECTURAL DETAILS: Real apartments have walls that jut out, structural setbacks, non-rectangular foyers. A slightly irregular polygon that matches the source is BETTER than a clean rectangle that doesn't. Use polygon input when rooms aren't rectangular.
 
 WORKED EXAMPLE — 2 rooms side by side:
 Input: {name: "Test", rooms: [{label: "Kitchen", x: 0, y: 0, width: 300, depth: 250}, {label: "Living", x: 300, y: 0, width: 400, depth: 300}], openings: [{type: "door", between: ["Kitchen", "Living"]}, {type: "window", room: "Kitchen", wall: "north"}]}
@@ -493,7 +494,17 @@ TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
 Do NOT attempt to pass images as base64 — always use the upload page to get a URL.
 
-OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.`,
+OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.
+
+CV DATA IS ADVISORY: The CV pipeline provides measured geometry extracted by computer vision. Use it as expert input, but YOU are the authority on what rooms exist and how they're arranged.
+
+TRUST CV FOR: scale (cm/px ratio), wall thickness, building outline polygon
+TRUST YOUR EYES FOR: room count, room labels, printed dimensions, spatial relationships
+
+When CV and your visual understanding disagree:
+- State what CV says vs what you see
+- Explain why you're following your interpretation
+- Example: "CV detected 5 rooms but I can see 9 labeled rooms. I'll use CV scale but place all 9 rooms from printed dimensions."`,
         inputSchema: {
           image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG) — only for small images; prefer image_url via /upload'),
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
@@ -515,9 +526,32 @@ OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline ve
     this.server.registerTool(
       'update_sketch',
       {
-        description: `Push modifications to an existing sketch. PREFER THIS over generate_floor_plan when the user already has a sketch open — use get_sketch to read current state, then apply incremental changes. Supports: add/move/remove walls, add/remove openings, add/rename/remove rooms, add/move/remove furniture. Changes are applied in order and broadcast to the browser sketcher in real-time.
+        description: `Push modifications to an existing sketch. Supports two input modes:
 
-VISUAL FEEDBACK: After applying changes, call preview_sketch to verify the result visually. Look for regressions — moving a wall can break furniture placement or overlap with openings. If the change was cosmetic (renaming a room, adjusting a label), you can skip the preview. For structural changes (walls, openings, room boundaries), always preview. Use suggest_improvements for a deeper analysis when the user asks for feedback or when you spot issues you're unsure about.`,
+1. "changes" — Low-level ID-based changes (15 types: add/move/remove walls, openings, rooms, furniture, set_envelope)
+2. "high_level_changes" — Label-based surgical operations (recommended for Copy Mode iteration)
+
+HIGH-LEVEL OPERATIONS (use room labels, not IDs):
+- resize_room: {room, side, delta_cm} — expand/contract one side
+- move_room: {room, dx, dy} — shift a room
+- split_room: {room, axis, position_cm, labels} — divide into two rooms
+- merge_rooms: {rooms: [a, b], label} — combine two adjacent rooms
+- add_room: {label, room_type, rect or polygon} — add a new room
+- remove_room: {room} — remove room + its walls + furniture
+- add_door: {between: [a, b]} or {room, wall_side} — add a door
+- add_window: {room, wall_side} — add a window
+- place_furniture: {furniture_type, room, position} — place by name (center/north/sw/etc)
+- move_furniture: {furniture_type, room, position} — reposition existing furniture
+- remove_furniture: {furniture_type, room} or {furniture_id} — remove furniture
+- rename_room / retype_room — change labels or types
+- set_envelope: {polygon} — set building outline
+
+ITERATION PHILOSOPHY: Fix ONE thing at a time. After each fix, preview to verify it worked and didn't break adjacent rooms. Never regenerate the entire layout to fix a single room.
+
+GOOD: "Kitchen is 30cm too narrow on east side" → resize_room Kitchen east +30
+BAD: "Layout doesn't look right" → regenerate everything
+
+Each iteration: identify single biggest discrepancy → minimal fix → preview → repeat.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
           changes: z.array(ChangeSchema).optional().describe('Low-level changes (by ID)'),
@@ -570,7 +604,28 @@ VISUAL FEEDBACK: After applying changes, call preview_sketch to verify the resul
       {
         description: `Get a visual PNG preview of a floor plan. Returns the rendered sketch as a PNG image. In Copy Mode (when a source image exists), also returns the source floor plan image for side-by-side comparison.
 
-PURPOSE: This is your eyes. Use it to verify what you built before presenting to the user. When reviewing the image, check for: (1) walls that overlap or leave gaps, (2) furniture placed outside rooms or overlapping each other, (3) doors/windows missing or in wrong positions, (4) rooms that are too small or oddly shaped, (5) labels that overlap or are unreadable. If you spot issues, fix them with update_sketch and preview again.`,
+PURPOSE: This is your eyes. EVERY time you see the preview, follow this protocol:
+
+COMPARISON PROTOCOL (when source image is present):
+
+1. COUNT ROOMS: How many rooms in the source? How many in your sketch? List any missing or extra.
+
+2. ROOM-BY-ROOM CHECK (for each room visible in the source):
+   - Present in sketch? Correct label?
+   - Roughly the right SIZE? (compare width/height proportions)
+   - Right POSITION relative to neighbors?
+   - Correct SHAPE? (rectangular vs L-shaped vs irregular)
+
+3. OPENINGS: Doors between right rooms? Windows on right walls?
+
+4. OVERALL SHAPE: Building outline match the source perimeter?
+
+5. DECISION: List specific fixes needed. Each fix = one surgical change.
+   "Kitchen is ~30cm too narrow on east side" → resize_room.
+   Do NOT regenerate. Fix one thing at a time.
+
+VERIFICATION (without source):
+Check for: (1) walls with gaps or overlaps, (2) furniture outside rooms or overlapping, (3) missing doors/windows, (4) rooms too small or oddly shaped, (5) overlapping labels.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
           include_source: z.boolean().optional().default(true).describe('Include source floor plan image for side-by-side comparison'),
