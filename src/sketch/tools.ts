@@ -440,7 +440,7 @@ export async function handlePreviewSketch(
 }
 
 export async function handleAnalyzeImage(
-  input: { image?: string; image_url?: string; outline_epsilon?: number },
+  input: { image?: string; image_url?: string; outline_epsilon?: number; include_grid?: boolean },
   name: string,
   cvServiceUrl: string,
   _ai?: Ai,
@@ -535,8 +535,8 @@ export async function handleAnalyzeImage(
       ]
     : [];
 
-  // Build spatial grid section
-  const gridSection = cvResult.spatial_grid
+  // Build spatial grid section (off by default — JSON coordinates are more actionable for most agents)
+  const gridSection = (input.include_grid && cvResult.spatial_grid)
     ? [
         '',
         `## Spatial grid (each cell = ${cvResult.spatial_grid.cell_size_cm}cm)`,

@@ -344,22 +344,22 @@ Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. 
 
 MANDATORY: You MUST call analyze_floor_plan_image BEFORE calling generate_floor_plan. The CV pipeline extracts precise room coordinates, dimensions, and labels that you cannot accurately estimate by looking at the image. Do NOT skip this step and eyeball the layout — your dimension estimates will be wrong. If the user pasted an image without a URL, direct them to upload it at ${this.getWorkerUrl()}/upload first.
 
-Step 1: ANALYZE + LOOK — Call analyze_floor_plan_image with the image URL. Read the CV output but ALSO look at the source image yourself. Count every room you can see. The CV often misses rooms — trust your eyes for room count and labels, trust CV for scale (cm/px ratio) and wall thickness.
+Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Quickly note the CV-detected rooms, scale, and outline. Trust CV for scale/wall-thickness, trust your eyes for room count and labels. Do NOT spend time writing a lengthy analysis — just absorb the data and move on.
 
-Step 1b: EVALUATE OUTLINE — Compare the building outline vertices to the source image. If the vertex count is too high for the building shape (rectangle should be 4, L-shape should be 6), re-call analyze_floor_plan_image with a higher outline_epsilon (0.03 or 0.04) to get a cleaner outline. This is your feedback loop — you are the intelligence that evaluates and refines.
+Step 1b (ONLY IF NEEDED): If the outline has way too many vertices for the building shape (e.g., 14 for a rectangle), re-call with higher outline_epsilon. Otherwise skip this step.
 
-Step 2: BUILD ALL ROOMS — Call generate_floor_plan with ALL rooms you can identify. Start with CV-detected rooms, ADD rooms the CV missed. Do NOT add furniture yet. Get the skeleton built.
+Step 2: BUILD ALL ROOMS — Call generate_floor_plan with ALL rooms. Start from CV rooms, add any the CV missed. Rooms only — no furniture, no openings beyond obvious ones. Be fast, not perfect.
 
-Step 3: PREVIEW AND COMPARE — Call preview_sketch. It returns your sketch AND the source image side-by-side. Follow the COMPARISON PROTOCOL (see preview_sketch description). Count rooms in source vs sketch. Check each room's size, position, and shape.
+Step 3: PREVIEW IMMEDIATELY — Call preview_sketch RIGHT AFTER generating. This is your most valuable tool — it shows your sketch next to the source image. You are BLIND until you preview. Do NOT write a lengthy plan or analysis before previewing. Get visual feedback ASAP.
 
-Step 4: FIX ONE THING AT A TIME — Use update_sketch with high_level_changes for surgical fixes. Each iteration: identify the single biggest discrepancy → minimal fix → preview → repeat.
+Step 4: FIX VISUALLY — Look at the side-by-side preview. Fix the single biggest discrepancy using update_sketch with high_level_changes. Preview again. Repeat until the layout matches.
   "Kitchen is 30cm too narrow" → {type: "resize_room", room: "Kitchen", side: "east", delta_cm: 30}
   "Missing a closet" → {type: "add_room", label: "Closet", room_type: "closet", rect: {...}}
-  Do NOT regenerate the entire layout to fix a single room.
+  Do NOT regenerate the entire layout to fix one room. Do NOT batch multiple fixes without previewing between them.
 
-Step 5: ADD OPENINGS — Add doors and windows using high_level_changes. {type: "add_door", between: ["Kitchen", "Living Room"]} for interior, {type: "add_door", room: "Kitchen", wall_side: "south"} for exterior. Preview to verify.
+Step 5: ADD OPENINGS — Doors and windows via high_level_changes. Preview to verify.
 
-Step 6: ADD FURNITURE — Place furniture visible in the reference image using {type: "place_furniture", furniture_type: "bed-double", room: "Bedroom", position: "center"}. Preview to verify.
+Step 6: ADD FURNITURE — Place furniture visible in the reference. Preview to verify.
 
 PRESERVE ARCHITECTURAL DETAILS: Real apartments have walls that jut out, structural setbacks, non-rectangular foyers. A slightly irregular polygon that matches the source is BETTER than a clean rectangle that doesn't. Use polygon input when rooms aren't rectangular.
 
@@ -510,11 +510,12 @@ When CV and your visual understanding disagree:
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
           name: z.string().optional().describe('Name for the floor plan'),
           outline_epsilon: z.number().optional().describe('Override outline simplification aggressiveness (default 0.015, higher=fewer vertices). Use this in a feedback loop: if the first analysis produces too many outline vertices, re-call with a higher epsilon (e.g. 0.03-0.05) to simplify.'),
+          include_grid: z.boolean().optional().describe('Include the ASCII spatial grid in the response (default: false). The grid shows a 30cm-cell map of room placement. Most agents find the JSON room coordinates more actionable — only enable this if you need a spatial overview that the JSON alone doesn\'t give you.'),
         },
       },
-      async ({ image, image_url, name, outline_epsilon }) => {
+      async ({ image, image_url, name, outline_epsilon, include_grid }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
-        const result = await handleAnalyzeImage({ image, image_url, outline_epsilon }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
+        const result = await handleAnalyzeImage({ image, image_url, outline_epsilon, include_grid }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
         // Store source image URL in session for side-by-side preview
         if (image_url) {
           this.setState({ ...(this.state ?? {}), sourceImageUrl: image_url });
