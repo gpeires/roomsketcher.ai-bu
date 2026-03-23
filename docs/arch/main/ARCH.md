@@ -80,7 +80,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 ```bash
 # Worker (Cloudflare)
 npm run dev                    # Local dev server (wrangler dev)
-npm test                       # Run vitest tests (272 tests)
+npm test                       # Run vitest tests (274 tests)
 bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
 
 # DB migrations
@@ -121,11 +121,11 @@ src/
 ├── types.ts                    # Env bindings, Zendesk types, SketchSession
 ├── sketch/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
-│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe, computeEnvelope)
+│   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe, computeEnvelope — exported for reuse by processChanges)
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon
 │   ├── changes.ts              # applyChanges() — immutable state machine (15 change types incl. set_envelope)
 │   ├── resolve.ts              # Label→ID resolution layer (findRoomByLabel, findRoomWalls, findSharedWall, resolvePosition)
-│   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges()
+│   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges() (auto-recomputes envelope after geometry changes)
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
 │   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (envelope-based or legacy wall rendering)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
@@ -297,7 +297,7 @@ FloorPlan
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
-| `set_envelope` | polygon (Point[]) — sets building outline directly |
+| `set_envelope` | polygon (Point[]) — sets building outline directly (internal only, not exposed as high-level op) |
 
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
 
@@ -1004,7 +1004,7 @@ Testing the full Copy Mode workflow in Claude Desktop (analyze → generate → 
 **What doesn't work well:**
 - **Spatial grid** — "Not really helpful. Large ASCII matrix with lots of RO labels and dots that was hard to parse." The JSON room coordinates from CV were far more actionable. Grid added noise without being as precise as JSON or as intuitive as the image.
 - **CV room labeling** — Mislabeled most rooms (generic "Room" or wrong labels from footer text like "2 Bedroom 2 Bathroom"). Claude had to override almost everything using what it could read from the image itself.
-- **Envelope doesn't follow room edits** — When resizing a room, the building envelope didn't follow. Attempting `set_envelope` to fix it broke exterior walls. (This is being addressed by the Envelope Recomputation plan.)
+- **~~Envelope doesn't follow room edits~~** — FIXED (2026-03-23). Envelope now auto-recomputes in real-time during wall drag, on commit, undo/redo, and after server-side surgical ops. `set_envelope` removed as high-level op.
 
 ---
 
@@ -1118,7 +1118,7 @@ PHASE 2 — SURGICAL ITERATION:
 
 ### Surgical Iteration System (2026-03-23, IMPLEMENTED)
 
-**Status:** Fully implemented, deployed, and validated on 4 test images. 272 tests passing.
+**Status:** Fully implemented, deployed, and validated on 4 test images. 274 tests passing.
 
 Two new modules add label-based surgical editing on top of the existing 15 low-level change types:
 
@@ -1131,9 +1131,10 @@ Two new modules add label-based surgical editing on top of the existing 15 low-l
 - `resolvePosition(room, position, width, depth)` — named positions (center/north/sw/etc.) → absolute coords
 
 **`src/sketch/high-level-changes.ts`** — Compiler from label-based ops to low-level changes:
-- 15 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `rename_room`, `retype_room` (`set_envelope` removed — envelope is now auto-derived, see Envelope Recomputation below)
+- 15 high-level change types: `resize_room`, `move_room`, `split_room`, `merge_rooms`, `remove_room`, `add_room`, `add_door`, `add_window`, `update_opening`, `remove_opening`, `place_furniture`, `move_furniture`, `remove_furniture`, `rename_room`, `retype_room` (envelope is auto-derived — see Envelope Recomputation below)
 - Each compiles to an array of existing low-level `Change` types
 - `processChanges(plan, highLevelChanges, lowLevelChanges)` — sequential compilation + application
+- Envelope auto-recomputed after geometry-changing high-level ops (imports `computeEnvelope` from `compile-layout.ts`)
 - Canvas bounds recomputed after changes
 - Atomic error handling — if any label resolution fails, entire batch rolls back
 
@@ -1150,18 +1151,32 @@ inputSchema: {
 
 **Low-level `set_envelope` change type** — sets `plan.envelope` directly (added to `ChangeSchema` and `applyChanges`). Used internally; NOT exposed as a high-level operation.
 
-### Envelope Recomputation (2026-03-23, PLANNED — spec + plan committed)
+### Envelope Recomputation (2026-03-23, IMPLEMENTED)
 
-**Problem:** The building envelope (thick perimeter outline) was computed once during `generate_floor_plan` and never updated when rooms changed via surgical ops or wall drag. `set_envelope` as a high-level workaround made things worse — it replaced the polygon without updating walls.
+**Problem:** The building envelope (thick perimeter outline) was computed once during `generate_floor_plan` and never updated when rooms changed via surgical ops or wall drag.
 
-**Solution (designed, not yet implemented):**
-- **Client-side:** Port `computeEnvelope` pipeline (rasterize → morphological close → contour trace → offset) to vanilla JS in `html.ts`. Recompute in real-time during wall drag with a 16ms performance escape hatch. Also recompute on commit, undo/redo, and `applyChangeLocal`.
-- **Server-side:** Auto-recompute in `processChanges` after geometry-changing operations (`resize_room`, `move_room`, `add_room`, `remove_room`, `split_room`, `merge_rooms`).
-- **Remove `set_envelope`** from high-level changes (schema, compiler, tool description). Low-level `set_envelope` stays for internal use.
-- **Room polygon propagation during drag** — currently only happens on mouseup (commit). Must also happen during mousemove for real-time envelope feedback. Extract shared helper, use absolute deltas from drag-start to avoid floating-point drift.
+**Solution (fully implemented and deployed):**
+
+**Server-side:**
+- `computeEnvelope()` exported from `compile-layout.ts` for reuse
+- `processChanges()` auto-recomputes envelope after geometry-changing operations (`resize_room`, `move_room`, `add_room`, `remove_room`, `split_room`, `merge_rooms`)
+- `set_envelope` removed from high-level changes (schema, compiler, tool description). Low-level `set_envelope` stays in `changes.ts` for internal use.
+
+**Client-side (`html.ts`):**
+- ~200 lines of vanilla ES5 JS ported from `geometry.ts` and `compile-layout.ts`: `pointInPolygon`, `rasterizeToGrid`, `dilateGrid`, `erodeGrid`, `traceContour`, `offsetAxisAlignedPolygon`, `recomputeEnvelope`
+- `propagateRoomPolygons(plan, refPoints)` — shared helper for room polygon propagation during drag. Uses `_origPolygon` snapshots (set at drag-start) with absolute deltas from original positions to avoid floating-point drift.
+- Real-time envelope recompute during wall drag with 16ms performance escape hatch (`envelopeDegraded` flag). If recompute exceeds 16ms, degrades to recompute-on-mouseup only.
+- Direct DOM update for envelope polygon and room cutout polygons during drag (no full `render()`)
+- Envelope recompute hooked into: `updateWallDrag`, `updateEndpointDrag` (real-time), `commitWallDrag`, `commitEndpointDrag` (catch-up + reset degraded flag), `performUndo`, `performRedo`, and `applyChangeLocal` (for server-pushed room changes)
+
+**Room polygon propagation refactored:**
+- Old approach: propagation happened only in commit functions (mouseup), computing deltas and applying to current polygons
+- New approach: `_origPolygon` snapshot stored on each room at drag-start. `propagateRoomPolygons()` called on every mousemove frame, always computing deltas from originals (drift-free). Commit functions only record undo/redo entries by comparing `_origPolygon` to current polygon — they do NOT re-propagate.
+- Degenerate wall revert (wall < 5cm) restores `_origPolygon` and cleans up snapshots
+- Drift repair code removed from `commitEndpointDrag` (no longer needed — absolute deltas prevent drift)
 
 **Spec:** `docs/superpowers/specs/2026-03-23-client-envelope-recompute-design.md`
-**Plan:** `docs/superpowers/plans/2026-03-23-client-envelope-recompute.md` (7 tasks)
+**Plan:** `docs/superpowers/plans/2026-03-23-client-envelope-recompute.md` (7 tasks, all completed)
 
 ### Template Mode (Description → Floor Plan)
 
@@ -1467,11 +1482,11 @@ Where `dir = 1` (right) or `-1` (left). For a clockwise exterior perimeter, "lef
 Single-file HTML+CSS+JS served at `/sketcher/:id`. No build step.
 
 **Tools:** Select, Wall, Door, Window, Room, Furniture
-**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation, furniture rotation handles
+**Features:** Snap-to-grid, multi-snap system, pan/zoom, keyboard shortcuts, real-time WebSocket sync, properties panel, furniture rendered with architectural symbols, undo/redo, visual filter dimming, wall endpoint dragging with connected wall auto-follow, wall-segment dragging (perpendicular translation), room polygon propagation during drag, real-time envelope recomputation, furniture rotation handles
 **State:** `plan`, `tool`, `selected`, `drawStart`, `viewBox`, `ws`, `dragState`, `wallDragState`, `undoStack`, `redoStack`, `interactionMode`
 **Branding:** RoomSketcher teal/gold palette, Merriweather Sans font, logo (home link to `/`), footer CTA
 
-**Client-side change handling:** The SPA implements all 13 change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map.
+**Client-side change handling:** The SPA implements all 13 change types (including `update_room`) in `applyChangeLocal()`, matching the server's `applyChanges()` behavior — including color updates on room type change via inline `ROOM_COLORS` map. After room geometry changes (`update_room`, `add_room`, `remove_room`), `recomputeEnvelope(plan)` is called to keep the building outline in sync.
 
 **URL strategy:** All API calls use relative paths (`/api/sketches/...`, `/ws/...`) for proxy transparency. No hardcoded origins.
 
@@ -1515,12 +1530,14 @@ State: `wallDragState = { wallId, origStart, origEnd, grabPoint, connectedStart[
 
 ### Room Polygon Propagation
 
-When wall endpoints move, room polygon vertices must follow. The system uses a two-pass approach:
+When wall endpoints move, room polygon vertices must follow. The system uses an `_origPolygon` snapshot approach:
 
-1. **Delta-based propagation** — Room polygon vertices within `maxWallThickness + 5` cm of the original drag point are moved by the same delta (dx, dy) as the wall endpoint. This preserves the inward offset (room vertices are inset from wall endpoints by half the wall thickness).
-2. **Drift repair** — After delta propagation, a second pass checks every room's polygon vertices against the room's wall endpoints. If any vertex drifted too far from all wall endpoints (e.g., after disconnect/reconnect), it is snapped to the nearest wall endpoint with the proper inward offset direction preserved.
+1. **Drag-start snapshot** — When a drag begins (endpoint or wall-segment), every room's polygon is deep-copied into `room._origPolygon`.
+2. **Mousemove propagation** — `propagateRoomPolygons(plan, refPoints)` is called on every mousemove frame. It computes absolute deltas from the original reference points (not incremental frame-to-frame), so there is no floating-point drift. Room vertices within `maxWallThickness + 5` cm of a reference point's original position are displaced by that reference point's full delta.
+3. **Commit** — `commitWallDrag` / `commitEndpointDrag` compare each room's `_origPolygon` to its current `polygon` and record `update_room` changes for undo. They do NOT re-propagate (that would double-apply). Then `_origPolygon` is deleted from all rooms.
+4. **Cancel/revert** — If a drag is cancelled (degenerate wall < 5cm), room polygons are restored from `_origPolygon` and snapshots cleaned up.
 
-Both passes generate `update_room` changes for the undo stack.
+This replaced the earlier approach where propagation happened only on commit with incremental deltas and a drift-repair pass.
 
 ### Undo/Redo System
 
