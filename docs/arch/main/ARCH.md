@@ -80,7 +80,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 ```bash
 # Worker (Cloudflare)
 npm run dev                    # Local dev server (wrangler dev)
-npm test                       # Run vitest tests (197 tests)
+npm test                       # Run vitest tests (272 tests)
 bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
 
 # DB migrations
@@ -123,7 +123,9 @@ src/
 │   ├── types.ts                # FloorPlan schema (Zod) + Change union
 │   ├── compile-layout.ts       # SimpleFloorPlanInput → FloorPlan compiler (room-first → walls, classifyWallType probe, computeEnvelope)
 │   ├── geometry.ts             # shoelaceArea, centroid, boundingBox, pointInPolygon, wallQuad, polygonBoundingBox, rasterizeToGrid, traceContour, offsetAxisAlignedPolygon
-│   ├── changes.ts              # applyChanges() — immutable state machine
+│   ├── changes.ts              # applyChanges() — immutable state machine (15 change types incl. set_envelope)
+│   ├── resolve.ts              # Label→ID resolution layer (findRoomByLabel, findRoomWalls, findSharedWall, resolvePosition)
+│   ├── high-level-changes.ts   # 16 high-level change schemas + compiler → low-level changes + processChanges()
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
 │   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (envelope-based or legacy wall rendering)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
@@ -228,7 +230,7 @@ McpAgent framework owns specific routes (`/mcp`, `/sse`). WebSocket connections 
 ### RoomSketcherHelpMCP (McpAgent)
 
 - **Role:** MCP protocol handler + tool registry
-- **State:** `SketchSession { sketchId?, plan?, ctaState? }`
+- **State:** `SketchSession { sketchId?, plan?, ctaState?, sourceImageUrl? }`
 - **Storage:** DO-internal SQLite (MCP session state only)
 - **Key behavior:** Captures `x-forwarded-host` / `host` header in `onRequest()` to construct correct URLs through the proxy
 
@@ -273,7 +275,7 @@ FloorPlan
 │   ├── position {x,y}, rotation
 │   └── width, depth
 ├── annotations[] (reserved for V2)
-└── metadata { created_at, updated_at, source }
+└── metadata { created_at, updated_at, source, source_image_url? }
 ```
 
 **Coordinate system:** Origin (0,0) top-left, X right, Y down, all values in centimeters, 10cm grid snap.
@@ -295,7 +297,7 @@ FloorPlan
 | `add_furniture` | furniture item object (uses FurnitureItemSchema) |
 | `move_furniture` | furniture_id, position?, rotation? |
 | `remove_furniture` | furniture_id |
-| `set_envelope` | polygon (Point[]) — **NEW 2026-03-23, not yet implemented** |
+| `set_envelope` | polygon (Point[]) — sets building outline directly |
 
 Changes are applied via `applyChanges(plan, changes[])` — returns a new plan object (immutable). Both server (`changes.ts`) and browser (`html.ts`) implement the full set of change handlers with consistent behavior, including color updates on room type changes via `ROOM_COLORS` lookup.
 
@@ -386,8 +388,8 @@ The SketchSync DO uses a custom protocol — the Agent framework's built-in `CF_
 | `analyze_floor_plan_image` | Send image to CV service, return source image + extracted room JSON as MCP content blocks |
 | `get_sketch` | Retrieve plan summary (walls, rooms, areas) |
 | `open_sketcher` | Return browser sketcher URL |
-| `update_sketch` | Apply changes + broadcast to browsers (description enforces: prefer over generate_floor_plan) |
-| `preview_sketch` | Rasterize SVG to PNG and return as MCP image — visual feedback loop for agents |
+| `update_sketch` | Apply low-level changes (by ID) and/or high-level changes (by label) + broadcast to browsers |
+| `preview_sketch` | Rasterize SVG to PNG + optional source image for side-by-side comparison |
 | `suggest_improvements` | Spatial analysis + room-specific design knowledge from RoomSketcher guidelines |
 | `export_sketch` | SVG download link or text summary |
 | `list_templates` | List available floor plan templates for starting points |
@@ -1099,11 +1101,11 @@ PHASE 2 — SURGICAL ITERATION:
 
 **Architecture note:** Copy Mode bypasses the AI specialist layer (4× Llama 3.2 11B Vision models removed). `handleAnalyzeImage` calls the CV service directly and auto-converts via `cvToSketchInput()`. Claude interprets the image + CV data and drives sketch construction.
 
-### Surgical Iteration System (2026-03-23, PLANNED — not yet implemented)
+### Surgical Iteration System (2026-03-23, IMPLEMENTED)
 
-**Status:** Design spec complete, implementation plan written, code not yet written.
+**Status:** Fully implemented — 272 tests passing, not yet deployed or validated on test images.
 
-Two new modules add label-based surgical editing on top of the existing 14+1 low-level change types:
+Two new modules add label-based surgical editing on top of the existing 15 low-level change types:
 
 **`src/sketch/resolve.ts`** — Label→ID resolution layer:
 - `findRoomByLabel(plan, label)` — case-insensitive match, throws descriptive error listing available rooms
@@ -1167,9 +1169,9 @@ get_sketch → read current state
 
 `preview_sketch` rasterizes the SVG to a 1200px-wide PNG via `@cf-wasm/resvg` (WASM) and returns it as an MCP image content block.
 
-**Side-by-side comparison (planned 2026-03-23, not yet implemented):** When a sketch has `metadata.source_image_url` (set during Copy Mode), `preview_sketch` will return both the rendered sketch AND the source floor plan image together, enabling direct visual comparison in a single tool call. This replaces the current approach of comparing from memory across separate tool calls.
+**Side-by-side comparison (implemented 2026-03-23):** When a sketch has `metadata.source_image_url` (set during Copy Mode), `preview_sketch` returns both the rendered sketch AND the source floor plan image together, enabling direct visual comparison in a single tool call. The source URL flows: `analyze_floor_plan_image` stores in `SketchSession.sourceImageUrl` → `generate_floor_plan` copies to `plan.metadata.source_image_url` → `preview_sketch` fetches and returns alongside sketch PNG.
 
-**Structured comparison protocol (planned):** The `preview_sketch` tool description will embed a room-by-room checklist: count rooms, check each room's size/position/shape, verify openings, compare overall outline. This replaces the vague "looks good" comparison pattern.
+**Structured comparison protocol (implemented):** The `preview_sketch` tool description embeds a room-by-room COMPARISON PROTOCOL: count rooms, check each room's size/position/shape, verify openings, compare overall outline. Each discrepancy maps to a specific surgical fix.
 
 Tool descriptions enforce the loop:
 - `generate_floor_plan` says "CRITICAL: Do NOT skip preview_sketch after generating."
