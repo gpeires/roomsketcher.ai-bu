@@ -117,4 +117,5 @@ export interface SketchSession {
   sketchId?: string;
   plan?: FloorPlan;
   cta?: SessionCTAState;
+  sourceImageUrl?: string;
 }

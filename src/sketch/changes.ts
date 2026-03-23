@@ -122,6 +122,10 @@ export function applyChanges(plan: FloorPlan, changes: Change[]): FloorPlan {
       case 'remove_furniture':
         result.furniture = result.furniture.filter(f => f.id !== change.furniture_id);
         break;
+
+      case 'set_envelope':
+        result.envelope = change.polygon;
+        break;
     }
   }
 

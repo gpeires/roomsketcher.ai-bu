@@ -207,4 +207,30 @@ describe('applyChanges', () => {
     const result = applyChanges(plan, changes);
     expect(result.furniture).toHaveLength(0);
   });
+
+  it('sets the envelope polygon', () => {
+    const plan = makePlan();
+    const envelope = [
+      { x: 0, y: 0 }, { x: 500, y: 0 },
+      { x: 500, y: 400 }, { x: 0, y: 400 },
+    ];
+    const result = applyChanges(plan, [
+      { type: 'set_envelope', polygon: envelope },
+    ]);
+    expect(result.envelope).toEqual(envelope);
+    expect(result.metadata.source).toBe('mixed');
+  });
+
+  it('replaces existing envelope', () => {
+    const plan = makePlan();
+    plan.envelope = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }];
+    const newEnvelope = [
+      { x: 0, y: 0 }, { x: 600, y: 0 },
+      { x: 600, y: 500 }, { x: 0, y: 500 },
+    ];
+    const result = applyChanges(plan, [
+      { type: 'set_envelope', polygon: newEnvelope },
+    ]);
+    expect(result.envelope).toEqual(newEnvelope);
+  });
 });

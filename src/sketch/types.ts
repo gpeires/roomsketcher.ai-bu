@@ -109,6 +109,7 @@ export const FloorPlanSchema = z.object({
     created_at: z.string(),
     updated_at: z.string(),
     source: z.enum(['ai', 'sketcher', 'mixed']),
+    source_image_url: z.string().optional(),
   }),
 });
 export type FloorPlan = z.infer<typeof FloorPlanSchema>;
@@ -130,6 +131,7 @@ export const ChangeSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('add_furniture'), furniture: FurnitureItemSchema }),
   z.object({ type: z.literal('move_furniture'), furniture_id: z.string(), position: PointSchema.optional(), rotation: z.number().optional() }),
   z.object({ type: z.literal('remove_furniture'), furniture_id: z.string() }),
+  z.object({ type: z.literal('set_envelope'), polygon: z.array(PointSchema).min(3) }),
 ]);
 export type Change = z.infer<typeof ChangeSchema>;
 
@@ -188,6 +190,7 @@ export const FloorPlanInputSchema = z.object({
     created_at: z.string().optional(),
     updated_at: z.string().optional(),
     source: z.enum(['ai', 'sketcher', 'mixed']).optional(),
+    source_image_url: z.string().optional(),
   }).optional(),
 });
 export type FloorPlanInput = z.infer<typeof FloorPlanInputSchema>;
