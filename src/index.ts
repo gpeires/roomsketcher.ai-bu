@@ -344,10 +344,10 @@ Your job is REPLICATION. Do NOT call list_templates or search_design_knowledge. 
 
 COPY MODE REQUIRES CV ANALYSIS. No exceptions, no workarounds. The server will REJECT generate_floor_plan calls with 3+ rooms if you haven't run CV analysis first.
 - User provided a URL → call analyze_floor_plan_image with it.
-- User pasted/attached an image (no URL) → call upload_image with the image data to get a URL, then call analyze_floor_plan_image with that URL. This takes 2 quick tool calls.
-- There is ZERO reason to skip CV analysis or read dimensions by eye. The tools handle everything.
+- User pasted/attached an image (no URL) → call upload_image to get the upload page link, send it to the user, and WAIT for them to give you the URL.
+- There is ZERO reason to skip CV analysis or read dimensions by eye.
 
-Step 1: ANALYZE — Get CV data (upload_image first if needed, then analyze_floor_plan_image). Quickly note rooms, scale, outline. Do NOT write a lengthy analysis.
+Step 1: ANALYZE — Get the image URL (ask user to upload if needed), then call analyze_floor_plan_image. Quickly note rooms, scale, outline. Do NOT write a lengthy analysis.
 
 Step 1b (ONLY IF NEEDED): If the outline has way too many vertices for the building shape (e.g., 14 for a rectangle), re-call with higher outline_epsilon.
 
@@ -488,7 +488,7 @@ TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
 
 1. USER PROVIDED A URL/LINK to an image → Call this tool RIGHT NOW with that URL as image_url.
 
-2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → Call upload_image with the image data (base64 or data URI) to get a URL. Then call this tool with that URL. Two tool calls, fully automatic — do NOT ask the user to upload manually, do NOT read dimensions by eye.
+2. USER PASTED/ATTACHED AN IMAGE in the chat (no URL) → Call upload_image to get the upload page link. Send it to the user and WAIT for them to paste back the URL. Do NOT read dimensions by eye.
 
 OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.
 
@@ -525,55 +525,18 @@ When CV and your visual understanding disagree:
     this.server.registerTool(
       'upload_image',
       {
-        description: `Upload a floor plan image so it can be used with analyze_floor_plan_image.
+        description: `Get the upload page URL for the user to upload a floor plan image.
 
-USE THIS TOOL WHEN: The user pasted or attached a floor plan image in chat and you don't have a URL for it. Pass the image data (base64 or data URI) and get back a permanent URL.
+CALL THIS TOOL WHEN: The user pasted or attached a floor plan image in chat but you don't have a URL for it. This tool returns the upload page link — send it to the user and wait for them to paste back the URL.
 
-WORKFLOW: upload_image → get URL → analyze_floor_plan_image with that URL → generate_floor_plan
+WORKFLOW: upload_image → user uploads → user gives you URL → analyze_floor_plan_image → generate_floor_plan
 
-This is the ONLY correct way to handle pasted images. Do NOT read dimensions by eye. Do NOT direct the user to a web page. Just call this tool.`,
-        inputSchema: {
-          image: z.string().describe('The image as a base64 string or a data URI (data:image/jpeg;base64,...). Both formats are accepted.'),
-        },
+Do NOT skip this. Do NOT read dimensions from the image by eye. The CV pipeline is always better.`,
+        inputSchema: {},
       },
-      async ({ image }) => {
-        // Strip data URI prefix if present, detect MIME
-        let base64 = image;
-        let contentType = 'image/jpeg';
-        const dataUriMatch = image.match(/^data:(image\/[^;]+);base64,(.+)$/);
-        if (dataUriMatch) {
-          contentType = dataUriMatch[1];
-          base64 = dataUriMatch[2];
-        }
-        // Validate content type
-        if (contentType !== 'image/png' && contentType !== 'image/jpeg') {
-          contentType = 'image/jpeg'; // default fallback
-        }
-        // Decode and validate size
-        let bytes: Uint8Array;
-        try {
-          bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-        } catch {
-          return { content: [{ type: 'text' as const, text: 'Invalid base64 image data. Make sure you are passing the full base64 string or a valid data URI.' }] };
-        }
-        if (bytes.byteLength > 10 * 1024 * 1024) {
-          return { content: [{ type: 'text' as const, text: 'Image too large (max 10 MB). Try compressing the image first.' }] };
-        }
-        if (bytes.byteLength < 1000) {
-          return { content: [{ type: 'text' as const, text: `Image data is suspiciously small (${bytes.byteLength} bytes). This may be truncated. Make sure you are passing the complete image data.` }] };
-        }
-        // Store in D1 (same logic as /api/upload-image endpoint)
-        const id = crypto.randomUUID();
-        const chunks: string[] = [];
-        for (let i = 0; i < bytes.length; i += 8192) {
-          chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-        }
-        const storedBase64 = btoa(chunks.join(''));
-        await this.env.DB.prepare(
-          'INSERT INTO uploaded_images (id, data, content_type, created_at) VALUES (?, ?, ?, ?)'
-        ).bind(id, storedBase64, contentType, new Date().toISOString()).run();
-        const imageUrl = `${this.getWorkerUrl()}/api/images/${id}`;
-        return { content: [{ type: 'text' as const, text: `Image uploaded successfully.\n\n**URL:** ${imageUrl}\n\nNow call analyze_floor_plan_image with this URL as image_url.` }] };
+      async () => {
+        const uploadUrl = `${this.getWorkerUrl()}/upload`;
+        return { content: [{ type: 'text' as const, text: `Direct the user to upload their floor plan image:\n\n**Upload page:** ${uploadUrl}\n\nTell the user:\n"I can see your floor plan! To get accurate room dimensions, I need to run it through our computer vision pipeline. Please:\n1. Open ${uploadUrl}\n2. Drop or paste your image there\n3. Copy the URL it gives you and paste it back here"\n\nThen STOP and WAIT for the user to provide the URL. Do NOT proceed without it.` }] };
       },
     );
 
