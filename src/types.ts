@@ -118,4 +118,5 @@ export interface SketchSession {
   plan?: FloorPlan;
   cta?: SessionCTAState;
   sourceImageUrl?: string;
+  cvAnalyzed?: boolean;
 }

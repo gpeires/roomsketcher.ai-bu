@@ -64,6 +64,17 @@ export async function handleGenerateFloorPlan(
   plan: unknown,
   ctx: ToolContext,
 ): Promise<ToolResult> {
+  // Server-side Copy Mode gate: if the agent is submitting 3+ rooms but never
+  // called analyze_floor_plan_image, they're likely bypassing the CV pipeline
+  // by reading dimensions from a pasted image. Block and redirect to upload.
+  if (!ctx.state?.cvAnalyzed) {
+    const rooms = (plan as Record<string, unknown>)?.rooms;
+    if (Array.isArray(rooms) && rooms.length >= 3) {
+      const uploadUrl = ctx.workerUrl ? `${ctx.workerUrl}/upload` : '/upload';
+      return { content: [{ type: 'text' as const, text: `⚠️ **Copy Mode requires CV analysis first.**\n\nYou're submitting ${rooms.length} rooms but haven't called analyze_floor_plan_image yet. If you're working from a reference image, the CV pipeline will produce much better results than manual dimension reading.\n\nPlease ask the user to upload their floor plan image:\n1. Open ${uploadUrl}\n2. Drop or paste the image\n3. Copy the URL and call analyze_floor_plan_image with it\n\nIf this is Design Mode (no reference image), add \`"source": "design"\` to the plan name to proceed.` }] };
+    }
+  }
+
   let floorPlan: FloorPlan;
 
   // Try full schema first (more specific — has version, walls, etc.)

@@ -518,9 +518,11 @@ When CV and your visual understanding disagree:
       async ({ image, image_url, name, outline_epsilon, include_grid }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
         const result = await handleAnalyzeImage({ image, image_url, outline_epsilon, include_grid }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
-        // Store source image URL in session for side-by-side preview
+        // Store source image URL + CV analysis flag in session
         if (image_url) {
-          this.setState({ ...(this.state ?? {}), sourceImageUrl: image_url });
+          this.setState({ ...(this.state ?? {}), sourceImageUrl: image_url, cvAnalyzed: true });
+        } else if (image) {
+          this.setState({ ...(this.state ?? {}), cvAnalyzed: true });
         }
         return result;
       },
