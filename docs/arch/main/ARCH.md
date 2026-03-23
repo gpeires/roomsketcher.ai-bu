@@ -789,48 +789,66 @@ The generated sketches don't closely match source images:
 - **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. As of 2026-03-22, **envelope-based rendering** — `compileLayout()` computes a building envelope (union of room polygons expanded by exterior wall thickness) and stores it as `plan.envelope`. Both SVG renderers detect this field and use the envelope-minus-rooms model: structural mass as filled polygon, rooms as colored cutouts, interior walls as thin lines. Legacy sketches without `envelope` fall back to the old wall-based rendering (exterior wall polygons + junction circles).
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
-### Exterior perimeter irregularity (2026-03-22 finding)
+### Exterior perimeter irregularity (2026-03-22 finding, PROVEN 2026-03-22)
 
 **Problem:** Generated sketches always have rectangular exterior perimeters, even when source floor plans have irregular shapes (L-shaped apartments, step-outs, indentations). Real floor plans often have non-rectangular exterior walls.
 
-**Root cause is room placement, NOT the envelope code.** The `computeEnvelope()` function in `compile-layout.ts` correctly traces the actual room contours:
+**Root cause is room placement approach, NOT the envelope code.** The `computeEnvelope()` function in `compile-layout.ts` correctly traces the actual room contours:
 1. Rasterizes all room polygons onto a 10cm boolean grid
 2. Morphological close bridges gaps < 50cm (`ENVELOPE_GAP_THRESHOLD`)
 3. Traces outer contour of filled grid → axis-aligned polygon
 4. Offsets outward by exterior wall thickness
 
-When rooms are placed in a non-rectangular arrangement (with gaps), the envelope faithfully follows the irregular shape. **Confirmed working:** placing rooms that don't fill a bounding rectangle produces step-outs in the rendered perimeter.
+**Proven working (2026-03-22):** Shore Drive sketch `2Gq_OIlsBj2W69-yW8w7l` demonstrates a clearly irregular perimeter:
+- **Balcony protrudes north** from the NW corner (175cm beyond the kitchen's north wall)
+- **South wall steps** — WIC/CL area stops 200cm short of Bedroom 2's south wall
+- **Overall L-shaped footprint** — not rectangular
 
-**The actual problem:** When constructing floor plans (both from CV data and manual layout), rooms are being extended to fill a rectangular bounding box to avoid visual gaps (empty space inside the apartment). This artificial gap-filling forces every floor plan into a rectangle.
+The envelope code required NO changes. The fix was entirely in the **room placement approach**.
 
-**What needs to change:**
-1. Place rooms at their actual sizes from the source, not stretched to fill a rectangle
-2. Accept that some floor plans have irregular perimeters — the envelope will trace the real shape
-3. For the generate→preview→compare loop, match the source floor plan's actual perimeter shape: if the source has step-outs or indentations, the rooms should NOT fill those areas
-4. Small gaps between rooms (< 50cm) are automatically bridged by morphological closing — this is desirable for wall thickness gaps but should not be relied on to fill large irregular spaces
+**The fundamental insight — additive vs subtractive:**
+- **Wrong approach (subtractive):** Start with a rectangular bounding box, place rooms to fill it, "cut out" room shapes. This forces every floor plan into a rectangle.
+- **Correct approach (additive):** Place each room at its actual position and size based on the source image. Let gaps exist naturally. Let the envelope trace whatever shape results from the actual room positions. Rooms that protrude beyond the main footprint (balconies, bump-outs) create irregular perimeter features.
+
+**Practical guidance for the agent:**
+1. Place rooms at their actual sizes from the source — do NOT stretch rooms to fill gaps
+2. Rooms that protrude (balconies, bay areas) should be placed at their real position even if they extend beyond the main building footprint
+3. The `ENVELOPE_GAP_THRESHOLD` (50cm) bridges small gaps between rooms (for wall thickness) but preserves large gaps as perimeter irregularities
+4. Preview after placing rooms to verify the envelope shape matches the source perimeter
+5. For rectangular floor plans (like Apt 6C), the result WILL be rectangular — that's correct when the source is rectangular
 
 **Key files:**
 - `src/sketch/compile-layout.ts` — `computeEnvelope()` (lines ~522-562), `ENVELOPE_GAP_THRESHOLD` imported from defaults
 - `src/sketch/geometry.ts` — `rasterizeToGrid()`, `traceContour()`, `offsetAxisAlignedPolygon()`
 - `src/sketch/defaults.ts` — `ENVELOPE_GAP_THRESHOLD = 50` (cm)
 
-### Generate→Preview→Compare loop experience (2026-03-22)
+### Generate→Preview→Compare loop experience (2026-03-22, updated)
 
-Ran 5 iterations on Apt 6C (520 W 23rd St). Key learnings for the agent-driven sketch construction loop:
+Ran 5+ iterations on Apt 6C and 1 iteration on Shore Drive. Key learnings for the agent-driven sketch construction loop:
 
 **What works:**
 - The generate→preview→compare cycle is effective — each iteration improves the sketch visibly
 - CV output provides good starting geometry (room positions, relative sizes) even if imperfect
 - The agent can manually correct CV data using the source image for reference
 - `preview_sketch` returns a rendered PNG that's sufficient for visual comparison
+- **Additive room placement produces correct irregular perimeters** — demonstrated on Shore Drive where balcony protrusion and stepped south wall rendered correctly without any code changes
 
 **What doesn't work yet:**
 - CV misses rooms — Apt 6C has 9+ rooms but CV only finds 5. Missing: Kitchen, both Baths, most closets. The agent must add these manually from the source image.
 - CV dimension orientation is ambiguous — "12'-0" x 18'-0"" could be width × depth or depth × width. The agent needs to visually check which interpretation matches the source.
 - Complex service areas (corridors, closets, baths clustered together) are hard to lay out correctly — small errors in room placement cascade into gaps or overlaps.
 - The feedback loop is slow — each generate call creates a new sketch. Update-in-place via `update_sketch` would be more efficient for iterative refinement.
+- **Room adjacency for openings** — rooms must be within ~10cm (interior wall thickness) of each other for the system to detect a shared wall and place doors between them. Rooms separated by >10cm cannot have `between` doors. Plan room positions carefully to ensure adjacencies.
 
-**Best sketch for Apt 6C:** `PE72Hg-AziIJhY3QzfNLM` — 9 rooms, correct overall layout, rooms extend to consistent south wall. Still lacks some closets and has slightly oversized kitchen/foyer to fill gaps (the exact issue identified in the perimeter irregularity finding above).
+**Best sketches:**
+- **Apt 6C:** `0H_S8-YHU2T5LwQXnWZYM` — 11 rooms, rooms at labeled dimensions (305×447, 549×366, 358×417cm), correct layout but still rectangular (Apt 6C IS rectangular). Previous best: `PE72Hg-AziIJhY3QzfNLM` (9 rooms, oversized rooms to fill gaps).
+- **Shore Drive:** `2Gq_OIlsBj2W69-yW8w7l` — 10 rooms, **irregular perimeter proven** (balcony protrusion, stepped south wall). Room dimensions approximate — needs refinement to match labeled dimensions more closely.
+
+**Test image URLs (all 4):**
+- Apt 6C: `https://roomsketcher.kworq.com/api/images/53c1822d-3e22-429b-8476-b8066e409534`
+- Res 507: `https://roomsketcher.kworq.com/api/images/44e71e4b-e100-4572-aed1-674193c78785`
+- Unit 2C: `https://roomsketcher.kworq.com/api/images/5f8ac591-f5f1-4bb1-a655-36ee1012c092`
+- Shore Drive: `https://roomsketcher.kworq.com/api/images/f299ae0e-894b-4d16-a468-78775eb73400`
 
 ### Preprocessing metadata now flows through
 
