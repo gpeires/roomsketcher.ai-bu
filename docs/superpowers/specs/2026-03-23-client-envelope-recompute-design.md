@@ -24,11 +24,13 @@ Five pure functions are ported as vanilla JS into `src/sketcher/html.ts`:
 - `traceContour(grid, gridSize, originX, originY)` — trace outer boundary of filled cells into a polygon
 - `offsetAxisAlignedPolygon(polygon, distance)` — offset polygon outward by wall thickness
 
+Note: `rasterizeToGrid` calls `pointInPolygon` internally — these form a dependency chain.
+
 Plus a coordinator:
 
 ```javascript
 function computeEnvelope(rooms, exteriorThickness) {
-  if (rooms.length === 0) return null;
+  if (rooms.length === 0) return undefined;
   var polygons = rooms.map(function(r) { return r.polygon; });
   var gridSize = 10; // SNAP_GRID
   var result = rasterizeToGrid(polygons, gridSize);
@@ -37,25 +39,62 @@ function computeEnvelope(rooms, exteriorThickness) {
   // Pad, dilate, erode, unpad (morphological close)
   // ... same algorithm as compile-layout.ts lines 534-554
   var contour = traceContour(unpadded, gridSize, result.originX, result.originY);
-  if (contour.length < 3) return null;
+  if (contour.length < 3) return undefined;
   return offsetAxisAlignedPolygon(contour, exteriorThickness / 2);
 }
 ```
+
+Return type is `undefined` (not `null`) to match the Zod schema (`z.array(PointSchema).optional()`).
 
 These are direct ports of the existing TypeScript in `src/sketch/geometry.ts` and `src/sketch/compile-layout.ts`, converted to ES5-compatible vanilla JS to match `html.ts` conventions.
 
 Constants inlined: `SNAP_GRID = 10`, `ENVELOPE_GAP_THRESHOLD = 50`.
 
-### 2. Real-time recomputation during wall drag with performance escape hatch
+### 2. Propagate room polygons during mousemove (new)
+
+Currently, room polygon vertices only propagate in the commit functions (`commitWallDrag` at line 2142, `commitEndpointDrag` at line 1889). The mousemove handlers (`updateWallDrag` at line 2039, `updateEndpointDrag` at line 1723) only move wall positions — they don't update room polygons.
+
+For real-time envelope updates, room polygons must also propagate during mousemove. Extract the room propagation logic from the commit functions into a shared helper:
+
+```javascript
+function propagateRoomPolygons(plan, origStart, origEnd, dx, dy) {
+  if (dx === 0 && dy === 0) return;
+  var maxThick = 0;
+  for (var ti = 0; ti < plan.walls.length; ti++) {
+    if ((plan.walls[ti].thickness || 10) > maxThick) maxThick = plan.walls[ti].thickness || 10;
+  }
+  var roomThreshold = maxThick + 5;
+  for (var rpi = 0; rpi < plan.rooms.length; rpi++) {
+    var room = plan.rooms[rpi];
+    var changed = false;
+    var newPolygon = room.polygon.map(function(v) {
+      var nearStart = Math.abs(v.x - origStart.x) <= roomThreshold && Math.abs(v.y - origStart.y) <= roomThreshold;
+      var nearEnd = Math.abs(v.x - origEnd.x) <= roomThreshold && Math.abs(v.y - origEnd.y) <= roomThreshold;
+      if (nearStart || nearEnd) { changed = true; return { x: v.x + dx, y: v.y + dy }; }
+      return { x: v.x, y: v.y };
+    });
+    if (changed) {
+      room.polygon = newPolygon;
+      room.area = computeArea(newPolygon);
+    }
+  }
+}
+```
+
+Call this in both `updateWallDrag` and `updateEndpointDrag` (during mousemove), and refactor the commit functions to use it too.
+
+**Important:** The commit functions currently compute the delta from the original saved positions. During mousemove, we need to compute incremental deltas (frame-to-frame) since room polygons are now being updated continuously. Store previous frame positions in the drag state to compute incremental deltas.
+
+### 3. Real-time envelope recomputation with performance escape hatch
 
 **During drag (mousemove handler):**
 
-After room polygon vertices are moved (the existing propagation logic), call `computeEnvelope` and assign to `plan.envelope`. Wrap in timing:
+After room polygon propagation (section 2 above), recompute the envelope. Wrap in timing:
 
 ```javascript
 var envelopeDegraded = false;
 
-// In the mousemove handler, after room vertex propagation:
+// In updateWallDrag / updateEndpointDrag, after propagateRoomPolygons:
 if (!envelopeDegraded && plan.envelope) {
   var t0 = performance.now();
   var extThickness = getExteriorThickness(plan);
@@ -94,19 +133,23 @@ function getExteriorThickness(plan) {
 }
 ```
 
-### 3. Integration points in html.ts
+### 4. Integration points in html.ts
 
-The envelope recomputation hooks into three existing locations:
+The envelope recomputation hooks into five locations:
 
-1. **Wall segment drag** — the mousemove handler that moves walls perpendicular to their axis (around line 2050). Room vertices already propagate here. Add envelope recompute after propagation.
+1. **`updateWallDrag()`** (line 2039) — mousemove handler for wall segment drag. Add room polygon propagation + envelope recompute after wall position update.
 
-2. **Endpoint drag** — the mousemove handler for drag handles (around line 1580). Room vertices propagate here too. Add envelope recompute after propagation.
+2. **`updateEndpointDrag()`** (line 1723) — mousemove handler for endpoint drag handles. Add room polygon propagation + envelope recompute after endpoint position update.
 
-3. **`commitWallDrag()`** (line 2117) and **`commitEndpointDrag()`** (line 1841) — the mouseup handlers. Add envelope recompute after room polygon changes are finalized, before `render()`.
+3. **`commitWallDrag()`** (line 2117) and **`commitEndpointDrag()`** (line 1841) — mouseup handlers. Refactor to use shared `propagateRoomPolygons` helper. Add envelope recompute after room propagation, before `render()`. Reset `envelopeDegraded`.
 
-The `render()` function (around line 831) already handles envelope rendering correctly — checks `plan.envelope`, draws the dark polygon, draws room cutouts on top. No changes needed.
+4. **`performUndo()`** (line 1811) and **`performRedo()`** (line 1826) — after applying inverse/forward changes, recompute envelope before `render()`. Undo of a wall drag restores wall and room positions but would leave the envelope stale without this.
 
-### 4. Server-side: auto-recompute in processChanges
+5. **`applyChangeLocal()`** (around line 640) — when `update_room` changes arrive from the server or undo pipeline, recompute envelope. Guard with a flag to avoid redundant recomputation when multiple `update_room` changes arrive in a batch — defer to after all changes in the batch are applied.
+
+The `render()` function (envelope rendering at line 831) already handles `plan.envelope` correctly — no changes needed there.
+
+### 5. Server-side: auto-recompute in processChanges
 
 In `src/sketch/high-level-changes.ts`, at the end of `processChanges`, after all high-level changes are applied:
 
@@ -128,7 +171,9 @@ if (hasGeometryChange && current.envelope) {
 
 This requires importing `computeEnvelope` from `compile-layout.ts`, which means exporting it (currently it's a module-private function).
 
-### 5. Remove set_envelope from user-facing operations
+Note: any new geometry-changing high-level operations added in the future must be added to this set.
+
+### 6. Remove set_envelope from user-facing operations
 
 **Remove from high-level change schema** (`src/sketch/types.ts`):
 - Remove the `set_envelope` variant from the `HighLevelChange` Zod union
@@ -143,7 +188,7 @@ This requires importing `computeEnvelope` from `compile-layout.ts`, which means 
 **Keep the low-level `set_envelope` change type** (`src/sketch/changes.ts`):
 - The low-level `set_envelope` in `applyChanges` stays. It's used internally for canvas bounds and could be useful for programmatic override. It's just not exposed as a high-level user operation anymore.
 
-### 6. Update tests
+### 7. Update tests
 
 - Remove `set_envelope` high-level change tests from `high-level-changes.test.ts`
 - Add test in `high-level-changes.test.ts` verifying that `processChanges` recomputes envelope after `resize_room`
@@ -165,7 +210,7 @@ Total: well under 1ms on modern hardware. The 16ms escape hatch triggers only fo
 
 | File | Change |
 |------|--------|
-| `src/sketcher/html.ts` | Add ~200 lines of ported envelope functions + recompute calls in drag handlers |
+| `src/sketcher/html.ts` | Add ~200 lines of ported envelope functions, add `propagateRoomPolygons` helper, recompute in drag/commit/undo/redo/applyChangeLocal |
 | `src/sketch/high-level-changes.ts` | Auto-recompute in `processChanges`, remove `compileSetEnvelope` |
 | `src/sketch/compile-layout.ts` | Export `computeEnvelope` |
 | `src/sketch/types.ts` | Remove `set_envelope` from `HighLevelChange` union |
