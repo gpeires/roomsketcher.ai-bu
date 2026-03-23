@@ -503,7 +503,12 @@ OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline ve
       },
       async ({ image, image_url, name, outline_epsilon }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
-        return handleAnalyzeImage({ image, image_url, outline_epsilon }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
+        const result = await handleAnalyzeImage({ image, image_url, outline_epsilon }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
+        // Store source image URL in session for side-by-side preview
+        if (image_url) {
+          this.setState({ ...(this.state ?? {}), sourceImageUrl: image_url });
+        }
+        return result;
       },
     );
 
@@ -515,11 +520,12 @@ OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline ve
 VISUAL FEEDBACK: After applying changes, call preview_sketch to verify the result visually. Look for regressions — moving a wall can break furniture placement or overlap with openings. If the change was cosmetic (renaming a room, adjusting a label), you can skip the preview. For structural changes (walls, openings, room boundaries), always preview. Use suggest_improvements for a deeper analysis when the user asks for feedback or when you spot issues you're unsure about.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
-          changes: z.array(ChangeSchema).describe('Array of changes to apply'),
+          changes: z.array(ChangeSchema).optional().describe('Low-level changes (by ID)'),
+          high_level_changes: z.array(z.any()).optional().describe('High-level changes (by room label) — surgical operations like resize_room, add_door, place_furniture'),
         },
       },
-      async ({ sketch_id, changes }) => {
-        return handleUpdateSketch(sketch_id, changes, this.buildCtx({
+      async ({ sketch_id, changes, high_level_changes }) => {
+        return handleUpdateSketch(sketch_id, changes || [], high_level_changes || [], this.buildCtx({
           broadcast: async (msg) => {
             const id = this.env.SKETCH_SYNC.idFromName(sketch_id);
             const obj = this.env.SKETCH_SYNC.get(id);
@@ -562,15 +568,16 @@ VISUAL FEEDBACK: After applying changes, call preview_sketch to verify the resul
     this.server.registerTool(
       'preview_sketch',
       {
-        description: `Get a visual PNG preview of a floor plan. Returns the rendered floor plan as a PNG image showing rooms, walls, furniture, dimensions, and labels.
+        description: `Get a visual PNG preview of a floor plan. Returns the rendered sketch as a PNG image. In Copy Mode (when a source image exists), also returns the source floor plan image for side-by-side comparison.
 
 PURPOSE: This is your eyes. Use it to verify what you built before presenting to the user. When reviewing the image, check for: (1) walls that overlap or leave gaps, (2) furniture placed outside rooms or overlapping each other, (3) doors/windows missing or in wrong positions, (4) rooms that are too small or oddly shaped, (5) labels that overlap or are unreadable. If you spot issues, fix them with update_sketch and preview again.`,
         inputSchema: {
           sketch_id: z.string().describe('The sketch ID'),
+          include_source: z.boolean().optional().default(true).describe('Include source floor plan image for side-by-side comparison'),
         },
       },
-      async ({ sketch_id }) => {
-        return handlePreviewSketch(sketch_id, this.buildCtx());
+      async ({ sketch_id, include_source }) => {
+        return handlePreviewSketch(sketch_id, this.buildCtx(), include_source);
       },
     );
 

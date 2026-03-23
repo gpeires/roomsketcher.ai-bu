@@ -6,6 +6,8 @@ import { floorPlanToSvg } from './svg';
 import { shoelaceArea, pointInPolygon, totalArea } from './geometry';
 import { loadSketch, saveSketch } from './persistence';
 import { applyChanges } from './changes';
+import { HighLevelChangeSchema, processChanges } from './high-level-changes';
+import type { HighLevelChange } from './high-level-changes';
 import { applyDefaults } from './defaults';
 import { pickCTA } from './cta-config';
 import { searchDesignKnowledge } from '../tools/knowledge';
@@ -84,6 +86,11 @@ export async function handleGenerateFloorPlan(
   floorPlan.metadata.created_at = new Date().toISOString();
   floorPlan.metadata.updated_at = floorPlan.metadata.created_at;
 
+  // Carry source image URL from session into plan metadata
+  if (ctx.state?.sourceImageUrl) {
+    floorPlan.metadata.source_image_url = ctx.state.sourceImageUrl;
+  }
+
   // Compute room areas
   for (const room of floorPlan.rooms) {
     if (room.area === undefined) {
@@ -161,24 +168,44 @@ export function handleOpenSketcher(
 export async function handleUpdateSketch(
   sketchId: string,
   changes: unknown[],
+  highLevelChanges: unknown[],
   ctx: ToolContext,
 ): Promise<ToolResult> {
-  // Validate changes
+  // Validate low-level changes
   const parsed: Change[] = [];
   for (const c of changes) {
     const result = ChangeSchema.safeParse(c);
     if (!result.success) {
-      return { content: [{ type: 'text' as const, text: `Invalid change: ${result.error.issues.map(i => i.message).join(', ')}` }] };
+      return { content: [{ type: 'text' as const, text: `Invalid change: ${result.error.issues.map(i => i.message).join(', ')}\n\nInput: ${JSON.stringify(c, null, 2)}` }] };
     }
     parsed.push(result.data);
+  }
+
+  // Validate high-level changes
+  const parsedHL: HighLevelChange[] = [];
+  for (const c of highLevelChanges) {
+    const result = HighLevelChangeSchema.safeParse(c);
+    if (!result.success) {
+      return { content: [{ type: 'text' as const, text: `Invalid high-level change: ${result.error.issues.map(i => i.message).join(', ')}\n\nInput: ${JSON.stringify(c, null, 2)}` }] };
+    }
+    parsedHL.push(result.data);
+  }
+
+  if (parsed.length === 0 && parsedHL.length === 0) {
+    return { content: [{ type: 'text' as const, text: 'No changes provided. Supply "changes" and/or "high_level_changes".' }] };
   }
 
   // Load plan
   const planResult = await resolvePlan(sketchId, ctx);
   if (isToolResult(planResult)) return planResult;
 
-  // Apply changes
-  const plan = applyChanges(planResult, parsed);
+  // Apply changes (high-level compiled first, then low-level)
+  let plan: FloorPlan;
+  try {
+    plan = processChanges(planResult, parsedHL, parsed);
+  } catch (err) {
+    return { content: [{ type: 'text' as const, text: `Change failed: ${(err as Error).message}` }] };
+  }
 
   // Persist + update state
   const svg = floorPlanToSvg(plan);
@@ -193,8 +220,9 @@ export async function handleUpdateSketch(
   // CTA
   const cta = fireCTA('first_edit', ctx);
 
+  const totalChanges = parsed.length + parsedHL.length;
   const lines = [
-    `Applied ${parsed.length} change(s) to **${plan.name}**`,
+    `Applied ${totalChanges} change(s) to **${plan.name}**`,
     `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
   ];
   if (cta) {
@@ -362,6 +390,7 @@ export async function handleExportSketch(
 export async function handlePreviewSketch(
   sketchId: string,
   ctx: ToolContext,
+  includeSource: boolean = true,
 ): Promise<ToolResult> {
   const result = await resolvePlan(sketchId, ctx);
   if (isToolResult(result)) return result;
@@ -376,18 +405,38 @@ export async function handlePreviewSketch(
   }
   const base64 = btoa(pngChunks.join(''));
 
-  const text = [
+  const summaryText = [
     `**${plan.name}** preview`,
     `${plan.walls.length} walls, ${plan.rooms.length} rooms, ${plan.furniture.length} furniture items`,
     `Total area: ${totalArea(plan.rooms).toFixed(1)} m\u00B2`,
   ].join('\n');
 
-  return {
-    content: [
-      { type: 'image' as const, data: base64, mimeType: 'image/png' as const },
-      { type: 'text' as const, text },
-    ],
-  };
+  const content: ContentBlock[] = [
+    { type: 'image' as const, data: base64, mimeType: 'image/png' as const },
+    { type: 'text' as const, text: `**Your sketch:** ${summaryText}` },
+  ];
+
+  // Source image for side-by-side comparison
+  if (includeSource && plan.metadata.source_image_url) {
+    try {
+      const resp = await fetch(plan.metadata.source_image_url);
+      if (resp.ok) {
+        const sourceBytes = new Uint8Array(await resp.arrayBuffer());
+        let sourceBase64 = '';
+        for (let i = 0; i < sourceBytes.length; i += 8192) {
+          sourceBase64 += String.fromCharCode(...sourceBytes.subarray(i, i + 8192));
+        }
+        sourceBase64 = btoa(sourceBase64);
+        const contentType = resp.headers.get('content-type') || 'image/png';
+        content.push({ type: 'image' as const, data: sourceBase64, mimeType: contentType as 'image/png' });
+        content.push({ type: 'text' as const, text: '**Source image** (compare against your sketch above)' });
+      }
+    } catch {
+      // Non-fatal — source image fetch failed, continue without it
+    }
+  }
+
+  return { content };
 }
 
 export async function handleAnalyzeImage(
