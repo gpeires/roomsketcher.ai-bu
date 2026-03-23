@@ -1,5 +1,5 @@
 import type { FloorPlan, Wall, Opening, Room } from './types';
-import { shoelaceArea, centroid, boundingBox, wallLength, wallQuad } from './geometry';
+import { shoelaceArea, centroid, boundingBox, wallLength } from './geometry';
 import { furnitureSymbol, escXml } from './furniture-symbols';
 
 function wallAngle(wall: Wall): number {
@@ -23,45 +23,11 @@ function renderWalls(walls: Wall[]): string {
         `stroke="#333" stroke-width="1" stroke-linecap="round" stroke-dasharray="6,4"` +
         ` data-id="${w.id}" data-type="wall"/>`;
     }
-    if (w.type === 'exterior') {
-      // Exterior walls rendered as thick filled polygons
-      const quad = wallQuad(w);
-      const points = quad.map(p => `${p.x},${p.y}`).join(' ');
-      return `<polygon points="${points}" fill="#333" stroke="#333" stroke-width="0.5" stroke-linejoin="round"` +
-        ` data-id="${w.id}" data-type="wall"/>`;
-    }
-    // Interior walls rendered as thin lines
+    // All walls (exterior + interior) rendered as thin lines
     return `<line x1="${w.start.x}" y1="${w.start.y}" x2="${w.end.x}" y2="${w.end.y}" ` +
       `stroke="#333" stroke-width="2" stroke-linecap="round"` +
       ` data-id="${w.id}" data-type="wall"/>`;
   }).join('\n    ');
-}
-
-function renderJunctions(walls: Wall[]): string {
-  // At shared exterior wall endpoints, render filled circles to close corner gaps
-  const exteriorWalls = walls.filter(w => w.type === 'exterior');
-  const junctions = new Map<string, { x: number; y: number; maxThickness: number }>();
-  const counts = new Map<string, number>();
-  for (const w of exteriorWalls) {
-    for (const p of [w.start, w.end]) {
-      const key = `${p.x},${p.y}`;
-      counts.set(key, (counts.get(key) || 0) + 1);
-      const existing = junctions.get(key);
-      if (existing) {
-        existing.maxThickness = Math.max(existing.maxThickness, w.thickness);
-      } else {
-        junctions.set(key, { x: p.x, y: p.y, maxThickness: w.thickness });
-      }
-    }
-  }
-  const parts: string[] = [];
-  for (const [key, info] of junctions) {
-    if ((counts.get(key) || 0) >= 2) {
-      const r = info.maxThickness / 2;
-      parts.push(`<circle cx="${info.x}" cy="${info.y}" r="${r}" fill="#333"/>`);
-    }
-  }
-  return parts.join('\n    ');
 }
 
 function renderOpening(wall: Wall, opening: Opening): string {
@@ -73,8 +39,7 @@ function renderOpening(wall: Wall, opening: Opening): string {
   const ox = wall.start.x + cos * opening.offset;
   const oy = wall.start.y + sin * opening.offset;
 
-  // Gap width: thick for exterior walls (cut through polygon), thin for interior (cover line)
-  const gapWidth = wall.type === 'exterior' ? wall.thickness + 2 : 6;
+  const gapWidth = 6;
 
   if (opening.type === 'door') {
     // Draw gap (white line over wall) + swing arc
@@ -95,16 +60,45 @@ function renderOpening(wall: Wall, opening: Opening): string {
   }
 
   if (opening.type === 'window') {
-    // Draw gap + parallel lines at wall faces
     const ex = ox + cos * opening.width;
     const ey = oy + sin * opening.width;
-    const offset = wall.type === 'exterior' ? wall.thickness / 2 : 2;
-    const nx = -sin * offset;
-    const ny = cos * offset;
+    const wOff = 2;
+    const nx = -sin * wOff;
+    const ny = cos * wOff;
     const oAttrs = ` data-id="${opening.id}" data-type="opening"`;
     const gap = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="white" stroke-width="${gapWidth}"${oAttrs}/>`;
-    const line1 = `<line x1="${ox + nx}" y1="${oy + ny}" x2="${ex + nx}" y2="${ey + ny}" stroke="#4FC3F7" stroke-width="2"${oAttrs}/>`;
-    const line2 = `<line x1="${ox - nx}" y1="${oy - ny}" x2="${ex - nx}" y2="${ey - ny}" stroke="#4FC3F7" stroke-width="2"${oAttrs}/>`;
+    const wColor = '#4FC3F7';
+    const wt = opening.properties.windowType || 'double';
+
+    if (wt === 'single') {
+      const line = `<line x1="${ox}" y1="${oy}" x2="${ex}" y2="${ey}" stroke="${wColor}" stroke-width="3"${oAttrs}/>`;
+      return [gap, line].join('\n    ');
+    }
+    if (wt === 'sliding') {
+      const mx = (ox + ex) / 2;
+      const my = (oy + ey) / 2;
+      const sx = cos * opening.width * 0.1;
+      const sy = sin * opening.width * 0.1;
+      const l1 = `<line x1="${ox}" y1="${oy}" x2="${mx + sx}" y2="${my + sy}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+      const l2 = `<line x1="${mx - sx}" y1="${my - sy}" x2="${ex}" y2="${ey}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+      return [gap, l1, l2].join('\n    ');
+    }
+    if (wt === 'bay') {
+      const bDepth = 8;
+      const bnx = -sin * bDepth;
+      const bny = cos * bDepth;
+      const t1x = ox + cos * opening.width * 0.25;
+      const t1y = oy + sin * opening.width * 0.25;
+      const t2x = ox + cos * opening.width * 0.75;
+      const t2y = oy + sin * opening.width * 0.75;
+      const s1 = `<line x1="${ox}" y1="${oy}" x2="${t1x + bnx}" y2="${t1y + bny}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+      const s2 = `<line x1="${t1x + bnx}" y1="${t1y + bny}" x2="${t2x + bnx}" y2="${t2y + bny}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+      const s3 = `<line x1="${t2x + bnx}" y1="${t2y + bny}" x2="${ex}" y2="${ey}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+      return [gap, s1, s2, s3].join('\n    ');
+    }
+    // Double (default): two parallel lines
+    const line1 = `<line x1="${ox + nx}" y1="${oy + ny}" x2="${ex + nx}" y2="${ey + ny}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
+    const line2 = `<line x1="${ox - nx}" y1="${oy - ny}" x2="${ex - nx}" y2="${ey - ny}" stroke="${wColor}" stroke-width="2"${oAttrs}/>`;
     return [gap, line1, line2].join('\n    ');
   }
 
@@ -239,7 +233,6 @@ export function floorPlanToSvg(plan: FloorPlan): string {
 
   const structureLayer = renderRooms(plan.rooms, plan.units);
   const wallLayer = renderWalls(plan.walls);
-  const junctionLayer = renderJunctions(plan.walls);
 
   return `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" style="background:#fff">
   <g id="structure">
@@ -247,7 +240,6 @@ export function floorPlanToSvg(plan: FloorPlan): string {
   </g>
   <g id="walls">
     ${wallLayer}
-    ${junctionLayer}
   </g>
   <g id="openings">
     ${renderOpenings(plan.walls)}

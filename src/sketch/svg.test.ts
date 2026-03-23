@@ -26,14 +26,14 @@ describe('floorPlanToSvg', () => {
     expect(svg).toContain('xmlns="http://www.w3.org/2000/svg"');
   });
 
-  it('renders exterior/interior walls as filled polygons', () => {
+  it('renders exterior walls as thin lines', () => {
     const svg = floorPlanToSvg(makePlan({
       walls: [
         { id: 'w1', start: { x: 0, y: 0 }, end: { x: 600, y: 0 }, thickness: 20, height: 250, type: 'exterior', openings: [] },
       ],
     }));
-    expect(svg).toContain('<polygon');
-    expect(svg).toContain('fill="#333"');
+    expect(svg).toContain('<line');
+    expect(svg).toContain('stroke="#333"');
     expect(svg).toContain('data-id="w1"');
   });
 

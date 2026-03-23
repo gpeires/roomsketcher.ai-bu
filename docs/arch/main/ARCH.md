@@ -80,7 +80,7 @@ A **hybrid AI + manual floor plan sketcher** on Cloudflare Workers with a comput
 ```bash
 # Worker (Cloudflare)
 npm run dev                    # Local dev server (wrangler dev)
-npm test                       # Run vitest tests (274 tests)
+npm test                       # Run vitest tests (267 tests)
 bash deploy.sh                 # Deploy to production (NEVER use wrangler deploy directly)
 
 # DB migrations
@@ -127,10 +127,10 @@ src/
 │   ├── resolve.ts              # Label→ID resolution layer (findRoomByLabel, findRoomWalls, findSharedWall, resolvePosition)
 │   ├── high-level-changes.ts   # 15 high-level change schemas + compiler → low-level changes + processChanges()
 │   ├── persistence.ts          # D1 load/save/cleanup for sketches
-│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (wall-based rendering)
+│   ├── svg.ts                  # floorPlanToSvg() — server-side SVG renderer (uniform thin lines, all window types: single/sliding/bay/double)
 │   ├── tools.ts                # 7 MCP tool handlers for sketch ops + CV analyze
 │   ├── furniture-catalog.ts    # Furniture item catalog with standard dimensions
-│   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~40 types, incl. dishwasher, washer-dryer, aliases)
+│   ├── furniture-symbols.ts    # Architectural top-down SVG symbol generators (~50+ types with short-name aliases for AI-generated types, incl. dishwasher, washer-dryer)
 │   ├── rasterize.ts            # svgToPng() via @cf-wasm/resvg (WASM) for preview_sketch
 │   ├── defaults.ts             # applyDefaults() + DEFAULTS config + ROOM_COLORS map
 │   ├── cta-config.ts           # CTA message templates, trigger config, A/B settings
@@ -308,11 +308,10 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 
 **Rendering pipeline (single path, as of 2026-03-23):**
 - Room polygons rendered with fill + labels inline
-- Exterior walls → `<polygon>` elements using `wallQuad()` (4-point quad). Fill `#333`. Directly selectable/draggable.
-- Interior walls → `<line>` elements with `stroke-width="2"`.
-- Divider walls → `<line>` elements with dashed stroke.
-- Junction circles at shared **exterior** wall endpoints fill corner gaps between perpendicular wall quads.
-- Openings: gap width = `thickness + 2` for exterior walls, `6` for interior walls.
+- ALL walls (exterior + interior) → `<line>` elements with `stroke-width="2"`. No visual distinction between exterior and interior walls.
+- Divider walls → `<line>` elements with dashed stroke, `stroke-width="1"`.
+- No junction circles — removed from both svg.ts and html.ts.
+- Openings: uniform `gapWidth = 6` for all wall types. Window offset: uniform `offset = 2` for all wall types.
 - Dimensions shown on all walls (exterior and interior).
 
 **Wall type classification** (`compile-layout.ts`):
@@ -323,16 +322,15 @@ Both renderers must stay in sync — they render the same FloorPlan data.
 **Element attributes:** All SVG elements have `data-id` (element ID) and `data-type` (`"wall"`, `"room"`, `"opening"`, `"furniture"`). These are required for:
 - Incremental updates via `update_sketch` (agent can target specific elements)
 - Browser sketcher selection/interaction (CSS selectors use `[data-type="wall"]`)
-- Drag handle logic (polygon walls update `points` attribute, divider lines update `x1/y1/x2/y2`)
+- Drag handle logic (all walls use `x1/y1/x2/y2` attribute updates during drag)
 
 **Geometry utility** (`src/sketch/geometry.ts`):
-- `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon
+- `wallQuad(wall)` → `[Point, Point, Point, Point]` — compute the 4-corner polygon (utility export, no longer used by renderers)
 - `boundingBox(walls)` — expands by max exterior wall thickness / 2
 - `polygonBoundingBox(polygon)` → `{ minX, minY, maxX, maxY }` — tight bounds on polygon vertices
 - `rasterizeToGrid(polygons, gridSize)` → boolean 2D array — rasterizes axis-aligned polygons via point-in-polygon at cell centers
 - `traceContour(grid, originX, originY, gridSize)` → `Point[]` — boundary-following on grid edges, produces axis-aligned polygon
 - `offsetAxisAlignedPolygon(polygon, distance)` → `Point[]` — outward expansion with winding-aware normal computation (handles both CW/CCW)
-- Browser renderer has vanilla JS equivalent: `wallQuadPoints(w)` → returns points string directly
 
 ### WebSocket Protocol
 
@@ -790,7 +788,7 @@ Multi-strategy merge improved room counts but quality issues remain:
 The generated sketches don't closely match source images:
 - **CV polygon geometry is real** but often irregular/noisy
 - **No spatial constraint solver** — rooms placed at raw coordinates without overlap resolution
-- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. Rendering uses wall-based approach: exterior walls as thick `<polygon>` quads, interior walls as thin `<line>` elements, junction circles at exterior wall intersections.
+- **Wall thickness passthrough and rendering** — `SimpleFloorPlanInput` accepts `wallThickness: { interior, exterior }` (populated from CV `wall_thickness.thin_cm`/`thick_cm`), and `compile-layout.ts` uses these values when provided (defaults: 20cm exterior / 10cm interior). CV data flows end-to-end via `cvToSketchInput()`. All walls rendered as uniform thin `<line>` elements (stroke-width 2). No exterior/interior visual distinction.
 - **Polygon wall generation** — `compile-layout.ts` now generates walls from polygon edges (via `getPolygonEdges()`) for rooms with >4 vertices, producing accurate L-shaped/irregular wall outlines instead of bounding-box rectangles
 
 ### Exterior perimeter irregularity (2026-03-22 finding)
@@ -974,7 +972,7 @@ Testing the full Copy Mode workflow in Claude Desktop (analyze → generate → 
 **What doesn't work well:**
 - **Spatial grid** — "Not really helpful. Large ASCII matrix with lots of RO labels and dots that was hard to parse." The JSON room coordinates from CV were far more actionable. Grid added noise without being as precise as JSON or as intuitive as the image.
 - **CV room labeling** — Mislabeled most rooms (generic "Room" or wrong labels from footer text like "2 Bedroom 2 Bathroom"). Claude had to override almost everything using what it could read from the image itself.
-- **Envelope system stripped (2026-03-23)** — The envelope rendering (unified structural mass polygon) was removed in favor of direct wall-based rendering. Exterior walls now render as thick `<polygon>` quads with junction circles at corners. All walls are directly selectable, draggable, and show dimensions. The envelope's editing limitations (read-only computed blob, snap-back bug on drag, invisible hit-target workarounds) made it unsuitable for an interactive editor.
+- **Envelope system stripped, wall rendering unified (2026-03-23)** — The envelope rendering (unified structural mass polygon) was removed, and wall rendering was simplified to uniform thin `<line>` elements (stroke-width 2) for all wall types. No more thick `<polygon>` quads for exterior walls, no junction circles. All walls are directly selectable, draggable, and show dimensions. The envelope's editing limitations (read-only computed blob, snap-back bug on drag, invisible hit-target workarounds) and the thick polygon rendering's complexity made them unsuitable for an interactive editor.
 
 ---
 
@@ -1087,7 +1085,7 @@ PHASE 2 — SURGICAL ITERATION:
 
 ### Surgical Iteration System (2026-03-23, IMPLEMENTED)
 
-**Status:** Fully implemented, deployed, and validated on 4 test images. 274 tests passing.
+**Status:** Fully implemented, deployed, and validated on 4 test images. 267 tests passing.
 
 Two new modules add label-based surgical editing on top of the existing 15 low-level change types:
 
@@ -1280,7 +1278,14 @@ Each template is a complete, valid FloorPlan JSON file including fully connected
 
 ### Architectural Symbols (`src/sketch/furniture-symbols.ts`)
 
-~40 proportional top-down SVG symbol generators, one per furniture type. Each function receives `(w, h)` and returns SVG path/shape elements normalized to the item's dimensions.
+~50+ proportional top-down SVG symbol generators (including short-name aliases), one per furniture type. Each function receives `(w, h)` and returns SVG path/shape elements normalized to the item's dimensions.
+
+**Short-name aliases** ensure AI-generated furniture types resolve to proper symbols instead of fallback rectangles:
+- `bed` → `bed-double`, `sofa` → `sofa-3seat`, `couch` → `sofa-3seat`
+- `sink` → `bath-sink`, `counter` → `kitchen-counter`
+- `table` → `simpleTable`, `dining_table` → `simpleTable`, `coffee_table` → `simpleTable`
+- `chair` → `dining-chair`, `tub` → `bathtub`
+- `oven` → `stove`, `cooktop` → `stove`
 
 | Category | Symbol Types |
 |----------|-------------|
@@ -1398,9 +1403,9 @@ toolCallCount: number
 `floorPlanToSvg(plan)` renders a complete SVG with:
 
 1. **Rooms** — colored polygons + XML-escaped label + area text at centroid
-2. **Furniture** — architectural top-down symbols via `<defs>` / `<use>`, with position/rotation transforms; falls back to labeled rectangles for unknown types
-3. **Walls** — lines with thickness by type (exterior 4px, interior 2px, divider 1px dashed)
-4. **Openings** — door swing arcs, window parallel lines, plain gaps
+2. **Furniture** — architectural top-down symbols via `<defs>` / `<use>`, with position/rotation transforms and short-name aliases (e.g., `bed` → `bed-double`, `sofa` → `sofa-3seat`, `sink` → `bath-sink`); falls back to labeled rectangles for truly unknown types
+3. **Walls** — all walls (exterior + interior) as `<line>` elements with stroke-width 2; dividers as dashed `<line>` with stroke-width 1
+4. **Openings** — door swing arcs, window rendering by type (single: thick line, sliding: overlapping panes, bay: angled segments, double: parallel lines), plain gaps
 5. **Dimensions** — wall length labels, perpendicular offset, angle-normalized (never upside-down)
 6. **Watermark** — "Powered by RoomSketcher"
 
@@ -1453,9 +1458,9 @@ The sketcher uses an `interactionMode` variable to manage input state:
 Drag handles (teal circles, r=6 desktop / r=14 mobile) appear at wall endpoints when a wall is selected. Dragging an endpoint:
 
 1. **Grab offset** — On drag start, stores the offset between cursor position and endpoint position. The endpoint stays under the finger/cursor throughout the drag (no jump on first frame).
-2. **Connected wall auto-follow** — `findConnectedEndpoints()` finds walls sharing a point (1cm threshold). Connected walls move together. Hold Alt/Option to detach and move independently.
+2. **Connected wall auto-follow** — `findConnectedEndpoints()` finds walls sharing a point (5cm threshold). Connected walls move together. Hold Alt/Option to detach and move independently.
 3. **Multi-snap system** — During drag, `computeSnap()` tests snap targets in priority order: endpoint (15px) > perpendicular (10px) > alignment (10px) > midpoint (10px) > grid (always). Snap guide lines render as an SVG overlay.
-4. **Direct DOM update** — During drag, only `setAttribute()` calls on wall `<line>` and handle `<circle>` elements (no full `render()`). WebSocket broadcast throttled to 10fps via `sendWsThrottled()`.
+4. **Direct DOM update** — During drag, only `setAttribute()` calls on wall `<line>` elements (`x1/y1/x2/y2`) and handle `<circle>` elements (no full `render()`). WebSocket broadcast throttled to 10fps via `sendWsThrottled()`.
 5. **Commit on mouseup** — `commitEndpointDrag()` builds change + inverse-change arrays for the undo stack, propagates room polygons, clears snap guides, and does a full `render()`.
 
 ### Wall-Segment Dragging
@@ -1689,7 +1694,7 @@ Cloudflare Workers cannot `fetch()` to bare IP addresses (error 1003). All exter
 | CV on Hetzner, not Workers | OpenCV + Tesseract need native binaries; can't run in V8 isolate |
 | DNS-only A record for CV | Workers can't fetch bare IPs (error 1003); domain name on non-standard port works fine |
 | Image upload to D1 | Simple storage for temporary images; no external blob service needed |
-| Direct DOM updates during drag | `setAttribute()` on wall lines + handle circles avoids full innerHTML rebuild; full `render()` only on mouseup for performance |
+| Direct DOM updates during drag | `setAttribute()` on wall `<line>` elements (`x1/y1/x2/y2`) + handle circles avoids full innerHTML rebuild; full `render()` only on mouseup for performance |
 | Grab offset on drag start | Stores cursor-to-endpoint offset at mousedown; prevents handle jump when drawer/sheet changes SVG layout |
 | Delta-based room polygon propagation | Applies drag delta to room vertices (not snap-to-endpoint) to preserve inward thickness offset |
 | Batch undo for multi-wall drags | Single endpoint drag that moves N connected walls + room polygons = 1 undo step |

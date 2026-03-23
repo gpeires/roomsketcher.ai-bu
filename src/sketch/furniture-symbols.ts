@@ -42,6 +42,19 @@ const SYMBOL_MAP: Record<string, (w: number, h: number) => string> = {
   'dishwasher': dishwasher,
   'bathroom-sink': bathSink,
   'washer-dryer': washerDryer,
+  // Short aliases from AI-generated floor plans
+  'bed': bedDouble,
+  'sofa': sofa3seat,
+  'couch': sofa3seat,
+  'sink': bathSink,
+  'counter': kitchenCounter,
+  'table': simpleTable,
+  'dining_table': simpleTable,
+  'coffee_table': simpleTable,
+  'chair': diningChair,
+  'tub': bathtub,
+  'oven': stove,
+  'cooktop': stove,
 }
 
 export const SYMBOL_TYPES: string[] = Object.keys(SYMBOL_MAP)
