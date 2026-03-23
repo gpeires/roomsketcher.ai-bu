@@ -8,7 +8,6 @@ outline, giving the AI agent a structured "visual" of the layout.
 """
 import logging
 import math
-import os
 import re
 
 import cv2
@@ -89,126 +88,135 @@ def _find_dimension_for_room(
     return best_dim
 
 
-def _sam2_mask(
-    image_url: str,
-    floor_plan_bbox: tuple[int, int, int, int],
-) -> np.ndarray | None:
-    """Call Replicate SAM2 auto-segmenter to get a building mask.
 
-    SAM2 returns multiple mask images sorted by predicted IoU. We download
-    each, threshold to binary, and pick the one with the best overlap with
-    the floor plan bounding box — the building footprint mask.
+def _remove_collinear(points: list[dict]) -> list[dict]:
+    """Remove collinear vertices from a polygon (points on the same line as neighbors)."""
+    if len(points) <= 3:
+        return points
+    cleaned = []
+    n = len(points)
+    for i in range(n):
+        p0 = points[(i - 1) % n]
+        p1 = points[i]
+        p2 = points[(i + 1) % n]
+        # Cross product — zero means collinear
+        cross = (p1["x"] - p0["x"]) * (p2["y"] - p0["y"]) - (p1["y"] - p0["y"]) * (p2["x"] - p0["x"])
+        if abs(cross) > 1:  # 1 cm² tolerance
+            cleaned.append(p1)
+    return cleaned if len(cleaned) >= 3 else points
 
-    Returns a binary mask (255=building, 0=background) or None on failure.
+
+def _regularize_orthogonal(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Snap polygon edges to the nearest 90° angle and merge collinear segments.
+
+    Floor plan buildings are almost always rectilinear (all edges at 0° or 90°).
+    This finds the dominant orientation, snaps each edge to it, recomputes
+    intersection points, and merges any resulting short/collinear edges.
     """
-    api_token = os.environ.get("REPLICATE_API_TOKEN")
-    if not api_token:
-        log.warning("SAM2: REPLICATE_API_TOKEN not set, skipping")
-        return None
+    if len(points) < 3:
+        return points
 
-    try:
-        import replicate
-    except ImportError:
-        log.warning("SAM2: replicate package not installed, skipping")
-        return None
+    # Step 1: Find dominant angle from longest edges
+    edges = []
+    n = len(points)
+    for i in range(n):
+        j = (i + 1) % n
+        dx = points[j][0] - points[i][0]
+        dy = points[j][1] - points[i][1]
+        length = math.hypot(dx, dy)
+        if length > 0:
+            angle = math.atan2(dy, dx)
+            edges.append((i, j, dx, dy, length, angle))
 
-    fx, fy, fw, fh = floor_plan_bbox
-    center_x = fx + fw // 2
-    center_y = fy + fh // 2
+    if not edges:
+        return points
 
-    log.info("SAM2: calling auto-segmenter for bbox (%d,%d,%d,%d), center (%d,%d)",
-             fx, fy, fw, fh, center_x, center_y)
+    # Weight angles by edge length, find dominant direction (mod 90°)
+    # Normalize all angles to [0, π/2) since we only care about orientation
+    weighted_angles = []
+    total_weight = 0
+    for _, _, _, _, length, angle in edges:
+        norm_angle = angle % (math.pi / 2)
+        weighted_angles.append((norm_angle, length))
+        total_weight += length
 
-    try:
-        import httpx
+    # Weighted circular mean in [0, π/2)
+    sin_sum = sum(w * math.sin(2 * a) for a, w in weighted_angles)
+    cos_sum = sum(w * math.cos(2 * a) for a, w in weighted_angles)
+    dominant = math.atan2(sin_sum, cos_sum) / 2
+    if dominant < 0:
+        dominant += math.pi / 2
 
-        output = replicate.run(
-            "lucataco/segment-anything-2",
-            input={
-                "image": image_url,
-                "points_per_side": 32,
-                "pred_iou_thresh": 0.7,
-                "mask_limit": 10,
-            },
+    # Step 2: Snap each edge to nearest multiple of 90° from dominant
+    snapped_dirs = []  # (dx_unit, dy_unit) for each edge
+    for _, _, dx, dy, length, angle in edges:
+        # Find nearest 90° multiple of dominant
+        offset = angle - dominant
+        # Normalize to [-π, π]
+        offset = (offset + math.pi) % (2 * math.pi) - math.pi
+        # Snap to nearest 90°
+        snapped_offset = round(offset / (math.pi / 2)) * (math.pi / 2)
+        snapped_angle = dominant + snapped_offset
+        snapped_dirs.append((math.cos(snapped_angle), math.sin(snapped_angle)))
+
+    # Step 3: Recompute vertices as intersections of consecutive snapped edges
+    # Each edge is a ray from its original midpoint in the snapped direction
+    new_points = []
+    for i in range(n):
+        # Edge i: from points[i] to points[(i+1)%n], direction snapped_dirs[i]
+        # Edge i-1: direction snapped_dirs[(i-1)%n]
+        # Vertex i = intersection of edge (i-1) and edge i
+        prev = (i - 1) % len(edges)
+        curr = i
+
+        # Edge prev passes through midpoint of original edge prev
+        p_mid = (
+            (points[edges[prev][0]][0] + points[edges[prev][1]][0]) / 2,
+            (points[edges[prev][0]][1] + points[edges[prev][1]][1]) / 2,
         )
+        d_prev = snapped_dirs[prev]
 
-        # output is a list of mask image URLs, sorted by predicted_iou
-        mask_urls = list(output) if not isinstance(output, list) else output
-        log.info("SAM2: received %d mask URLs", len(mask_urls))
+        # Edge curr passes through midpoint of original edge curr
+        c_mid = (
+            (points[edges[curr][0]][0] + points[edges[curr][1]][0]) / 2,
+            (points[edges[curr][0]][1] + points[edges[curr][1]][1]) / 2,
+        )
+        d_curr = snapped_dirs[curr]
 
-        if not mask_urls:
-            log.warning("SAM2: no masks returned")
-            return None
+        # Intersection of two lines: p_mid + t*d_prev = c_mid + s*d_curr
+        det = d_prev[0] * d_curr[1] - d_prev[1] * d_curr[0]
+        if abs(det) < 1e-10:
+            # Parallel edges — keep original point
+            new_points.append(points[i])
+            continue
 
-        # Score each mask: prefer large masks that cover the floor plan center
-        best_mask = None
-        best_score = -1
+        dx = c_mid[0] - p_mid[0]
+        dy = c_mid[1] - p_mid[1]
+        t = (dx * d_curr[1] - dy * d_curr[0]) / det
+        ix = p_mid[0] + t * d_prev[0]
+        iy = p_mid[1] + t * d_prev[1]
+        new_points.append((ix, iy))
 
-        for i, url in enumerate(mask_urls):
-            try:
-                resp = httpx.get(str(url), follow_redirects=True, timeout=30.0)
-                resp.raise_for_status()
-                arr = np.frombuffer(resp.content, dtype=np.uint8)
-                mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-                if mask is None:
-                    continue
+    # Step 4: Merge collinear/near-duplicate vertices
+    merged = [new_points[0]]
+    for i in range(1, len(new_points)):
+        if math.hypot(new_points[i][0] - merged[-1][0],
+                      new_points[i][1] - merged[-1][1]) > 1.0:  # > 1cm apart
+            merged.append(new_points[i])
 
-                _, binary_mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
-                total_px = binary_mask.shape[0] * binary_mask.shape[1]
-                mask_area = cv2.countNonZero(binary_mask)
+    # Remove collinear points (3 consecutive points on same line)
+    cleaned = []
+    nm = len(merged)
+    for i in range(nm):
+        p0 = merged[(i - 1) % nm]
+        p1 = merged[i]
+        p2 = merged[(i + 1) % nm]
+        # Cross product to check collinearity
+        cross = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0])
+        if abs(cross) > 10.0:  # not collinear (threshold in cm²)
+            cleaned.append(p1)
 
-                # Check if mask covers the floor plan center
-                covers_center = (
-                    0 <= center_y < binary_mask.shape[0]
-                    and 0 <= center_x < binary_mask.shape[1]
-                    and binary_mask[center_y, center_x] > 0
-                )
-
-                # Score: coverage of floor plan bbox area, with bonus for covering center
-                # Crop mask to floor plan bbox and measure overlap
-                y0, y1 = max(0, fy), min(binary_mask.shape[0], fy + fh)
-                x0, x1 = max(0, fx), min(binary_mask.shape[1], fx + fw)
-                if y1 > y0 and x1 > x0:
-                    bbox_region = binary_mask[y0:y1, x0:x1]
-                    bbox_coverage = cv2.countNonZero(bbox_region) / (bbox_region.shape[0] * bbox_region.shape[1])
-                else:
-                    bbox_coverage = 0
-
-                # Penalize masks that are too large (nearly full image — background)
-                coverage = mask_area / total_px
-                if coverage > 0.9:
-                    bbox_coverage *= 0.1  # nearly full image, likely background
-
-                score = bbox_coverage * (2.0 if covers_center else 0.5)
-
-                log.info("SAM2: mask %d — coverage=%.1f%%, bbox_coverage=%.1f%%, center=%s, score=%.3f",
-                         i, coverage * 100, bbox_coverage * 100, covers_center, score)
-
-                if score > best_score:
-                    best_score = score
-                    best_mask = binary_mask
-
-            except Exception as e:
-                log.warning("SAM2: failed to fetch mask %d: %s", i, e)
-                continue
-
-        if best_mask is None:
-            log.warning("SAM2: no valid masks after scoring")
-            return None
-
-        nonzero = cv2.countNonZero(best_mask)
-        total = best_mask.shape[0] * best_mask.shape[1]
-        log.info("SAM2: selected mask — coverage=%.1f%%, score=%.3f", nonzero / total * 100, best_score)
-
-        if nonzero < total * 0.05:
-            log.warning("SAM2: best mask too small (%.1f%%), discarding", nonzero / total * 100)
-            return None
-
-        return best_mask
-
-    except Exception as e:
-        log.warning("SAM2: call failed: %s", e)
-        return None
+    return cleaned if len(cleaned) >= 3 else merged
 
 
 def _contour_to_outline(
@@ -217,6 +225,7 @@ def _contour_to_outline(
     snap_cm: int,
     crop_offset: tuple[int, int] = (0, 0),
     min_area_ratio: float = 0.05,
+    epsilon_ratio: float = 0.015,
 ) -> list[dict] | None:
     """Convert a binary mask to a simplified outline polygon in cm.
 
@@ -236,7 +245,7 @@ def _contour_to_outline(
         return None
 
     perimeter = cv2.arcLength(largest, True)
-    epsilon = 0.003 * perimeter
+    epsilon = epsilon_ratio * perimeter
     simplified = cv2.approxPolyDP(largest, epsilon, True)
 
     crop_x, crop_y = crop_offset
@@ -246,6 +255,9 @@ def _contour_to_outline(
         x_cm = (x_px + crop_x) * scale_cm_per_px
         y_cm = (y_px + crop_y) * scale_cm_per_px
         raw_points.append((x_cm, y_cm))
+
+    # Orthogonal regularization: snap edges to nearest 90° angle
+    raw_points = _regularize_orthogonal(raw_points)
 
     min_x = min(p[0] for p in raw_points)
     min_y = min(p[1] for p in raw_points)
@@ -260,7 +272,11 @@ def _contour_to_outline(
     if len(outline_cm) > 2 and outline_cm[0] == outline_cm[-1]:
         outline_cm.pop()
 
-    log.info("Outline: %d vertices, area=%.0f px²", len(outline_cm), area)
+    # Remove collinear points created by grid snapping
+    outline_cm = _remove_collinear(outline_cm)
+
+    log.info("Outline: %d vertices (from %d raw), area=%.0f px²",
+             len(outline_cm), len(simplified), area)
     return outline_cm
 
 
@@ -269,7 +285,7 @@ def extract_outline(
     scale_cm_per_px: float,
     floor_plan_bbox: tuple[int, int, int, int] | None = None,
     snap_cm: int = 10,
-    image_url: str | None = None,
+    epsilon_override: float | None = None,
 ) -> list[dict] | None:
     """Extract the building perimeter polygon from a binary wall mask.
 
@@ -293,16 +309,6 @@ def extract_outline(
         with origin normalized to (0,0), or None if extraction fails.
     """
     h, w = binary.shape
-
-    # Try SAM2 first if we have an image URL and bbox
-    if image_url and floor_plan_bbox:
-        sam2_mask = _sam2_mask(image_url, floor_plan_bbox)
-        if sam2_mask is not None:
-            sam2_outline = _contour_to_outline(sam2_mask, scale_cm_per_px, snap_cm, crop_offset=(0, 0))
-            if sam2_outline:
-                log.info("SAM2 outline: %d vertices (using SAM2 result)", len(sam2_outline))
-                return sam2_outline
-            log.warning("SAM2: mask produced no valid outline, falling back to OpenCV")
 
     # Crop to floor plan bbox if provided (removes footer, logos, compass)
     crop_x, crop_y = 0, 0
@@ -345,7 +351,10 @@ def extract_outline(
     building = cv2.bitwise_or(interior, sealed)
 
     # Step 3–5: Find contour, simplify, convert to cm
-    return _contour_to_outline(building, scale_cm_per_px, snap_cm, crop_offset=(crop_x, crop_y))
+    kwargs = {"crop_offset": (crop_x, crop_y)}
+    if epsilon_override is not None:
+        kwargs["epsilon_ratio"] = epsilon_override
+    return _contour_to_outline(building, scale_cm_per_px, snap_cm, **kwargs)
 
 
 def _make_room_abbreviation(label: str, used: set[str]) -> str:

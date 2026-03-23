@@ -391,7 +391,7 @@ export async function handlePreviewSketch(
 }
 
 export async function handleAnalyzeImage(
-  input: { image?: string; image_url?: string },
+  input: { image?: string; image_url?: string; outline_epsilon?: number },
   name: string,
   cvServiceUrl: string,
   _ai?: Ai,
@@ -426,9 +426,10 @@ export async function handleAnalyzeImage(
   }
 
   // CV-only analysis — Claude interprets the image directly
-  const body: Record<string, string> = { name };
+  const body: Record<string, string | number> = { name };
   if (input.image) body.image = input.image;
   else body.image_url = input.image_url!;
+  if (input.outline_epsilon != null) body.outline_epsilon = input.outline_epsilon;
 
   const resp = await fetch(`${cvServiceUrl}/analyze`, {
     method: 'POST',

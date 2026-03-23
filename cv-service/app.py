@@ -17,6 +17,7 @@ class AnalyzeRequest(BaseModel):
     image: str | None = Field(default=None, description="Base64-encoded PNG/JPG image")
     image_url: str | None = Field(default=None, description="URL to fetch the image from")
     name: str = Field(default="Extracted Floor Plan")
+    outline_epsilon: float | None = Field(default=None, description="Override approxPolyDP epsilon ratio (default 0.015, higher=fewer vertices)")
 
 class PreprocessingMeta(BaseModel):
     strategy_used: str
@@ -124,7 +125,7 @@ def analyze(req: AnalyzeRequest) -> AnalyzeResponse:
     if image is None:
         raise HTTPException(400, "Could not decode image (not a valid PNG/JPG)")
     try:
-        result = analyze_image(image, name=req.name, image_url=req.image_url)
+        result = analyze_image(image, name=req.name, outline_epsilon=req.outline_epsilon)
     except Exception as e:
         log.exception("CV pipeline failed")
         raise HTTPException(500, f"Analysis failed: {e}")

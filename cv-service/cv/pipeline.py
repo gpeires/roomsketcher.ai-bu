@@ -33,7 +33,7 @@ def analyze_floor_plan(image_path: str, name: str = "Extracted Floor Plan") -> d
     return analyze_image(image, name=name)
 
 
-def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan", image_url: str | None = None) -> dict:
+def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan", outline_epsilon: float | None = None) -> dict:
     """Run all strategies, detect rooms per strategy, cluster, run pipeline once."""
     from cv.strategies import STRATEGIES, StrategyResult
 
@@ -73,7 +73,7 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan", image_u
 
     if not strategy_masks:
         log.error("All strategies failed, falling back to raw pipeline")
-        return _run_pipeline(image, name)
+        return _run_pipeline(image, name, outline_epsilon=outline_epsilon)
 
     # Step 2: Detect rooms per strategy (parallel)
     def _detect_rooms_for(entry):
@@ -123,10 +123,10 @@ def analyze_image(image: np.ndarray, name: str = "Extracted Floor Plan", image_u
 
     if not clustered:
         log.warning("Room clustering produced 0 rooms, falling back to raw pipeline")
-        return _run_pipeline(image, name, image_url=image_url)
+        return _run_pipeline(image, name, outline_epsilon=outline_epsilon)
 
     # Step 5: Run full pipeline on anchor mask with clustered rooms
-    result = _run_pipeline(image, name, binary_override=anchor_mask, rooms_override=clustered, image_url=image_url)
+    result = _run_pipeline(image, name, binary_override=anchor_mask, rooms_override=clustered, outline_epsilon=outline_epsilon)
 
     # Step 6: Attach confidence/found_by to output rooms
     for i, room in enumerate(result.get("rooms", [])):
@@ -187,7 +187,7 @@ def _run_pipeline(
     name: str,
     binary_override: np.ndarray | None = None,
     rooms_override: list[dict] | None = None,
-    image_url: str | None = None,
+    outline_epsilon: float | None = None,
 ) -> dict:
     """Run the full CV pipeline on a single image.
 
@@ -226,7 +226,7 @@ def _run_pipeline(
     }
 
     # Extract building outline and spatial grid
-    outline = extract_outline(binary, scale, floor_plan_bbox=fp_bbox, image_url=image_url)
+    outline = extract_outline(binary, scale, floor_plan_bbox=fp_bbox, epsilon_override=outline_epsilon)
     if outline:
         result["outline"] = outline
     grid = build_spatial_grid(rooms, text_regions, scale, fp_bbox)

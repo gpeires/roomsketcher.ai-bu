@@ -348,6 +348,8 @@ PHASE 1 — GET THE LAYOUT VISIBLE FAST:
 
 Step 1: ANALYZE — Call analyze_floor_plan_image with the image URL. Use the CV output as your source of truth for room positions and sizes. Fix obvious label errors and merge open-plan rooms.
 
+Step 1b: EVALUATE OUTLINE — Compare the building outline vertices to the source image. If the vertex count is too high for the building shape (rectangle should be 4, L-shape should be 6), re-call analyze_floor_plan_image with a higher outline_epsilon (0.03 or 0.04) to get a cleaner outline. This is your feedback loop — you are the intelligence that evaluates and refines.
+
 Step 2: GENERATE ROOMS ONLY — Call generate_floor_plan with rooms from the CV output. Add basic exterior doors/windows you can see in the image but do NOT add furniture yet. Get the skeleton built.
 
 Step 3: PREVIEW IMMEDIATELY — Call preview_sketch right after generating. You are BLIND until you see the rendered output. Look at the preview and compare it to the source image. Check: are rooms the right size and position? Are walls where they should be? Is anything overlapping or missing?
@@ -489,16 +491,19 @@ TRIGGER RULES — act IMMEDIATELY based on what the user gave you:
    3. Copy the URL it gives you and paste it back here"
    Then STOP and wait for the URL. Do NOT proceed to generate_floor_plan without CV output.
 
-Do NOT attempt to pass images as base64 — always use the upload page to get a URL.`,
+Do NOT attempt to pass images as base64 — always use the upload page to get a URL.
+
+OUTLINE FEEDBACK LOOP: After the first analysis, compare the building outline vertices to what you see in the image. If the outline has too many vertices for the building shape (e.g., 14 vertices for a simple rectangle that should have 4-6), re-call this tool with a higher outline_epsilon (try 0.03, then 0.04). The building shape tells you the expected vertex count: rectangle=4, L-shape=6, T-shape=8, U-shape=8. Keep the outline_epsilon below 0.05 to avoid over-simplification.`,
         inputSchema: {
           image: z.string().optional().describe('Base64-encoded floor plan image (PNG or JPG) — only for small images; prefer image_url via /upload'),
           image_url: z.string().optional().describe('URL to a floor plan image — the server will fetch it'),
           name: z.string().optional().describe('Name for the floor plan'),
+          outline_epsilon: z.number().optional().describe('Override outline simplification aggressiveness (default 0.015, higher=fewer vertices). Use this in a feedback loop: if the first analysis produces too many outline vertices, re-call with a higher epsilon (e.g. 0.03-0.05) to simplify.'),
         },
       },
-      async ({ image, image_url, name }) => {
+      async ({ image, image_url, name, outline_epsilon }) => {
         const cvUrl = this.env.CV_SERVICE_URL || 'http://localhost:8100';
-        return handleAnalyzeImage({ image, image_url }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
+        return handleAnalyzeImage({ image, image_url, outline_epsilon }, name || 'Extracted Floor Plan', cvUrl, this.env.AI, this.env.DB, this.getWorkerUrl());
       },
     );
 
