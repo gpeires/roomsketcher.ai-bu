@@ -1026,7 +1026,7 @@ export default {
       const loaded = await loadSketch(env.DB, sketchId);
       if (!loaded) return Response.json({ error: 'Not found' }, { status: 404 });
 
-      const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
+      const svg = floorPlanToSvg(loaded.plan);
       const png = await svgToPng(svg, 1200);
       return new Response(png, {
         headers: {
@@ -1043,7 +1043,7 @@ export default {
       const loaded = await loadSketch(env.DB, sketchId);
       if (!loaded) return Response.json({ error: 'Not found' }, { status: 404 });
 
-      const svg = loaded.svg ?? floorPlanToSvg(loaded.plan);
+      const svg = floorPlanToSvg(loaded.plan);
       return new Response(svg, {
         headers: {
           'Content-Type': 'image/svg+xml',
